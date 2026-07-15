@@ -62,18 +62,24 @@ everything builds without full Xcode.
 
 ```
 acta/
-  Package.swift                     # Acta executable + ActaKit + ActaTestRunner + ActaTests; no external deps
+  Package.swift                     # Acta executable + ActaKit + ActaRuntime + ActaTestRunner + ActaTests; no external deps
   Sources/Acta/
-    ActaApp.swift                   # @main, MenuBarExtra, state idle/recording/error/recovered
+    ActaApp.swift                   # @main, MenuBarExtra, state idle/recording/error/recovered — the ONLY file here
+  Sources/ActaRuntime/              # the pipeline (a library: SwiftPM cannot import an executable target)
+    RecordingController.swift       # UI-facing observable state, start/stop wiring
+    RecordingSession.swift          # one recording's lifecycle: marker, capture, assembly, wake lock
     AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush
     SegmentWriter.swift             # segment rotation (~10-15 s), finalise each one
+    SegmentAssembler.swift          # ffmpeg concat/mix
     RecoveryManager.swift           # on launch: find session.json status=recording → assemble segments
     SelfCheck.swift                 # verify data flow at start + watchdog + auto-heal
     Permissions.swift               # Screen Recording + Microphone
     MeetingStore.swift              # folders, session.json, info.md front-matter, recordings list
     Settings.swift                  # archive path, tracks, segment length, segment cleanup
+    BuildFlavor.swift               # stable/dev flavor, log subsystem, build revision
     SourceDetector.swift            # (nice-to-have) title suggestion from running apps
-  Sources/ActaKit/                  # pure, unit-testable logic (no I/O)
+  Sources/ActaKit/                  # pure, unit-testable logic (no I/O); exceptions: SegmentRepair, DisplayWakeLock
+  Sources/ActaTestRunner/           # where tests actually live (swift-testing @Test)
   Resources/{Info.plist, Acta.entitlements}
   Scripts/{bundle.sh, run.sh, lint.sh, test.sh}
   CLAUDE.md, SPEC.md, .swiftlint.yml

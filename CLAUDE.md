@@ -53,10 +53,12 @@ The conversation with the user may be in Russian; the repository must not be.
 ## Project structure
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`. Anything worth testing goes here. Two deliberate exceptions, both there because
-  under CLT-only a test can only reach `ActaKit`: `SegmentRepair` touches the FS, but it is the code
-  that rescues crashed audio; `DisplayWakeLock` touches `ProcessInfo`, and "was the assertion really
-  taken, and really released" is answerable only by asking the OS (`pmset -g assertions`).
+  `SessionManifest`. Anything worth testing goes here. Two deliberate exceptions, both **predating
+  `ActaRuntime`**, when a test could reach nothing else: `SegmentRepair` touches the FS, but it is the
+  code that rescues crashed audio; `DisplayWakeLock` touches `ProcessInfo`, and "was the assertion
+  really taken, and really released" is answerable only by asking the OS (`pmset -g assertions`).
+  That rationale has expired — since `ActaRuntime` exists, new I/O-touching code that needs a test
+  belongs there, not here. Do not cite these two as precedent for adding I/O to `ActaKit`.
 - `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
   `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
   `MeetingStore` — `SCStream`, FS and process I/O. Kept thin; decisions are delegated to ActaKit.
@@ -91,7 +93,17 @@ ActaRuntime, and its test in ActaTestRunner.
 - **If stuck on a SwiftUI/ScreenCaptureKit problem after several attempts — check the official docs
   (links in the skills) or ask Codex for a second opinion.**
 - Tests: cover **pure logic** (slug/front-matter, `ffmpeg` arguments, segment-selection logic for
-  recovery, the "data is not flowing" detector). Audio/UI runtime is tested manually.
+  recovery, the "data is not flowing" detector). Live audio capture and UI are still tested manually,
+  but "only `ActaKit` is reachable" is no longer true: since Task 11 the runner imports `ActaRuntime`
+  and constructs `RecordingController`/`RecordingSession`/`AudioRecorder`/`RecoveryManager` for real
+  (construction only — nothing starts capture; the fakes and seams are backlog work).
+- A test may shell out to a system tool (`/usr/bin/pmset`) when only the OS can answer the question.
+  Two rules learned the hard way: **scope the query to the runner's own pid** — `pmset -g assertions`
+  is machine-wide, so a real recording would otherwise fail the suite — and mark such a suite
+  `@Suite(.serialized)`, since the state is process-global and swift-testing parallelizes by default.
+  Check what such a test can actually observe: a `beginActivity` token ends its activity when it
+  deallocates, so `pmset` cannot distinguish a proper release from a dropped token — that half needs
+  an injected seam that counts calls.
 
 ## Not verified automatically (needs a human)
 - Granting TCC permissions (Screen Recording, Microphone) — only via System Settings.

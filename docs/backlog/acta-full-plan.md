@@ -124,8 +124,8 @@ seam, fake process runner); (d) the process harness (child modes, readiness prot
 **Fix specifications at the task that first invalidates them**, not "eventually". The agent is told to
 read `SPEC.md` and `CLAUDE.md` before every task, so a stale statement misleads every task until it is
 fixed. `SPEC.md` still claims a crash loses at most the last unfinalised segment (the repaired tail
-disproves it) and still describes the pre-`ActaRuntime` layout. `CLAUDE.md` still says runtime/crash
-behaviour is manual-only and that testable decisions belong in `ActaKit`.
+disproves it). ✅ The `ActaRuntime` staleness is fixed: `SPEC.md` §5 now shows the real layout, and
+`CLAUDE.md` no longer claims a test can reach only `ActaKit`.
 
 **Smaller, all real:**
 - Generation-tagged outputs conflict with the fixed public names `system.wav`/`mic.wav`. Decide that
@@ -189,15 +189,17 @@ is marked `manual test (skipped - not automatable)`. So the autonomous loop veri
 and that the thing compiles, and nothing about the job the app exists to do. Three external review
 rounds all named this the number one risk.
 
-🪤 **Blocker, verified in the source.** `ActaTestRunner` depends only on `ActaKit`, while
-`RecordingController`, `RecordingSession`, `RecoveryManager`, `SegmentWriter`, `SegmentAssembler` and
-`MeetingStore` all live in the **`Acta` executable target** — and SwiftPM **cannot import an
-executable target**. As written, a real harness is unbuildable. Faced with that, an agent will do one
-of three things, and all three defeat the task: test only `ActaKit`, duplicate the orchestration in a
-test-only harness, or build a parallel "test coordinator" the UI never calls. So the extraction comes
-first and is not optional.
+✅ **Blocker cleared** (`ActaRuntime`, Task 11 of `docs/plans/acta.md`, 2026-07-15). It used to read:
+*`ActaTestRunner` depends only on `ActaKit`, while `RecordingController`, `RecordingSession`,
+`RecoveryManager`, `SegmentWriter`, `SegmentAssembler` and `MeetingStore` all live in the `Acta`
+executable target — and SwiftPM cannot import an executable target, so a real harness is
+unbuildable.* The pipeline now lives in the importable `ActaRuntime` library, which both `Acta` and
+`ActaTestRunner` depend on, and `LinkSmokeTests` constructs those types for real. **Do not re-plan the
+extraction** — what remains below is the `CaptureSource` seam and the harness. The original warning
+still applies to those: test only `ActaKit`, duplicate the orchestration in a test-only harness, or
+build a parallel "test coordinator" the UI never calls, and the task is defeated.
 
-- [ ] **Extract `ActaRuntime`** — an importable library target depending on `ActaKit`. It owns the non-UI production pipeline: lifecycle coordinator, recorder adapter, segment writers, manifest store, assembler, recovery scanner, filesystem/process implementations, and the UI-facing observable state. **Both** `Acta` and `ActaTestRunner` depend on it. The `Acta` executable keeps only SwiftUI/AppKit wiring and the real ScreenCaptureKit adapter. **No production source may be copied or reimplemented in the test runner**
+- [x] **Extract `ActaRuntime`** — an importable library target depending on `ActaKit`. It owns the non-UI production pipeline: lifecycle coordinator, recorder adapter, segment writers, manifest store, assembler, recovery scanner, filesystem/process implementations, and the UI-facing observable state. **Both** `Acta` and `ActaTestRunner` depend on it. The `Acta` executable keeps only SwiftUI/AppKit wiring and the real ScreenCaptureKit adapter. **No production source may be copied or reimplemented in the test runner** (done in Task 11; the `CaptureSource` seam was deliberately parked and stays below)
 - [ ] `CaptureSource` protocol seam under the recorder yielding (track, buffer, timestamp). Real implementation = ScreenCaptureKit, living in `Acta`; **nothing in `ActaRuntime` may know about `SCStream`**
 - [ ] `FakeCaptureSource`: **deterministic** synthetic PCM **per track independently**, with control over level (silence / tone / speech-like), **format** (interleaved and non-interleaved, integer and float, differing channel counts), **stalls**, **errors**, and pacing driven by the injected scheduler
 - [ ] **One injected time service, two concepts**: a **monotonic** clock for scheduling, deadlines and `advance(by:)`; and **wall time** for `started_at`, titles and metadata. Do not pretend wall time does not exist — ban raw `Date()` for *scheduling* above the seam, not for metadata. File mtimes remain filesystem observations, not scheduler time

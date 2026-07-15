@@ -12,11 +12,6 @@ public struct MeetingStore {
     public struct Recording {
         public var directory: URL
         public var manifest: SessionManifest?
-
-        public init(directory: URL, manifest: SessionManifest?) {
-            self.directory = directory
-            self.manifest = manifest
-        }
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "MeetingStore")
@@ -26,13 +21,14 @@ public struct MeetingStore {
     /// The root of the recordings archive (`~/Acta/` by default).
     public let archiveRoot: URL
 
-    public init(archiveRoot: URL = MeetingStore.defaultArchiveRoot()) {
+    /// `archiveRoot` is required on purpose: it used to default to `~/Acta/`, hardcoded, which
+    /// bypassed `BuildFlavor.defaultArchiveFolderName` — whose entire job is to keep an experimental
+    /// build out of the real archive. No caller ever used the default (every one resolves the path
+    /// through `SettingsStore.archiveRoot(for:)`), so the only reachable use of it would have been
+    /// the one that violates the invariant. Requiring the parameter makes flavor resolution
+    /// structural.
+    public init(archiveRoot: URL) {
         self.archiveRoot = archiveRoot
-    }
-
-    /// The default archive path: `~/Acta/`.
-    public static func defaultArchiveRoot() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Acta", isDirectory: true)
     }
 
     /// Create the folder for a new meeting and return its URL. Guarantees the archive root exists.
