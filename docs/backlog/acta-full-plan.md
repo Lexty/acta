@@ -40,29 +40,39 @@ stream alive across display sleep (or re-establish it immediately and account fo
 then worry about system sleep. Verify by letting the display sleep during a recording — that is now a
 required acceptance test, not an optional one.
 
-### 2. Failures are not investigable (the recorder cannot explain itself)
+### 2. Logging: works, but lives in the wrong place
 
-The incident above was diagnosed **only** through `pmset` — a system power log. Nothing from Acta.
-Had the display not left a trace in someone else's log, the cause would have been unknowable.
+⚠️ **Correction.** An earlier version of this entry claimed the app produced no retrievable logs and
+that failures were uninvestigable. **That was wrong** — a broken diagnostic, not a defect. In the
+investigating shell `log` is a **zsh builtin**, so every `log show …` query silently returned nothing.
+Through `/usr/bin/log` the record is complete and persisted, and it explains the incident above
+better than `pmset` did, quoting macOS itself:
 
-What was found:
-- `log.info` (14 call sites) is **not persisted** by `os_log` — in-memory only. "Session started" and
-  "session stopped" are gone by the time anyone investigates.
-- `log.error` (42 call sites) *is* persisted, and `SelfCheck` genuinely does log
-  `"Watchdog: recording stalled, giving up"` at error level — **yet nothing was retrievable**.
-  Queried by subsystem (both bundle ids), by process, with `--info --debug`, and by a broad grep over
-  30 minutes of the unified log: empty. Why is unknown and must be established first — a logging
-  mechanism that does not produce a record is worse than none, because it looks like it works.
+```
+21:12:09.818  AudioRecorder  Stream stopped with an error:
+                             "Failed to find any displays or windows to capture"
+21:12:16.546  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 2)
+21:12:22.825  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 1)
+21:12:29.199  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 0)
+21:12:35.501  SelfCheck      Watchdog: recording stalled, giving up
+21:12:35.508  RecordingController  Watchdog: data stream is gone — recording stopped, error shown
+```
+
+The self-diagnosis of Task 4 works, and it says exactly what happened. Read the logs with
+**`/usr/bin/log show --info --debug --predicate 'subsystem == "dev.personal.acta"'`** — note the
+absolute path.
+
+What is genuinely worth improving (convenience, not a hole):
 - `AppInfo.bundleID` is a **hardcoded** `"dev.personal.acta"` used as the `Logger` subsystem, so both
-  flavors log under the same subsystem and cannot be told apart. (It is used *only* for logging —
-  identity itself comes from `Info.plist`, so the flavor split is not otherwise affected.)
-- The record lives in the **system log store**, which rotates, rather than next to the recording it
-  describes.
-
-For an app whose entire value is fault tolerance, an uninvestigable failure is nearly as bad as a
-lost one. Required: a **durable event journal in the recording folder itself** (e.g. `events.log`
-beside the audio) recording every lifecycle transition with timestamps — start, stall, restart,
-stop and its reason, assembly, recovery. Local, private, sits with the audio it explains, survives
+  flavors log under the same subsystem and cannot be told apart. It is used *only* for logging —
+  identity comes from `Info.plist` — so the flavor split is otherwise unaffected. Derive it from the
+  real bundle identifier.
+- `log.info` (14 call sites) is not persisted by `os_log`, so "session started/stopped" is gone by
+  the time anyone investigates. Lifecycle events should use a persisted level.
+- The record lives in the **system log store**, which rotates and is keyed by time rather than by
+  recording. Nice to have: a **durable event journal in the recording folder itself** (e.g.
+  `events.log` beside the audio) with every lifecycle transition — start, stall, restart, stop and
+  its reason, assembly, recovery. Local, private, sits with the audio it explains, survives
 app restarts and log rotation. This is the persisted form of the `ControlAPI` event/trace stream
 already designed in the parked harness work — build them as one thing, not two.
 
