@@ -101,8 +101,9 @@ clean stop → `status=done` + assembly. Finding `status=recording` at launch me
 interrupted abnormally.
 
 **Recovery on launch** (`RecoveryManager`). Scan the archive at startup; for every folder with
-`status=recording`: assemble the surviving valid segments into `system/mic/combined.wav`, discard a
-corrupt trailing segment without failing, set `status=recovered`, notify the user.
+`status=recording`: assemble the surviving valid segments into `system.wav` and `mic.wav` (both, no
+mix on this path), repair a truncated trailing segment from its actual size and drop it only if it
+holds no data, set `status=recovered`, notify the user.
 
 **Startup self-diagnosis** (`SelfCheck`). Within ~2 s of starting, confirm data is actually flowing
 (current segment growing / buffers arriving). If not, determine the cause: no TCC permission →
@@ -124,7 +125,7 @@ stream while keeping the already written segments; on failure — surface an err
 Follow the tasks in `docs/plans/acta.md`; each has a verifiable criterion. The key ones:
 - Task 2: a 60 s recording → several valid segments (`ffprobe` duration > 0 for each).
 - Task 3: `kill -9` while recording → relaunch → the unfinished recording is finalised automatically,
-  `combined.wav` is valid and contains the audio recorded before the crash.
+  `system.wav`/`mic.wav` are valid and contain the audio recorded before the crash.
 - Task 4: starting without Screen Recording → an immediate, actionable error rather than a silent "rec".
 
 ## 10. Risks and notes
