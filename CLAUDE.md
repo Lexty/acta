@@ -57,15 +57,21 @@ The conversation with the user may be in Russian; the repository must not be.
   under CLT-only a test can only reach `ActaKit`: `SegmentRepair` touches the FS, but it is the code
   that rescues crashed audio; `DisplayWakeLock` touches `ProcessInfo`, and "was the assertion really
   taken, and really released" is answerable only by asking the OS (`pmset -g assertions`).
-- `Sources/Acta/` — the executable: SwiftUI menu bar, `SCStream`, FS and process I/O. Kept thin;
-  decisions are delegated to ActaKit.
+- `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
+  `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
+  `MeetingStore` — `SCStream`, FS and process I/O. Kept thin; decisions are delegated to ActaKit.
+  It is a **library**, not part of the executable, because **SwiftPM cannot import an executable
+  target**: while this code lived in `Sources/Acta`, nothing above pure logic could be reached from a
+  test at all. A library target may import AppKit/SwiftUI, so the AppKit-touching types live here too.
+- `Sources/Acta/` — the executable and nothing else: `ActaApp.swift` (`@main`, the SwiftUI menu bar
+  and its views). New non-UI code belongs in `ActaRuntime`, not here.
 - `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via
   `bash Scripts/test.sh`).
 - `Tests/ActaTests/` — **a stub only**, so `swift test` compiles. Never add real tests here: under
   CLT-only they do not run and cannot fail.
 
 The rule: a new behaviour worth testing gets its decision in ActaKit as a pure function, its I/O in
-Acta, and its test in ActaTestRunner.
+ActaRuntime, and its test in ActaTestRunner.
 
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).

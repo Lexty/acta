@@ -9,11 +9,11 @@ import os
 /// `RecoveryManager` scans the archive, finds such folders, assembles the surviving segments into
 /// `system/mic/combined.wav` (the unfinalized last segment is dropped) and moves the marker to
 /// `status=recovered`.
-struct RecoveryManager {
+public struct RecoveryManager {
     /// The outcome of recovering one folder — for notifying the user (Task 6).
-    struct Recovered: Sendable {
-        var directory: URL
-        var combinedWAV: URL?
+    public struct Recovered: Sendable {
+        public var directory: URL
+        public var combinedWAV: URL?
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
@@ -22,15 +22,15 @@ struct RecoveryManager {
     private let assembler = SegmentAssembler()
 
     /// The root of the recordings archive.
-    let archiveRoot: URL
+    public let archiveRoot: URL
 
     /// Which final tracks to assemble — the same setting as on a clean stop (Task 7). Otherwise a
     /// meeting recovered after a crash would arrive with a set of files the user never asked for,
     /// and the archive would disagree with itself depending on whether there had been a crash.
-    let tracks: RecordingSettings.TrackSelection
+    public let tracks: RecordingSettings.TrackSelection
 
-    init(archiveRoot: URL,
-         tracks: RecordingSettings.TrackSelection = RecordingSettings.default.trackSelection) {
+    public init(archiveRoot: URL,
+                tracks: RecordingSettings.TrackSelection = RecordingSettings.default.trackSelection) {
         self.archiveRoot = archiveRoot
         self.tracks = tracks
     }
@@ -38,7 +38,7 @@ struct RecoveryManager {
     /// Scan the archive and recover every interrupted recording. An error in one folder does not
     /// affect the others (isolated in a `do/catch`). Returns the list of what was recovered.
     @discardableResult
-    func recoverInterruptedSessions() -> [Recovered] {
+    public func recoverInterruptedSessions() -> [Recovered] {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ) else {

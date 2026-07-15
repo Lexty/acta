@@ -15,7 +15,7 @@ import os
 /// `captureMicrophone` is available from macOS 15, hence the availability annotation on the whole
 /// recorder.
 @available(macOS 15.0, *)
-final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
+public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "AudioRecorder")
 
     /// The recording folder — its subdirectories hold the segments of both tracks.
@@ -61,7 +61,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     private var receivedMicBuffers = 0
 
     /// How many audio buffers have arrived from the system since the start, per track.
-    var receivedBufferCounts: (system: Int, mic: Int) {
+    public var receivedBufferCounts: (system: Int, mic: Int) {
         bufferCountLock.lock()
         defer { bufferCountLock.unlock() }
         return (receivedSystemBuffers, receivedMicBuffers)
@@ -69,13 +69,13 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     /// How many buffers the writers actually accepted into segments, per track. Unlike
     /// `receivedBufferCounts` it confirms that the data reached the file, not just the delegate.
-    var writtenBufferCounts: (system: Int, mic: Int) {
+    public var writtenBufferCounts: (system: Int, mic: Int) {
         (systemWriter.appendedCount, micWriter.appendedCount)
     }
 
     /// Total size of both tracks' segments on disk, bytes. A second signal for the self-diagnosis
     /// (independent of the writer): the files are growing → data really is landing on disk.
-    var segmentBytesOnDisk: Int {
+    public var segmentBytesOnDisk: Int {
         [SegmentLayout.systemDirName, SegmentLayout.micDirName]
             .map { Self.directorySize(directory.appendingPathComponent($0)) }
             .reduce(0, +)
@@ -91,7 +91,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     }
 
     /// Whether an `SCStream` is currently up (for the self-diagnosis snapshot).
-    var isStreaming: Bool { activeStream != nil }
+    public var isStreaming: Bool { activeStream != nil }
 
     // Finalized segments per track under a lock: the writers fire the callback from their own queues
     // (`systemQueue`/`micQueue`), while `RecordingSession`'s counter reads it from a third one. The
@@ -103,7 +103,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     /// Subscribe to changes in the number of finalized segments — `session.json` is updated on this
     /// signal (Task 8.2). The subscriber is called from the track's queue: it must not block it.
     /// The subscription must be set up before `start()`.
-    func setSegmentCountObserver(_ observer: @escaping @Sendable (Int) -> Void) {
+    public func setSegmentCountObserver(_ observer: @escaping @Sendable (Int) -> Void) {
         progressLock.lock()
         onSegmentCountChange = observer
         progressLock.unlock()
@@ -123,7 +123,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     /// - Parameter directory: the recording folder; segments are written into its `system/` and
     ///   `mic/` subdirectories.
-    init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
+    public init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
         self.directory = directory
         self.systemWriter = SegmentWriter(
             directory: directory.appendingPathComponent(SegmentLayout.systemDirName),
@@ -156,7 +156,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     /// Start the capture. Throws a `StartupFailure` with ready-made text for the menu bar: the
     /// reason a start produced no recording is what the user must see, not an "error 1" from
     /// `localizedDescription`.
-    func start() async throws {
+    public func start() async throws {
         try await requestPermissionsIfNeeded()
         do {
             try await startStream()
@@ -211,7 +211,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     /// Restart the stream **keeping the segments already recorded** — for the self-healing
     /// (`SelfCheck`) and the watchdog. The current segments are finalized and stay valid, the track
     /// counters move forward, and a new `SCStream` is brought up.
-    func restart() async throws {
+    public func restart() async throws {
         if let stream = activeStream {
             try? await stream.stopCapture()
         }
@@ -223,7 +223,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     }
 
     /// Stop the capture and finalize the current segments of both tracks.
-    func stop() async {
+    public func stop() async {
         if let stream = activeStream {
             try? await stream.stopCapture()
         }
@@ -235,7 +235,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     /// The number of finalized segments to publish in `session.json`. The arithmetic over the two
     /// tracks lives in the pure `SegmentProgress`; this only serializes the read.
-    var finalizedSegmentCount: Int {
+    public var finalizedSegmentCount: Int {
         progressLock.lock()
         defer { progressLock.unlock() }
         return progress.segmentCount
@@ -243,8 +243,8 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     // MARK: - SCStreamOutput
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                of type: SCStreamOutputType) {
+    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+                       of type: SCStreamOutputType) {
         switch type {
         case .audio:
             countBuffer(system: true)
@@ -269,7 +269,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     // MARK: - SCStreamDelegate
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
+    public func stream(_ stream: SCStream, didStopWithError error: Error) {
         log.error("Stream stopped with an error: \(error.localizedDescription, privacy: .public)")
         // The stream is dead — drop it, otherwise `isStreaming` would keep showing the
         // self-diagnosis a live stream, and it would explain the failed capture to the user as a

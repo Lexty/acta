@@ -11,9 +11,9 @@ import os
 /// tests in `ActaKit`; what is left here is orchestration and publishing state on the main thread.
 @available(macOS 15.0, *)
 @MainActor
-final class RecordingController: ObservableObject {
+public final class RecordingController: ObservableObject {
     /// Recording phase for the status indicator.
-    enum Phase: Equatable {
+    public enum Phase: Equatable {
         case idle
         case recording
         /// Capture has already stopped and segments are being assembled (`ffmpeg`) — seconds, and
@@ -27,24 +27,24 @@ final class RecordingController: ObservableObject {
     private let settingsStore: SettingsStore
 
     /// Current recording settings (edited in the "Settings" section, saved on change).
-    @Published var settings: RecordingSettings
+    @Published public var settings: RecordingSettings
 
-    @Published private(set) var phase: Phase = .idle
+    @Published public private(set) var phase: Phase = .idle
     /// Human-readable error for the banner (empty when there is none). Drives the banner on its own,
     /// independently of `phase` — not every error is a recording-lifecycle error (see `openArchive`).
-    @Published private(set) var errorMessage: String = ""
+    @Published public private(set) var errorMessage: String = ""
     /// Recovery banner shown after a failure (empty when there was nothing to recover).
-    @Published private(set) var recoveredBanner: String = ""
+    @Published public private(set) var recoveredBanner: String = ""
     /// Elapsed time of the current recording, s.
-    @Published private(set) var elapsedSeconds: Int = 0
+    @Published public private(set) var elapsedSeconds: Int = 0
     /// Meeting title (edited in the field; when empty the auto-suggestion is used).
-    @Published var title: String = ""
+    @Published public var title: String = ""
     /// Auto-suggested title — shown as the field's placeholder. A suggestion only: it must not be
     /// pre-filled into `title`, otherwise a menu opened an hour before the start would record the
     /// time the menu was opened in `info.md` instead of the time the recording began.
-    @Published private(set) var suggestedTitle: String = ""
+    @Published public private(set) var suggestedTitle: String = ""
     /// List of saved recordings (newest first).
-    @Published private(set) var recordings: [MeetingStore.Recording] = []
+    @Published public private(set) var recordings: [MeetingStore.Recording] = []
 
     // Active session state.
     private var session: RecordingSession?
@@ -58,7 +58,7 @@ final class RecordingController: ObservableObject {
     /// the ~2 s self-check), so without this flag a second click would bring up a second session and
     /// leak the first. `@Published` because `isBusy` and the button read it: `SCStream` is already
     /// writing segments seconds before `phase` reaches `.recording`.
-    @Published private(set) var isStarting = false
+    @Published public private(set) var isStarting = false
     /// Whether an asynchronous stop is in flight. Symmetric to `isStarting`: `phase` only becomes
     /// `.idle` at the end of `performStop` — after the assembly, which takes seconds. Without the flag
     /// a second click (or a watchdog firing then) would kick off a second assembly of the same folder:
@@ -81,27 +81,27 @@ final class RecordingController: ObservableObject {
 
     /// The shared instance: recovery must start when the app launches (`AppDelegate`), not when the
     /// menu is first opened, and `MenuContent` shows that same state.
-    static let shared = RecordingController()
+    public static let shared = RecordingController()
 
-    init(settingsStore: SettingsStore = SettingsStore()) {
+    public init(settingsStore: SettingsStore = SettingsStore()) {
         self.settingsStore = settingsStore
         self.settings = settingsStore.load()
     }
 
     /// Whether a recording is in progress right now.
-    var isRecording: Bool { phase == .recording }
+    public var isRecording: Bool { phase == .recording }
 
     /// Whether the recording is being finalized. `isStopping` and not just `phase`: `handleFatalStall`
     /// parks `phase` in `.error` while the stop and the `ffmpeg` assembly still run.
-    var isSaving: Bool { phase == .saving || isStopping }
+    public var isSaving: Bool { phase == .saving || isStopping }
 
     /// Whether the controller is busy starting, recording or saving — for that time editing the
     /// settings and the title is blocked, and the start button is unavailable. The two flags count
     /// too: each brackets a window where `phase` does not say "busy" while a session is live.
-    var isBusy: Bool { phase == .recording || phase == .saving || isStopping || isStarting }
+    public var isBusy: Bool { phase == .recording || phase == .saving || isStopping || isStarting }
 
     /// Work that must not be cut short by quitting. Identical to `isBusy`; only `isBusy` is UI.
-    var hasWorkInFlight: Bool { isBusy }
+    public var hasWorkInFlight: Bool { isBusy }
 
     /// The recordings store for the current archive path from the settings. Read on every access so
     /// that a path change in the settings is picked up without a restart (Task 7).
@@ -110,13 +110,13 @@ final class RecordingController: ObservableObject {
     }
 
     /// Save the settings after they were edited in the UI (normalised before being written to disk).
-    func saveSettings() {
+    public func saveSettings() {
         settings = settings.normalized()
         settingsStore.save(settings)
     }
 
     /// Formatted elapsed time `HH:MM:SS` for the timer in the UI.
-    var elapsedString: String { MeetingInfo.formatDuration(seconds: elapsedSeconds) }
+    public var elapsedString: String { MeetingInfo.formatDuration(seconds: elapsedSeconds) }
 
     // MARK: - App lifecycle
 
@@ -125,7 +125,7 @@ final class RecordingController: ObservableObject {
     /// bar with `menuBarExtraStyle(.window)` builds its content only on a click, so recovery cannot
     /// be hung on `onAppear` — after a crash a recording would sit unassembled until the menu is
     /// opened.
-    func onLaunch() {
+    public func onLaunch() {
         Notifier.requestAuthorization()
         guard !didRunRecovery else { return }
         didRunRecovery = true
@@ -134,7 +134,7 @@ final class RecordingController: ObservableObject {
 
     /// Call when the menu appears: suggest a source and refresh the list. Notification authorization
     /// is requested once in `onLaunch()` — there is no point in poking it on every menu opening.
-    func onAppear() {
+    public func onAppear() {
         if !isBusy {
             suggestedTitle = SourceDetector.detectedSource().map {
                 MeetingSource.suggestedTitle(source: $0, date: Date())
@@ -165,14 +165,14 @@ final class RecordingController: ObservableObject {
     }
 
     /// Refresh the list of saved recordings.
-    func refresh() {
+    public func refresh() {
         recordings = store.listRecordings()
     }
 
     // MARK: - Start/stop
 
     /// Start recording. The title is taken from the field, or from the auto-suggestion if it is empty.
-    func start() {
+    public func start() {
         guard !isBusy, !isStarting, !isStopping else { return }
         isStarting = true
         recoveredBanner = ""
@@ -290,7 +290,7 @@ final class RecordingController: ObservableObject {
     ///
     /// The `isStopping` flag is set synchronously: `phase` leaves `.recording` only inside the task,
     /// and without the flag a second click could slip past the check before the task starts.
-    func stop() {
+    public func stop() {
         guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
         isStopping = true
@@ -311,7 +311,7 @@ final class RecordingController: ObservableObject {
     /// process would die on the very segment the start had just opened. Once the start has settled,
     /// the recording it produced (if any) is stopped normally; a start that failed leaves `phase` in
     /// `.error` and `stop()` correctly does nothing.
-    func stopAndWait() async {
+    public func stopAndWait() async {
         await startTask?.value
         stop()
         await stopTask?.value
@@ -369,14 +369,14 @@ final class RecordingController: ObservableObject {
     // MARK: - Actions on recordings
 
     /// Reveal a recording's folder in Finder.
-    func openInFinder(_ url: URL) {
+    public func openInFinder(_ url: URL) {
         ArchiveOpener.reveal(url)
     }
 
     /// Open the archive root in Finder ("Open Archive"). Sets `errorMessage` but never `phase`:
     /// parking `phase` in `.error` mid-recording would no-op `stop()`'s `phase == .recording` guard
     /// and drop `hasWorkInFlight`, so Quit would kill the process without finalizing the segments.
-    func openArchive() {
+    public func openArchive() {
         do {
             try ArchiveOpener.openArchive(store: store)
         } catch {
@@ -386,7 +386,7 @@ final class RecordingController: ObservableObject {
     }
 
     /// Dismiss the recovery banner (once the user has seen it).
-    func dismissRecoveredBanner() {
+    public func dismissRecoveredBanner() {
         recoveredBanner = ""
     }
 

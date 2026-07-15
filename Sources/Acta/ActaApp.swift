@@ -1,5 +1,6 @@
 import SwiftUI
 import ActaKit
+import ActaRuntime
 
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that

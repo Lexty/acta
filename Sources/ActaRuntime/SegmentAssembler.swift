@@ -12,24 +12,24 @@ import os
 ///
 /// The `ffmpeg` arguments are pure functions `FFmpeg.*` (covered by unit tests); this file only
 /// launches the process.
-struct SegmentAssembler {
+public struct SegmentAssembler {
     /// Assembly result — which final files were produced.
-    struct Result: Sendable {
-        var systemWAV: URL?
-        var micWAV: URL?
-        var combinedWAV: URL?
+    public struct Result: Sendable {
+        public var systemWAV: URL?
+        public var micWAV: URL?
+        public var combinedWAV: URL?
         /// How many valid segments went into the assembly (maximum across the tracks).
-        var segmentCount: Int = 0
+        public var segmentCount: Int = 0
         /// Duration of the assembled audio, in seconds — measured from the final file, not from
         /// the clock. `nil` if it could not be measured (no file / unreadable header).
         ///
         /// The clock lies: `SCStream` does not come up instantly, and in a live run a "29 s"
         /// recording contained 23.66 s of audio. It is exactly this value that goes into `info.md`
         /// (Task 8.3).
-        var durationSeconds: Double?
+        public var durationSeconds: Double?
     }
 
-    enum AssembleError: Error {
+    public enum AssembleError: Error {
         case ffmpegNotFound
         case noSegments
         /// `ffmpeg` failed to assemble a track. Kept separate from `noSegments`: an empty track is
@@ -55,8 +55,8 @@ struct SegmentAssembler {
     ///     the intermediate `system.wav`/`mic.wav` are assembled even when the track's flag is off,
     ///     provided the mix is needed, and are deleted afterwards.
     @discardableResult
-    func assemble(in directory: URL, deleteSegments: Bool,
-                  tracks: RecordingSettings.TrackSelection = .init(system: true, mic: true, combined: true)
+    public func assemble(in directory: URL, deleteSegments: Bool,
+                         tracks: RecordingSettings.TrackSelection = .init(system: true, mic: true, combined: true)
     ) throws -> Result {
         guard let ffmpeg = Self.locateFFmpeg() else { throw AssembleError.ffmpegNotFound }
 

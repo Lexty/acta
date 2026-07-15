@@ -8,7 +8,16 @@ import Foundation
 // Target layout (important for testability in a Command-Line-Tools-ONLY environment):
 //   • ActaKit        — the library holding the pure logic (this is what we test; it grows in
 //                      Task 2–7).
-//   • Acta           — the executable, @main + SwiftUI menu bar; thin, depends on ActaKit.
+//   • ActaRuntime    — the library holding the recording pipeline: RecordingController,
+//                      RecordingSession, RecoveryManager, AudioRecorder, SegmentWriter,
+//                      SegmentAssembler, MeetingStore, SelfCheck and friends — everything that does
+//                      real I/O. It exists because SwiftPM CANNOT import an executable target: while
+//                      this code lived in `Acta`, nothing above pure logic could be reached from
+//                      `ActaTestRunner` at all, and every criterion that mattered had to be verified
+//                      by hand. A library target may import AppKit/SwiftUI, so the AppKit-touching
+//                      types moved here unchanged.
+//   • Acta           — the executable, @main + the SwiftUI menu bar and its views, and nothing else;
+//                      depends on ActaRuntime + ActaKit.
 //   • ActaTestRunner — an executable with swift-testing @Test functions plus an entry point
 //                      (`Testing.__swiftPMEntryPoint`). This is the REAL test run
 //                      (`swift run ActaTestRunner` / `bash Scripts/test.sh`).
@@ -83,14 +92,19 @@ let package = Package(
             name: "ActaKit",
             path: "Sources/ActaKit"
         ),
+        .target(
+            name: "ActaRuntime",
+            dependencies: ["ActaKit"],
+            path: "Sources/ActaRuntime"
+        ),
         .executableTarget(
             name: "Acta",
-            dependencies: ["ActaKit"],
+            dependencies: ["ActaKit", "ActaRuntime"],
             path: "Sources/Acta"
         ),
         .executableTarget(
             name: "ActaTestRunner",
-            dependencies: ["ActaKit"],
+            dependencies: ["ActaKit", "ActaRuntime"],
             path: "Sources/ActaTestRunner",
             swiftSettings: testing.swift,
             linkerSettings: testing.linker

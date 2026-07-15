@@ -7,11 +7,16 @@ import os
 ///
 /// A thin wrapper over the FS: the name layout and the `info.md` serialization are pure logic in
 /// `ActaKit` (`MeetingArchive`/`MeetingInfo`, covered by unit tests); this file only touches disk.
-struct MeetingStore {
+public struct MeetingStore {
     /// One entry in the archive listing — the folder + the parsed session marker (if any).
-    struct Recording {
-        var directory: URL
-        var manifest: SessionManifest?
+    public struct Recording {
+        public var directory: URL
+        public var manifest: SessionManifest?
+
+        public init(directory: URL, manifest: SessionManifest?) {
+            self.directory = directory
+            self.manifest = manifest
+        }
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "MeetingStore")
@@ -19,14 +24,14 @@ struct MeetingStore {
     private let manifestStore = SessionManifestStore()
 
     /// The root of the recordings archive (`~/Acta/` by default).
-    let archiveRoot: URL
+    public let archiveRoot: URL
 
-    init(archiveRoot: URL = MeetingStore.defaultArchiveRoot()) {
+    public init(archiveRoot: URL = MeetingStore.defaultArchiveRoot()) {
         self.archiveRoot = archiveRoot
     }
 
     /// The default archive path: `~/Acta/`.
-    static func defaultArchiveRoot() -> URL {
+    public static func defaultArchiveRoot() -> URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Acta", isDirectory: true)
     }
 
@@ -34,7 +39,7 @@ struct MeetingStore {
     ///
     /// If a folder with that name already exists (the minute and the slug coincided), appends a
     /// `-2`, `-3`, … suffix to the slug so as not to mix two recordings in one folder.
-    func createMeetingDirectory(title: String, date: Date = Date()) throws -> URL {
+    public func createMeetingDirectory(title: String, date: Date = Date()) throws -> URL {
         try ensureArchiveRoot()
         let slug = MeetingArchive.slug(from: title)
         var candidate = archiveRoot.appendingPathComponent(
@@ -51,7 +56,7 @@ struct MeetingStore {
     }
 
     /// Write `info.md` into the meeting folder (atomically, as a full overwrite).
-    func writeInfo(_ info: MeetingInfo, to directory: URL) throws {
+    public func writeInfo(_ info: MeetingInfo, to directory: URL) throws {
         let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
         try info.rendered().data(using: .utf8)!.write(to: url, options: .atomic)
     }
@@ -61,7 +66,7 @@ struct MeetingStore {
     ///
     /// Sorting by folder name descending = by start time descending (the name begins with
     /// `YYYY-MM-DD_HHMM`).
-    func listRecordings() -> [Recording] {
+    public func listRecordings() -> [Recording] {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ) else {
@@ -79,7 +84,7 @@ struct MeetingStore {
     /// Also called before opening the archive in Finder: until the first recording the root does not
     /// exist, and opening a missing path is a silent no-op — the button would look broken on a fresh
     /// install.
-    func ensureArchiveRoot() throws {
+    public func ensureArchiveRoot() throws {
         try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
         guard !fileManager.fileExists(atPath: claudeMD.path) else { return }

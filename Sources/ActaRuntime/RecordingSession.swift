@@ -15,9 +15,9 @@ import os
 /// makes it possible to call the session's `async` methods from the main actor without data-race
 /// warnings.
 @available(macOS 15.0, *)
-final class RecordingSession: @unchecked Sendable {
+public final class RecordingSession: @unchecked Sendable {
     /// The recording folder.
-    let directory: URL
+    public let directory: URL
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecordingSession")
     private let settings: RecordingSettings
@@ -41,7 +41,7 @@ final class RecordingSession: @unchecked Sendable {
     /// on stop with the real start time instead of an invented one.
     private var startedAt = Date()
 
-    init(directory: URL, settings: RecordingSettings = .default) {
+    public init(directory: URL, settings: RecordingSettings = .default) {
         self.directory = directory
         let settings = settings.normalized()
         self.settings = settings
@@ -57,8 +57,8 @@ final class RecordingSession: @unchecked Sendable {
     /// - Parameter onStall: called if the watchdog exhausted its restart attempts during the
     ///   recording (the buffer stream is gone for good). The controller must show an error and stop
     ///   the recording — a "mute" recording status is unacceptable. Not called on the main actor.
-    func start(startedAt: Date = Date(),
-               onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
+    public func start(startedAt: Date = Date(),
+                      onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
         // Every `throw` below is a start that never became a recording, and the assertion must not
         // outlive it: a recorder that keeps the display awake after it stopped recording is the worst
         // kind of bug — the machine never sleeps and nobody knows why. `confirmed` flips only once
@@ -108,7 +108,7 @@ final class RecordingSession: @unchecked Sendable {
     /// settings), mark the marker as `done`. Deleting the segments after the assembly also comes
     /// from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
-    func stop() async -> SegmentAssembler.Result? {
+    public func stop() async -> SegmentAssembler.Result? {
         // Released first thing: from here on nothing is captured, and the assembly that follows —
         // tens of seconds of `ffmpeg` for an hour-long meeting — has no business holding the display
         // on. This is also the watchdog's give-up path (`handleFatalStall` → `stop()`), which is the
