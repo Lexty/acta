@@ -2,12 +2,12 @@ import ActaKit
 import Foundation
 import os
 
-/// Персистентность пользовательских настроек записи (`RecordingSettings`).
+/// Persistence of the user's recording settings (`RecordingSettings`).
 ///
-/// Хранит один JSON-блоб в `UserDefaults` под ключом `settings`. Работает и вне `.app`-бандла
-/// (UserDefaults доступен всегда), поэтому безопасен в юнит-раннере/скриптах. Разрешение пути архива
-/// в конкретный URL и вся нормализация — чистая логика `RecordingSettings` (покрыта тестами); тут
-/// только чтение/запись и подстановка домашней папки.
+/// Stores a single JSON blob in `UserDefaults` under the `settings` key. Works outside an `.app`
+/// bundle too (UserDefaults is always available), so it is safe in the unit runner/scripts.
+/// Resolving the archive path into a concrete URL and all normalisation is pure `RecordingSettings`
+/// logic (covered by tests); here there is only reading/writing and substituting the home directory.
 struct SettingsStore {
     private static let key = "settings"
 
@@ -18,29 +18,30 @@ struct SettingsStore {
         self.defaults = defaults
     }
 
-    /// Прочитать настройки (нормализованные). Отсутствие/битый JSON → значения по умолчанию.
+    /// Read the settings (normalised). Missing/corrupt JSON → default values.
     func load() -> RecordingSettings {
         guard let data = defaults.data(forKey: Self.key) else { return .default }
         do {
             return try JSONDecoder().decode(RecordingSettings.self, from: data).normalized()
         } catch {
-            log.error("Не удалось разобрать настройки, беру дефолт: \(error.localizedDescription, privacy: .public)")
+            let reason = error.localizedDescription
+            log.error("Failed to parse settings, falling back to defaults: \(reason, privacy: .public)")
             return .default
         }
     }
 
-    /// Сохранить настройки (перед записью нормализуются).
+    /// Save the settings (normalised before writing).
     func save(_ settings: RecordingSettings) {
         let normalized = settings.normalized()
         do {
             let data = try JSONEncoder().encode(normalized)
             defaults.set(data, forKey: Self.key)
         } catch {
-            log.error("Не удалось сохранить настройки: \(error.localizedDescription, privacy: .public)")
+            log.error("Failed to save settings: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    /// Разрешённый корень архива из текущих настроек.
+    /// The resolved archive root from the current settings.
     func archiveRoot(for settings: RecordingSettings) -> URL {
         settings.resolvedArchiveURL(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
     }

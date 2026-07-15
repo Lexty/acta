@@ -2,14 +2,15 @@ import ActaKit
 import Foundation
 import Testing
 
-// Проверки заголовка на раскладке, которую реально пишет `AVAssetWriter(fileType: .wav)` —
-// снята с живого writer'а. Держим отдельно от синтетических заголовков `RecoveryTests`: тут
-// важно не «логика разбора верна», а «окно `headerProbeBytes` покрывает реальный файл».
+// Header checks against the layout that `AVAssetWriter(fileType: .wav)` actually writes -
+// captured from a live writer. Kept separate from the synthetic headers in `RecoveryTests`: what
+// matters here is not "the parsing logic is correct" but "the `headerProbeBytes` window covers a
+// real file".
 
-/// Заголовок в точности той раскладки, которую пишет живой `AVAssetWriter(fileType: .wav)`:
-/// `JUNK`(28) → `fmt `(40, extensible) → `FLLR`(padding) → `data`. При `padding: 3984` заголовок
-/// `data` заканчивается ровно на 4096-м байте — как в реально снятом с writer'а файле.
-/// Выравнивающий `FLLR` и делает окно `headerProbeBytes` узким местом.
+/// A header in exactly the layout a live `AVAssetWriter(fileType: .wav)` writes:
+/// `JUNK`(28) -> `fmt `(40, extensible) -> `FLLR`(padding) -> `data`. With `padding: 3984` the
+/// `data` header ends exactly at byte 4096 - just like in the file actually captured from the
+/// writer. It is the aligning `FLLR` that makes the `headerProbeBytes` window the bottleneck.
 private func realWriterLayout(dataSize: Int, fileSize: Int, padding: Int = 3984) -> Data {
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
@@ -31,9 +32,9 @@ private func realWriterLayout(dataSize: Int, fileSize: Int, padding: Int = 3984)
 
 @Test
 func realWriterLayoutFitsInProbeWindow() {
-    // Регрессия: у живого writer'а заголовок `data` заканчивается ровно на 4096-м байте — в прежнем
-    // окне 4096 он умещался байт в байт. Любой лишний чанк вытолкнул бы его наружу, и тогда
-    // невалидными разом стали бы ВСЕ сегменты: и склейка, и восстановление вернули бы пустоту.
+    // Regression: with a live writer the `data` header ends exactly at byte 4096 - in the former
+    // 4096-byte window it fit byte for byte. Any extra chunk would push it out, and then ALL
+    // segments would become invalid at once: both assembly and recovery would return nothing.
     let header = realWriterLayout(dataSize: 192_000, fileSize: 196_096)
     #expect(header.count == 4096)
     #expect(Recovery.headerProbeBytes > header.count)
@@ -42,10 +43,11 @@ func realWriterLayoutFitsInProbeWindow() {
 
 @Test
 func realWriterLayoutWithLargerPaddingStillValid() {
-    // Запас окна не должен держаться на текущем размере выравнивания: `data`, уехавший за 4 КиБ
-    // (другой formatHint, лишний чанк, смена выравнивания в новой macOS), обязан находиться —
-    // иначе сегменты разом становятся невалидными, а это молчаливая потеря всей записи.
-    // Заголовок 16112 байт (выравнивание 16000) + 192000 байт аудио.
+    // The window's headroom must not depend on the current padding size: a `data` chunk that
+    // moved past 4 KiB (a different formatHint, an extra chunk, changed padding in a new macOS)
+    // must still be found - otherwise segments become invalid all at once, which is a silent
+    // loss of the whole recording. A 16112-byte header (16000 bytes of padding) + 192000 bytes
+    // of audio.
     let header = realWriterLayout(dataSize: 192_000, fileSize: 208_112, padding: 16_000)
     #expect(header.count > 4096)
     #expect(header.count <= Recovery.headerProbeBytes)
@@ -54,9 +56,9 @@ func realWriterLayoutWithLargerPaddingStillValid() {
 
 @Test
 func realWriterLayoutFromCrashRejected() {
-    // Убитый `kill -9` writer оставляет размер `data` нулевым, а в поле RIFF — размер преамбулы
-    // (4088), который МЕНЬШЕ файла, то есть RIFF-проверку проходит. Отбраковать сегмент обязан
-    // именно нулевой `data`.
+    // A writer killed by `kill -9` leaves the `data` size at zero, and the RIFF field holds the
+    // preamble size (4088), which is SMALLER than the file, i.e. it passes the RIFF check. It is
+    // the zero `data` size that must reject the segment.
     var bytes = [UInt8](realWriterLayout(dataSize: 0, fileSize: 382_464))
     bytes.replaceSubrange(4..<8, with: le32(4088))
     #expect(Recovery.isValidSegment(bytes: 382_464, header: Data(bytes)) == false)

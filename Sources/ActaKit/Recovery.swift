@@ -1,36 +1,38 @@
 import Foundation
 
-/// Чистая логика выбора сегментов для склейки при восстановлении и чистом стопе.
+/// Pure logic of selecting segments for assembly during recovery and on a clean stop.
 ///
-/// Держим отдельно от файловой системы и `ffmpeg`, чтобы главное правило крэш-безопасности —
-/// «недописанный последний сегмент не роняет восстановление, а спасается» — покрывалось
-/// юнит-тестом (`RecoveryTests`). Runtime (`RecoveryManager`, `SegmentAssembler`) лишь подставляет
-/// сюда имена файлов, их размеры и начало файла из FS и исполняет решение.
+/// Kept separate from the file system and `ffmpeg` so that the main crash-safety rule — "an
+/// unfinished last segment does not break recovery, it gets rescued" — is covered by a unit test
+/// (`RecoveryTests`). The runtime (`RecoveryManager`, `SegmentAssembler`) merely feeds file names,
+/// their sizes and the head of each file from the FS in here, and executes the decision.
 public enum Recovery {
-    /// Минимальный размер валидного WAV-сегмента, байт. Заголовок RIFF/WAVE ~44 байта; файл меньше
-    /// порога — это пустой/недописанный (битый) сегмент, типичный результат `kill -9` посередине.
+    /// Minimum size of a valid WAV segment, bytes. A RIFF/WAVE header is ~44 bytes; a file below
+    /// the threshold is an empty/unfinished (broken) segment — the typical result of a `kill -9`
+    /// mid-way.
     public static let minValidSegmentBytes = 64
 
-    /// Сколько байт начала файла нужно прочитать, чтобы проверить заголовок.
+    /// How many bytes from the start of a file must be read to check the header.
     ///
-    /// Не найденный в префиксе `data` делает сегмент невалидным, поэтому запас берём с большим
-    /// избытком: реальный `AVAssetWriter(fileType: .wav)` вставляет перед `data` выравнивающий чанк
-    /// `FLLR` и кладёт заголовок `data` ровно на 4088..4096 — в 4 КиБ он умещался впритык, байт в
-    /// байт. Чуть другой `sourceFormatHint`, лишний чанк или смена выравнивания в новой macOS
-    /// вытолкнули бы `data` за окно, и тогда **все** сегменты разом стали бы невалидными: склейка
-    /// молча вернула бы пустоту, а восстановление — то, ради чего всё и писалось, — не нашло бы
-    /// ничего. Чтение 64 КиБ разово на сегмент дешевле такого обрыва.
+    /// A `data` chunk not found within the prefix makes the segment invalid, so we take a wide
+    /// margin: a real `AVAssetWriter(fileType: .wav)` inserts an `FLLR` padding chunk before `data`
+    /// and puts the `data` header at exactly 4088..4096 — it fit into 4 KiB only barely, byte for
+    /// byte. A slightly different `sourceFormatHint`, an extra chunk or a change of alignment in a
+    /// new macOS would push `data` out of the window, and then **all** segments would become invalid
+    /// at once: assembly would silently return nothing, and recovery — the whole point of writing
+    /// this way — would find nothing at all. Reading 64 KiB once per segment is cheaper than such a
+    /// breakdown.
     public static let headerProbeBytes = 65536
 
-    /// Что делать с сегментом, чтобы он попал в склейку.
+    /// What to do with a segment so that it makes it into the assembly.
     public enum Action: Equatable, Sendable {
-        /// Заголовок дописан — файл идёт в `ffmpeg` как есть.
+        /// The header is complete — the file goes to `ffmpeg` as is.
         case include
-        /// Заголовок недописан, но аудио в файле есть: чинится по фактическому размеру.
+        /// The header is unfinished, but there is audio in the file: repaired from the actual size.
         case repair(WAV.HeaderRepair)
     }
 
-    /// Сегмент, попавший в план, и что с ним делать перед склейкой.
+    /// A segment that made it into the plan, and what to do with it before assembly.
     public struct PlannedSegment: Equatable, Sendable {
         public let fileName: String
         public let action: Action
@@ -41,18 +43,20 @@ public enum Recovery {
         }
     }
 
-    /// План склейки одной дорожки: отсортированные по номеру пригодные сегменты.
+    /// Assembly plan for a single track: the usable segments, sorted by number.
     ///
     /// - Parameters:
-    ///   - names: имена файлов из каталога дорожки (могут содержать мусор — отфильтруется).
-    ///   - sizeByFileName: размер каждого файла в байтах (из FS).
-    ///   - headerByFileName: первые `headerProbeBytes` байт каждого файла (из FS). Файл без
-    ///     прочитанного заголовка отбрасывается: подтвердить его целостность нечем.
-    /// - Returns: сегменты в порядке возрастания номера с действием для каждого.
+    ///   - names: file names from the track's directory (may contain junk — it gets filtered out).
+    ///   - sizeByFileName: the size of each file in bytes (from the FS).
+    ///   - headerByFileName: the first `headerProbeBytes` bytes of each file (from the FS). A file
+    ///     whose header could not be read is dropped: there is nothing to confirm its integrity
+    ///     with.
+    /// - Returns: the segments in ascending order of number, each with its action.
     ///
-    /// Единственный источник правды о том, что реально записано, — файловая система: `segment_count`
-    /// в `session.json` сюда не приходит и приходить не должен (маркер обновляется постфактум и на
-    /// крэше отстаёт — доверять ему значило бы потерять запись целиком, см. Task 8.2).
+    /// The only source of truth about what was actually recorded is the file system: `segment_count`
+    /// from `session.json` does not reach here and must not — the marker is updated after the fact
+    /// and lags behind on a crash, so trusting it would mean losing the whole recording (see
+    /// Task 8.2).
     public static func recoveryPlan(fromFileNames names: [String],
                                     sizeByFileName: [String: Int],
                                     headerByFileName: [String: Data]) -> [PlannedSegment] {
@@ -65,58 +69,62 @@ public enum Recovery {
             }
     }
 
-    /// Что делать с сегментом: включить как есть, починить заголовок или выбросить (`nil`).
+    /// What to do with a segment: include it as is, repair its header, or discard it (`nil`).
     ///
-    /// Порядок именно такой: сначала пробуем принять файл, потом спасти, и только если спасать
-    /// нечего — выбрасываем. Прежнее правило «заголовок не дописан → в помойку» стоило живого
-    /// звука: `kill -9` оставляет последний сегмент с непроставленными размерами, но с реальными
-    /// секундами аудио внутри (в живом прогоне — 2.92 с), и обещание «теряем максимум один сегмент»
-    /// нарушалось на ровном месте.
+    /// The order is deliberate: first try to accept the file, then to rescue it, and only if there
+    /// is nothing to rescue — discard it. The former rule, "header unfinished → into the bin", cost
+    /// us live audio: a `kill -9` leaves the last segment with sizes unset but with real seconds of
+    /// audio inside (2.92 s in a live run), and the promise of "we lose at most one segment" was
+    /// broken for no reason at all.
     public static func action(bytes: Int, header: Data) -> Action? {
         guard bytes >= minValidSegmentBytes else { return nil }
         if isFinalizedWAVHeader(header, fileSize: bytes) { return .include }
         return WAV.headerRepair(header: header, fileSize: bytes).map(Action.repair)
     }
 
-    /// Пригоден ли сегмент для склейки — сам по себе или после починки заголовка.
+    /// Whether a segment is usable for assembly — either on its own or after a header repair.
     public static func isUsableSegment(bytes: Int, header: Data) -> Bool {
         action(bytes: bytes, header: header) != nil
     }
 
-    /// Валиден ли сегмент **как есть**: достаточно велик и содержит финализированный WAV-заголовок.
+    /// Whether a segment is valid **as is**: large enough and containing a finalised WAV header.
     ///
-    /// Одного размера мало: убитый `kill -9` посреди сегмента `AVAssetWriter` оставляет файл с
-    /// килобайтами аудио, но с непроставленными размерами в заголовке — `ffmpeg` на таком файле
-    /// падает и утаскивает за собой склейку всей дорожки. Такой сегмент не выбрасывается, а
-    /// чинится (`WAV.headerRepair`); отсюда — эта проверка отвечает только на «нужна ли починка».
+    /// Size alone is not enough: a `kill -9` in the middle of a segment leaves `AVAssetWriter` with
+    /// a file holding kilobytes of audio but with the sizes in the header unset — `ffmpeg` crashes
+    /// on such a file and drags the assembly of the whole track down with it. Such a segment is not
+    /// discarded but repaired (`WAV.headerRepair`); hence this check only answers the question "is a
+    /// repair needed".
     public static func isValidSegment(bytes: Int, header: Data) -> Bool {
         bytes >= minValidSegmentBytes && isFinalizedWAVHeader(header, fileSize: bytes)
     }
 
-    /// Дописан ли WAV-заголовок до конца: RIFF/WAVE-магия на месте, чанки `fmt `/`data` реально
-    /// найдены, а размеры проставлены и умещаются в реальный размер файла.
+    /// Whether the WAV header was written through to the end: the RIFF/WAVE magic is in place, the
+    /// `fmt `/`data` chunks were actually found, and the sizes are set and fit within the real file
+    /// size.
     ///
-    /// Незакрытый сегмент ловится по **размеру чанка `data`**: `AVAssetWriter` проставляет его
-    /// только в `finishWriting`, поэтому после `kill -9` там ноль при мегабайтах реального аудио
-    /// следом (проверено на живом writer'е). Проверка RIFF-размера тут страховка, а не основной
-    /// признак: у убитого файла в этом поле остаётся размер преамбулы (4088) — **меньше** файла,
-    /// так что она проходит.
+    /// An unclosed segment is caught by the **size of the `data` chunk**: `AVAssetWriter` sets it
+    /// only in `finishWriting`, so after a `kill -9` it is zero while megabytes of real audio follow
+    /// (verified against a live writer). The RIFF-size check is a safety net here, not the primary
+    /// signal: in a killed file that field keeps the size of the preamble (4088) — **less** than the
+    /// file, so it passes.
     ///
-    /// Проверка `data` намеренно «умещается», а не «совпадает байт в байт»: заголовок, объявляющий
-    /// **меньше** физического размера, читается `ffmpeg` без ошибок (просто без хвоста), а
-    /// требование точного равенства отправило бы такой сегмент на лишнюю починку с обрезкой файла.
+    /// The `data` check deliberately says "fits" rather than "matches byte for byte": a header that
+    /// declares **less** than the physical size is read by `ffmpeg` without errors (just without the
+    /// tail), whereas requiring exact equality would send such a segment to a pointless repair that
+    /// truncates the file.
     public static func isFinalizedWAVHeader(_ header: Data, fileSize: Int) -> Bool {
-        // 36 — минимальный осмысленный RIFF (fmt + пустой data); больше файла — размер не проставлен.
+        // 36 is the minimum meaningful RIFF (fmt + empty data); larger than the file means the size
+        // was never set.
         guard let riffSize = WAV.riffSize(header), riffSize >= 36, riffSize + 8 <= fileSize,
               let layout = WAV.layout(header) else { return false }
         return layout.declaredDataSize > 0
             && layout.dataBodyOffset + layout.declaredDataSize <= fileSize
     }
 
-    /// Есть ли что восстанавливать: маркер сессии указывает на прерванную запись.
+    /// Whether there is anything to recover: the session marker points at an interrupted recording.
     ///
-    /// `recording` = процесс не дошёл до чистого стопа (краш/рестарт). `done`/`recovered` уже
-    /// финализированы — их трогать не нужно.
+    /// `recording` = the process never reached a clean stop (crash/restart). `done`/`recovered` are
+    /// already finalised — there is no need to touch them.
     public static func needsRecovery(_ manifest: SessionManifest) -> Bool {
         manifest.status == .recording
     }

@@ -2,22 +2,24 @@
 import PackageDescription
 import Foundation
 
-// Acta — menu-bar приложение только для записи онлайн-встреч.
-// Без внешних зависимостей (транскрипции нет → WhisperKit не нужен).
+// Acta — a menu-bar app that only records online meetings.
+// No external dependencies (there is no transcription → WhisperKit is not needed).
 //
-// Раскладка таргетов (важно для тестируемости в окружении ТОЛЬКО с Command Line Tools):
-//   • ActaKit        — библиотека с чистой логикой (её тестируем; растёт в Task 2–7).
-//   • Acta           — executable, @main + SwiftUI menu-bar; тонкий, зависит от ActaKit.
-//   • ActaTestRunner — executable со swift-testing @Test-функциями + точкой входа
-//                      (`Testing.__swiftPMEntryPoint`). Это НАСТОЯЩИЙ прогон тестов
+// Target layout (important for testability in a Command-Line-Tools-ONLY environment):
+//   • ActaKit        — the library holding the pure logic (this is what we test; it grows in
+//                      Task 2–7).
+//   • Acta           — the executable, @main + SwiftUI menu bar; thin, depends on ActaKit.
+//   • ActaTestRunner — an executable with swift-testing @Test functions plus an entry point
+//                      (`Testing.__swiftPMEntryPoint`). This is the REAL test run
 //                      (`swift run ActaTestRunner` / `bash Scripts/test.sh`).
-//   • ActaTests      — testTarget-заготовка, чтобы `swift test` проходил (см. ниже).
+//   • ActaTests      — a stub testTarget so that `swift test` passes (see below).
 //
-// Почему так: при CLT-only (полного Xcode нет) `swift test` СОБИРАЕТ тестовый бандл, но НЕ
-// исполняет его — в системе нет хост-утилиты `xctest`, поэтому падающий тест всё равно даёт
-// exit 0. Чтобы тесты реально выполнялись (и падали при ошибке), их запускает executable-раннер
-// через публичную точку входа swift-testing. testTarget оставлен как «заготовка» ради команды
-// `swift test` из плана; реальный прогон — `bash Scripts/test.sh`.
+// Why it is done this way: under CLT-only (no full Xcode) `swift test` BUILDS the test bundle but
+// does NOT execute it — the `xctest` host utility is not present on the system, so a failing test
+// still yields exit 0. To make the tests actually run (and fail on an error), they are launched by
+// the executable runner through the public swift-testing entry point. The testTarget is kept as a
+// "stub" for the sake of the `swift test` command from the plan; the real run is
+// `bash Scripts/test.sh`.
 
 func developerDir() -> String {
     if let dir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !dir.isEmpty {
@@ -37,14 +39,14 @@ func developerDir() -> String {
             return str
         }
     } catch {
-        // ignore — вернём дефолт ниже
+        // ignore — we return the default below
     }
     return "/Library/Developer/CommandLineTools"
 }
 
-// Флаги, дающие swift-testing (Testing.framework, lib_TestingInterop.dylib, макро-плагин
-// TestingMacros) в CLT-раскладке. При полном Xcode пути другие и SwiftPM находит всё сам —
-// тогда флаги не добавляем.
+// Flags that provide swift-testing (Testing.framework, lib_TestingInterop.dylib, the TestingMacros
+// macro plugin) in the CLT layout. With a full Xcode the paths differ and SwiftPM finds everything
+// on its own — in that case we do not add the flags.
 func swiftTestingSettings() -> (swift: [SwiftSetting], linker: [LinkerSetting]) {
     let dev = developerDir()
     let frameworks = "\(dev)/Library/Developer/Frameworks"

@@ -1,35 +1,37 @@
 import AVFoundation
 import CoreGraphics
 
-/// Проверка и запрос TCC-разрешений, нужных для записи: Screen Recording (системный звук через
-/// ScreenCaptureKit) и Microphone. Обе проверки — рантайм; UI/самодиагностика (Task 4/6)
-/// решают, что делать по статусу. Здесь — тонкая обёртка над системными API без побочной логики.
+/// Checking and requesting the TCC permissions needed for recording: Screen Recording (system audio
+/// via ScreenCaptureKit) and Microphone. Both checks are runtime ones; the UI/self-diagnosis
+/// (Task 4/6) decide what to do based on the status. This is a thin wrapper over the system APIs
+/// with no side logic.
 enum Permissions {
-    /// Есть ли разрешение Screen Recording (нужно даже для audio-only захвата через SCStream).
+    /// Whether the Screen Recording permission is granted (needed even for audio-only capture
+    /// via SCStream).
     ///
-    /// `CGPreflightScreenCaptureAccess()` не показывает системный диалог — только читает статус.
+    /// `CGPreflightScreenCaptureAccess()` does not show the system dialog — it only reads the status.
     static var hasScreenRecording: Bool {
         CGPreflightScreenCaptureAccess()
     }
 
-    /// Запросить Screen Recording. Первый вызов показывает системный диалог; возвращает текущий
-    /// статус синхронно (macOS может потребовать перезапуск приложения после выдачи права).
+    /// Request Screen Recording. The first call shows the system dialog; returns the current status
+    /// synchronously (macOS may require restarting the app after the permission is granted).
     @discardableResult
     static func requestScreenRecording() -> Bool {
         CGRequestScreenCaptureAccess()
     }
 
-    /// Есть ли разрешение на микрофон прямо сейчас.
+    /// Whether the microphone permission is granted right now.
     static var hasMicrophone: Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
-    /// Статус доступа к микрофону (для диагностики: `notDetermined`/`denied`/`restricted`).
+    /// Microphone access status (for diagnostics: `notDetermined`/`denied`/`restricted`).
     static var microphoneStatus: AVAuthorizationStatus {
         AVCaptureDevice.authorizationStatus(for: .audio)
     }
 
-    /// Запросить доступ к микрофону (системный диалог при `notDetermined`).
+    /// Request microphone access (system dialog when `notDetermined`).
     static func requestMicrophone() async -> Bool {
         await AVCaptureDevice.requestAccess(for: .audio)
     }

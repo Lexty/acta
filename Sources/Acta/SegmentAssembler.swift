@@ -2,61 +2,66 @@ import ActaKit
 import Foundation
 import os
 
-/// Сборка итоговых файлов записи из сегментов через `ffmpeg`. Используется и при чистом стопе,
-/// и при восстановлении (`RecoveryManager`) — правило выбора сегментов одинаковое.
+/// Assembly of the final recording files from segments via `ffmpeg`. Used both on a clean stop
+/// and during recovery (`RecoveryManager`) — the segment-selection rule is the same.
 ///
-/// Порядок: для каждой дорожки собрать план сегментов (`Recovery.recoveryPlan`) → починить
-/// недописанные заголовки → `ffmpeg -f concat -c copy` → `system.wav`/`mic.wav`; если получились
-/// обе — микс в `combined.wav`. Сегмент без пригодного аудио план отбрасывает, поэтому склейка не
-/// падает, а недописанный (но со звуком) — чинится по фактическому размеру, а не теряется.
+/// Order: for each track build a segment plan (`Recovery.recoveryPlan`) → repair unfinalized
+/// headers → `ffmpeg -f concat -c copy` → `system.wav`/`mic.wav`; if both came out — mix into
+/// `combined.wav`. The plan drops a segment without usable audio, so assembly does not fail, while
+/// an unfinalized one (but with audio) is repaired from its actual size rather than lost.
 ///
-/// Аргументы `ffmpeg` — чистые функции `FFmpeg.*` (покрыты юнит-тестами); тут только запуск процесса.
+/// The `ffmpeg` arguments are pure functions `FFmpeg.*` (covered by unit tests); this file only
+/// launches the process.
 struct SegmentAssembler {
-    /// Результат сборки — какие итоговые файлы получились.
+    /// Assembly result — which final files were produced.
     struct Result: Sendable {
         var systemWAV: URL?
         var micWAV: URL?
         var combinedWAV: URL?
-        /// Сколько валидных сегментов вошло в склейку (максимум по дорожкам).
+        /// How many valid segments went into the assembly (maximum across the tracks).
         var segmentCount: Int = 0
-        /// Длительность собранного аудио, с — измеренная по итоговому файлу, а не по часам.
-        /// `nil`, если измерить не удалось (файла нет / заголовок не читается).
+        /// Duration of the assembled audio, in seconds — measured from the final file, not from
+        /// the clock. `nil` if it could not be measured (no file / unreadable header).
         ///
-        /// Часы врут: `SCStream` поднимается не мгновенно, и в живом прогоне запись «на 29 с»
-        /// содержала 23.66 с звука. В `info.md` идёт именно эта величина (Task 8.3).
+        /// The clock lies: `SCStream` does not come up instantly, and in a live run a "29 s"
+        /// recording contained 23.66 s of audio. It is exactly this value that goes into `info.md`
+        /// (Task 8.3).
         var durationSeconds: Double?
     }
 
     enum AssembleError: Error {
         case ffmpegNotFound
         case noSegments
-        /// `ffmpeg` не смог склеить дорожку. Отдельно от `noSegments`: пустая дорожка — не ошибка,
-        /// а провал склейки означает, что сегменты — единственная копия аудио и трогать их нельзя.
+        /// `ffmpeg` failed to assemble a track. Kept separate from `noSegments`: an empty track is
+        /// not an error, whereas a failed assembly means the segments are the only copy of the
+        /// audio and must not be touched.
         case concatFailed(track: String)
-        /// Обе дорожки склеены, но `ffmpeg` не смог свести их в `combined.wav`. Ошибка, а не «микс
-        /// не вышел»: при настройке «только combined» пользователь просил ровно этот файл, и молчать
-        /// про его отсутствие — то же, что показывать «немой» recording.
+        /// Both tracks were assembled, but `ffmpeg` could not mix them into `combined.wav`. This is
+        /// an error, not a "the mix didn't work out": with the "combined only" setting the user
+        /// asked for exactly that file, and staying silent about its absence is the same as showing
+        /// a "mute" recording.
         case mixFailed
     }
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "SegmentAssembler")
     private let fileManager = FileManager.default
 
-    /// Собрать итоговые файлы в `directory`.
+    /// Assemble the final files in `directory`.
     ///
     /// - Parameters:
-    ///   - directory: папка записи (содержит `system/`, `mic/`).
-    ///   - deleteSegments: удалить каталоги сегментов после успешной склейки.
-    ///   - tracks: какие итоговые дорожки сохранить (настройка Task 7). `combined` требует обеих
-    ///     дорожек, поэтому промежуточные `system.wav`/`mic.wav` собираются и при снятом флаге
-    ///     дорожки, если нужен микс, и затем удаляются.
+    ///   - directory: the recording folder (contains `system/`, `mic/`).
+    ///   - deleteSegments: delete the segment directories after a successful assembly.
+    ///   - tracks: which final tracks to keep (Task 7 setting). `combined` requires both tracks, so
+    ///     the intermediate `system.wav`/`mic.wav` are assembled even when the track's flag is off,
+    ///     provided the mix is needed, and are deleted afterwards.
     @discardableResult
     func assemble(in directory: URL, deleteSegments: Bool,
                   tracks: RecordingSettings.TrackSelection = .init(system: true, mic: true, combined: true)
     ) throws -> Result {
         guard let ffmpeg = Self.locateFFmpeg() else { throw AssembleError.ffmpegNotFound }
 
-        // combined = микс двух дорожек, поэтому исходные wav нужны, даже если сама дорожка не сохраняется.
+        // combined = a mix of the two tracks, so the source wavs are needed even if the track itself
+        // is not kept.
         let needSystem = tracks.system || tracks.combined
         let needMic = tracks.mic || tracks.combined
 
@@ -76,10 +81,11 @@ struct SegmentAssembler {
         var result = Result(systemWAV: systemWAV, micWAV: micWAV, combinedWAV: nil,
                             segmentCount: max(system.count, mic.count))
 
-        // Обе дорожки склеились, а микс не вышел = сбой ffmpeg: доверия к склейке нет, поэтому
-        // бросаем, как и `concatFailed`. Маркер сессии остаётся `recording`, сегменты и промежуточные
-        // wav целы, а восстановление на следующем запуске повторит попытку. Вернуть тут «успех» без
-        // `combined.wav` значило бы сказать «сохранена» про файл, которого нет.
+        // Both tracks assembled but the mix did not = an ffmpeg failure: the assembly cannot be
+        // trusted, so we throw, just like for `concatFailed`. The session marker stays `recording`,
+        // the segments and the intermediate wavs are intact, and recovery on the next launch will
+        // retry. Returning "success" here without `combined.wav` would mean claiming "saved" about
+        // a file that does not exist.
         if tracks.combined, let systemWAV, let micWAV {
             let combined = directory.appendingPathComponent("combined.wav")
             let args = FFmpeg.mixArgs(systemPath: systemWAV.path, micPath: micWAV.path,
@@ -88,12 +94,13 @@ struct SegmentAssembler {
             result.combinedWAV = combined
         }
 
-        // Микс запрошен, но одной из дорожек просто не было (мик отключён — `concatTrack` вернул nil,
-        // сбой бы бросил `concatFailed`): свести нечего. Уцелевшая дорожка — единственный результат
-        // записи, и удалять её по настройке «только combined» нельзя: стоп потерял бы встречу целиком.
+        // The mix was requested, but one of the tracks simply did not exist (mic off — `concatTrack`
+        // returned nil; a failure would have thrown `concatFailed`): there is nothing to mix. The
+        // surviving track is the only result of the recording, and deleting it because of the
+        // "combined only" setting is not allowed: the stop would lose the meeting entirely.
         let combinedMissing = tracks.combined && result.combinedWAV == nil
 
-        // Убрать промежуточные дорожки, которые пользователь не просил сохранять.
+        // Remove the intermediate tracks the user did not ask to keep.
         if !tracks.system, let systemWAV, !combinedMissing {
             try? fileManager.removeItem(at: systemWAV)
             result.systemWAV = nil
@@ -103,19 +110,20 @@ struct SegmentAssembler {
             result.micWAV = nil
         }
 
-        // Сюда доходим, когда каждая дорожка, которую вообще было из чего собрать, уже лежит рядом
-        // отдельным wav: любой провал склейки бросает исключение выше, а `combinedMissing` означает,
-        // что одной из исходных дорожек не существовало, и уцелевшая (`system.wav`/`mic.wav`) выше
-        // намеренно оставлена. То есть сегменты — уже избыточное сырьё, и Mac без микрофона (микс
-        // невозможен в принципе) тоже не копит их вечно.
+        // We get here once every track that there was anything to assemble from already sits next
+        // to us as its own wav: any assembly failure throws above, and `combinedMissing` means one
+        // of the source tracks did not exist and the surviving one (`system.wav`/`mic.wav`) was
+        // deliberately left in place above. That is, the segments are by now redundant raw material,
+        // and a Mac without a microphone (where a mix is impossible in principle) does not hoard
+        // them forever either.
         if deleteSegments {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }
         }
 
-        // Меряем по тому файлу, который пользователь и получит; дорожки одной записи равны по
-        // длине, поэтому выбор между ними на цифру не влияет.
+        // We measure the very file the user will get; the tracks of one recording are equal in
+        // length, so the choice between them does not affect the number.
         result.durationSeconds = [result.combinedWAV, result.systemWAV, result.micWAV]
             .compactMap { $0 }
             .lazy
@@ -125,25 +133,26 @@ struct SegmentAssembler {
         return result
     }
 
-    /// Длительность готового wav по его заголовку (`WAV.durationSeconds` поверх FS).
+    /// Duration of a finished wav from its header (`WAV.durationSeconds` on top of the FS).
     static func measuredDuration(of url: URL) -> Double? {
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
         guard let size else { return nil }
         return WAV.durationSeconds(header: headerPrefix(of: url), fileSize: size)
     }
 
-    // MARK: - Приватное
+    // MARK: - Private
 
-    /// Склеить валидные сегменты одной дорожки в `outputName`. Возвращает URL итога либо `nil`,
-    /// если валидных сегментов нет (пустая дорожка — не ошибка, просто нечего склеивать).
-    /// Бросает `concatFailed`, если сегменты есть, но `ffmpeg` их не склеил: молча вернуть `nil`
-    /// нельзя — вызывающий счёл бы дорожку пустой и удалил бы её сегменты.
+    /// Assemble the valid segments of a single track into `outputName`. Returns the URL of the
+    /// result or `nil` if there are no valid segments (an empty track is not an error, there is
+    /// simply nothing to assemble). Throws `concatFailed` if segments exist but `ffmpeg` did not
+    /// assemble them: silently returning `nil` is not an option — the caller would consider the
+    /// track empty and delete its segments.
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
                              ffmpeg: String) throws -> (url: URL?, count: Int) {
         let trackDir = directory.appendingPathComponent(dirName)
         let plan = preparedSegments(inTrackDir: trackDir)
         guard !plan.isEmpty else {
-            log.info("Дорожка \(dirName, privacy: .public): валидных сегментов нет")
+            log.info("Track \(dirName, privacy: .public): no valid segments")
             return (nil, 0)
         }
 
@@ -158,11 +167,12 @@ struct SegmentAssembler {
         return (output, plan.count)
     }
 
-    /// План склейки дорожки (`Recovery.recoveryPlan` поверх реальной FS) — только чтение.
+    /// The assembly plan for a track (`Recovery.recoveryPlan` on top of the real FS) — read only.
     ///
-    /// Статический и внутренний, потому что тем же правилом `RecordingController` решает, есть ли в
-    /// папке спасаемый звук: `AVAssetWriter` создаёт файл сегмента **до** первого буфера, поэтому
-    /// проверка «файл с именем NNNN.wav существует» приняла бы за звук пустую преамбулу.
+    /// Static and internal, because `RecordingController` uses the very same rule to decide whether
+    /// a folder holds salvageable audio: `AVAssetWriter` creates the segment file **before** the
+    /// first buffer, so a check like "a file named NNNN.wav exists" would mistake an empty preamble
+    /// for audio.
     static func plannedSegments(inTrackDir trackDir: URL) -> [Recovery.PlannedSegment] {
         let fileManager = FileManager.default
         let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
@@ -179,12 +189,14 @@ struct SegmentAssembler {
                                      headerByFileName: headers)
     }
 
-    /// Имена сегментов дорожки, готовых к склейке: план + починка недописанных заголовков на месте.
+    /// Names of the track's segments ready for assembly: the plan + in-place repair of unfinalized
+    /// headers.
     ///
-    /// Чинить приходится именно здесь, перед `ffmpeg`: `kill -9` оставляет последний сегмент с
-    /// секундами реального звука и непроставленными размерами, и другого шанса вернуть этот звук
-    /// нет. Сегмент, который починить не удалось (файл не открылся на запись), из плана выпадает —
-    /// отдать `ffmpeg` заведомо битый файл значило бы уронить склейку всей дорожки ради его хвоста.
+    /// The repair has to happen right here, before `ffmpeg`: `kill -9` leaves the last segment with
+    /// seconds of real audio and unwritten sizes, and there is no other chance to get that audio
+    /// back. A segment that could not be repaired (the file did not open for writing) drops out of
+    /// the plan — handing `ffmpeg` a knowingly broken file would mean sinking the assembly of the
+    /// whole track for the sake of its tail.
     private func preparedSegments(inTrackDir trackDir: URL) -> [String] {
         Self.plannedSegments(inTrackDir: trackDir).compactMap { segment in
             switch segment.action {
@@ -193,17 +205,23 @@ struct SegmentAssembler {
             case .repair(let repair):
                 let url = trackDir.appendingPathComponent(segment.fileName)
                 guard Self.applyRepair(repair, to: url) else {
-                    log.error("Не удалось починить заголовок \(segment.fileName, privacy: .public) — сегмент пропущен")
+                    log.error("""
+                        Failed to repair the header of \(segment.fileName, privacy: .public) — \
+                        segment skipped
+                        """)
                     return nil
                 }
-                log.info("Починен недописанный заголовок \(segment.fileName, privacy: .public): \(repair.dataSize) байт аудио")
+                log.info("""
+                    Repaired the unfinalized header of \(segment.fileName, privacy: .public): \
+                    \(repair.dataSize) bytes of audio
+                    """)
                 return segment.fileName
             }
         }
     }
 
-    /// Проставить размеры в заголовке и обрезать файл до целого числа кадров. `false` — файл не
-    /// поддался (вызывающий исключает сегмент из склейки).
+    /// Write the sizes into the header and truncate the file to a whole number of frames. `false`
+    /// means the file would not cooperate (the caller excludes the segment from the assembly).
     private static func applyRepair(_ repair: WAV.HeaderRepair, to url: URL) -> Bool {
         guard let handle = try? FileHandle(forUpdating: url) else { return false }
         defer { try? handle.close() }
@@ -220,15 +238,15 @@ struct SegmentAssembler {
         }
     }
 
-    /// Прочитать начало файла для проверки WAV-заголовка (`Recovery.isValidSegment`). Пустой
-    /// результат = файл не читается → сегмент не считается валидным.
+    /// Read the beginning of the file to check the WAV header (`Recovery.isValidSegment`). An empty
+    /// result = the file is unreadable → the segment is not considered valid.
     private static func headerPrefix(of url: URL) -> Data {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
         defer { try? handle.close() }
         return (try? handle.read(upToCount: Recovery.headerProbeBytes)) ?? Data()
     }
 
-    /// Запустить `ffmpeg`; `true` при коде выхода 0.
+    /// Run `ffmpeg`; `true` on exit code 0.
     private func runFFmpeg(_ ffmpeg: String, args: [String]) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: ffmpeg)
@@ -239,17 +257,17 @@ struct SegmentAssembler {
             try proc.run()
             proc.waitUntilExit()
             if proc.terminationStatus != 0 {
-                log.error("ffmpeg вышел с кодом \(proc.terminationStatus)")
+                log.error("ffmpeg exited with code \(proc.terminationStatus)")
                 return false
             }
             return true
         } catch {
-            log.error("Не удалось запустить ffmpeg: \(error.localizedDescription, privacy: .public)")
+            log.error("Failed to launch ffmpeg: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
 
-    /// Найти бинарь `ffmpeg`: типичные пути Homebrew (Apple Silicon/Intel) + `PATH`.
+    /// Locate the `ffmpeg` binary: the usual Homebrew paths (Apple Silicon/Intel) + `PATH`.
     static func locateFFmpeg() -> String? {
         let candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {

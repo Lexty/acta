@@ -1,9 +1,9 @@
 import SwiftUI
 import ActaKit
 
-/// Точка входа. Menu-bar приложение (`LSUIElement=true`, без иконки в доке).
-/// Захват (`SCStream` + микрофон) требует macOS 15, поэтому рабочий UI доступен с неё; на более
-/// старых системах показываем понятную заглушку вместо «немого» меню.
+/// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
+/// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
+/// version on; on older systems we show a clear placeholder instead of a "mute" menu.
 @main
 struct ActaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -20,9 +20,10 @@ struct ActaApp: App {
     }
 }
 
-/// Нужен ровно ради одного: дать точку входа «приложение запустилось». Восстановление прерванных
-/// записей обязано идти на старте (SPEC §7), а меню-бар с `menuBarExtraStyle(.window)` создаёт свой
-/// контент только по клику пользователя — до первого открытия меню никакой SwiftUI-хук не сработает.
+/// Needed for exactly one thing: to provide an "app has launched" entry point. Recovery of
+/// interrupted recordings must run at startup (SPEC §7), and a menu bar with
+/// `menuBarExtraStyle(.window)` builds its content only when the user clicks — no SwiftUI hook
+/// fires before the menu is opened for the first time.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
@@ -30,13 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Не дать выходу оборвать активную запись. Без этого «Выход» во время записи ничем не
-    /// отличается от `kill -9`: текущий сегмент остаётся нефинализированным, маркер — `recording`,
-    /// и до `segmentSeconds` звука теряется. Восстановление на такое рассчитано, но оно про крах,
-    /// а не про штатное действие пользователя — здесь запись надо честно дописать и склеить.
+    /// Prevent quitting from cutting off an active recording. Without this, "Quit" during a
+    /// recording is no different from `kill -9`: the current segment stays unfinalised, the marker
+    /// stays `recording`, and up to `segmentSeconds` of audio is lost. Recovery does handle that,
+    /// but it exists for crashes, not for a deliberate user action — here the recording must be
+    /// honestly finished and assembled.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard #available(macOS 15.0, *) else { return .terminateNow }
-        // AppKit зовёт этот метод на главном потоке, где и живёт контроллер.
+        // AppKit calls this method on the main thread, which is where the controller lives.
         return MainActor.assumeIsolated {
             let controller = RecordingController.shared
             guard controller.isBusy else { return .terminateNow }
@@ -49,28 +51,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Заглушка для macOS < 15 (захват микрофона одним `SCStream` появился в 15).
+/// Placeholder for macOS < 15 (microphone capture through a single `SCStream` arrived in 15).
 struct UnsupportedContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(AppInfo.name).font(.headline)
-            Text("Требуется macOS 15 или новее.")
+            Text("macOS 15 or later is required.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Divider()
-            Button("Выход") { NSApplication.shared.terminate(nil) }
+            Button("Quit") { NSApplication.shared.terminate(nil) }
         }
         .padding(12)
         .frame(width: 240)
     }
 }
 
-/// Содержимое меню-бара: старт/стоп, таймер, индикатор состояния, поле заголовка, список записей
-/// и заметный показ ошибок самодиагностики (Task 6).
+/// Menu-bar contents: start/stop, timer, status indicator, title field, list of recordings and
+/// prominent display of self-diagnosis errors (Task 6).
 @available(macOS 15.0, *)
 struct MenuContent: View {
-    // Общий с `AppDelegate` экземпляр (он запускает восстановление на старте), поэтому `Observed`,
-    // а не `StateObject`: временем жизни владеет не вью.
+    // The instance is shared with `AppDelegate` (which kicks off recovery at startup), hence
+    // `Observed` rather than `StateObject`: the view does not own its lifetime.
     @ObservedObject private var controller = RecordingController.shared
     @State private var settingsExpanded = false
 
@@ -99,9 +101,9 @@ struct MenuContent: View {
 
             Divider()
             HStack {
-                Button("Открыть архив") { controller.openInFinder(controller.archiveRoot) }
+                Button("Open Archive") { controller.openInFinder(controller.archiveRoot) }
                 Spacer()
-                Button("Выход") { NSApplication.shared.terminate(nil) }
+                Button("Quit") { NSApplication.shared.terminate(nil) }
             }
             .font(.caption)
         }
@@ -110,7 +112,7 @@ struct MenuContent: View {
         .onAppear { controller.onAppear() }
     }
 
-    // MARK: - Секции
+    // MARK: - Sections
 
     private var header: some View {
         HStack(spacing: 8) {
@@ -131,8 +133,8 @@ struct MenuContent: View {
 
     private var titleField: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Заголовок").font(.caption).foregroundStyle(.secondary)
-            TextField(controller.suggestedTitle.isEmpty ? "Название встречи"
+            Text("Title").font(.caption).foregroundStyle(.secondary)
+            TextField(controller.suggestedTitle.isEmpty ? "Meeting title"
                                                         : controller.suggestedTitle,
                       text: $controller.title)
                 .textFieldStyle(.roundedBorder)
@@ -144,7 +146,7 @@ struct MenuContent: View {
         HStack {
             if controller.phase == .saving {
                 Button {} label: {
-                    Label("Сохранение…", systemImage: "square.and.arrow.down")
+                    Label("Saving…", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
                 .disabled(true)
@@ -152,14 +154,14 @@ struct MenuContent: View {
                 Button {
                     controller.stop()
                 } label: {
-                    Label("Остановить", systemImage: "stop.fill").frame(maxWidth: .infinity)
+                    Label("Stop", systemImage: "stop.fill").frame(maxWidth: .infinity)
                 }
                 .tint(.red)
             } else {
                 Button {
                     controller.start()
                 } label: {
-                    Label("Начать запись", systemImage: "record.circle").frame(maxWidth: .infinity)
+                    Label("Start Recording", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }
                 .tint(.accentColor)
             }
@@ -170,9 +172,9 @@ struct MenuContent: View {
 
     private var recordingsList: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Последние записи").font(.caption).foregroundStyle(.secondary)
+            Text("Recent Recordings").font(.caption).foregroundStyle(.secondary)
             if controller.recordings.isEmpty {
-                Text("Пока нет записей").font(.caption).foregroundStyle(.tertiary)
+                Text("No recordings yet").font(.caption).foregroundStyle(.tertiary)
             } else {
                 ForEach(controller.recordings.prefix(5), id: \.directory) { recording in
                     recordingRow(recording)
@@ -200,26 +202,26 @@ struct MenuContent: View {
                 Image(systemName: "folder")
             }
             .buttonStyle(.borderless)
-            .help("Открыть папку в Finder")
+            .help("Open folder in Finder")
         }
     }
 
-    // MARK: - Настройки
+    // MARK: - Settings
 
     private var settingsSection: some View {
         DisclosureGroup(isExpanded: $settingsExpanded) {
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Папка архива").font(.caption2).foregroundStyle(.secondary)
+                    Text("Archive folder").font(.caption2).foregroundStyle(.secondary)
                     TextField("~/Acta", text: $controller.settings.archivePath)
                         .textFieldStyle(.roundedBorder)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Сохранять дорожки").font(.caption2).foregroundStyle(.secondary)
-                    Toggle("Системный звук (system.wav)", isOn: $controller.settings.saveSystemTrack)
-                    Toggle("Микрофон (mic.wav)", isOn: $controller.settings.saveMicTrack)
-                    Toggle("Микс (combined.wav)", isOn: $controller.settings.saveCombinedTrack)
+                    Text("Save tracks").font(.caption2).foregroundStyle(.secondary)
+                    Toggle("System audio (system.wav)", isOn: $controller.settings.saveSystemTrack)
+                    Toggle("Microphone (mic.wav)", isOn: $controller.settings.saveMicTrack)
+                    Toggle("Mix (combined.wav)", isOn: $controller.settings.saveCombinedTrack)
                 }
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -227,10 +229,10 @@ struct MenuContent: View {
                 Stepper(value: $controller.settings.segmentSeconds,
                         in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
                         step: 5) {
-                    Text("Длина сегмента: \(controller.settings.segmentSeconds) с").font(.caption)
+                    Text("Segment length: \(controller.settings.segmentSeconds) s").font(.caption)
                 }
 
-                Toggle("Удалять сегменты после склейки",
+                Toggle("Delete segments after assembly",
                        isOn: $controller.settings.deleteSegmentsAfterAssembly)
                     .toggleStyle(.checkbox)
                     .font(.caption)
@@ -239,11 +241,11 @@ struct MenuContent: View {
             .disabled(controller.isBusy)
             .onChange(of: controller.settings) { controller.saveSettings() }
         } label: {
-            Label("Настройки", systemImage: "gearshape").font(.caption)
+            Label("Settings", systemImage: "gearshape").font(.caption)
         }
     }
 
-    // MARK: - Баннер
+    // MARK: - Banner
 
     private func banner(_ text: String, systemImage: String, tint: Color,
                         dismiss: (() -> Void)?) -> some View {
@@ -260,7 +262,7 @@ struct MenuContent: View {
         .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    // MARK: - Отображение состояния
+    // MARK: - Status presentation
 
     private var statusIcon: String {
         switch controller.phase {
@@ -282,10 +284,10 @@ struct MenuContent: View {
 
     private var statusText: String {
         switch controller.phase {
-        case .idle: return "Готов к записи"
-        case .recording: return "Идёт запись"
-        case .saving: return "Сохранение…"
-        case .error: return "Ошибка"
+        case .idle: return "Ready to record"
+        case .recording: return "Recording"
+        case .saving: return "Saving…"
+        case .error: return "Error"
         }
     }
 
@@ -300,9 +302,9 @@ struct MenuContent: View {
 
     private func statusLabel(_ status: SessionManifest.Status?) -> String {
         switch status {
-        case .done: return "сохранена"
-        case .recovered: return "восстановлена"
-        case .recording: return "не завершена"
+        case .done: return "saved"
+        case .recovered: return "recovered"
+        case .recording: return "unfinished"
         case nil: return "—"
         }
     }

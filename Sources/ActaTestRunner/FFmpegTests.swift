@@ -1,7 +1,7 @@
 import Testing
 import ActaKit
 
-// Чистая логика построения аргументов ffmpeg (склейка/микс) — критерий приёмки Task 2.
+// Pure logic for building ffmpeg arguments (assembly/mix) - an acceptance criterion of Task 2.
 
 @Test
 func concatArgsAreCopyMuxWithSafeZero() {

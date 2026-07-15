@@ -1,9 +1,9 @@
 import Testing
 import ActaKit
 
-// Заготовка: доказывает, что тестовый раннер реально исполняет тесты и падает при ошибке.
-// Содержательные юнит-тесты (аргументы ffmpeg, логика восстановления, детектор «данные не
-// текут», slug/front-matter) добавляются в Task 2–5 рядом, в этом же таргете.
+// Scaffold: proves that the test runner actually executes tests and fails on an error.
+// The substantive unit tests (ffmpeg arguments, recovery logic, the "data is not flowing"
+// detector, slug/front-matter) are added alongside in Task 2-5, in this same target.
 @Test
 func bundleIdentifierIsStable() {
     #expect(AppInfo.bundleID == "dev.personal.acta")

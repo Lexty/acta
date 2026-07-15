@@ -3,29 +3,30 @@ import Foundation
 import UserNotifications
 import os
 
-/// Локальные уведомления о сохранении/восстановлении записи (Task 6).
+/// Local notifications about a recording being saved/recovered (Task 6).
 ///
-/// Тонкая обёртка над `UNUserNotificationCenter`. Работает только в собранном `.app` (есть
-/// bundle identifier); при запуске «голого» executable молча ничего не делает, чтобы не падать.
+/// A thin wrapper over `UNUserNotificationCenter`. Works only inside a built `.app` (which has a
+/// bundle identifier); when running the bare executable it silently does nothing so as not to crash.
 enum Notifier {
     private static let log = Logger(subsystem: AppInfo.bundleID, category: "Notifier")
 
-    /// Доступен ли центр уведомлений (есть bundle identifier — т.е. запущены как `.app`).
+    /// Whether the notification center is available (a bundle identifier exists — i.e. running as `.app`).
     private static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
 
-    /// Запросить разрешение на уведомления (один раз, на старте). Тихо игнорирует отказ.
+    /// Request notification permission (once, at startup). Silently ignores a denial.
     static func requestAuthorization() {
         guard isAvailable else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
-                log.error("Запрос прав на уведомления не удался: \(error.localizedDescription, privacy: .public)")
+                let reason = error.localizedDescription
+                log.error("Notification permission request failed: \(reason, privacy: .public)")
             } else {
-                log.info("Права на уведомления: \(granted ? "выданы" : "отклонены", privacy: .public)")
+                log.info("Notification permission: \(granted ? "granted" : "denied", privacy: .public)")
             }
         }
     }
 
-    /// Показать локальное уведомление (немедленно).
+    /// Show a local notification (immediately).
     static func notify(title: String, body: String) {
         guard isAvailable else { return }
         let content = UNMutableNotificationContent()
@@ -34,7 +35,7 @@ enum Notifier {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                log.error("Показ уведомления не удался: \(error.localizedDescription, privacy: .public)")
+                log.error("Showing the notification failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

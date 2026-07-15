@@ -2,8 +2,9 @@ import Testing
 import Foundation
 import ActaKit
 
-// Авто-подсказка источника встречи по запущенным приложениям — чистая логика, покрыта отдельно
-// от NSWorkspace (FS/системную часть даёт SourceDetector в таргете Acta).
+// Auto-suggesting the meeting source from the running applications - pure logic, covered
+// separately from NSWorkspace (the FS/system part is provided by SourceDetector in the Acta
+// target).
 
 // MARK: - detect
 
@@ -22,14 +23,14 @@ func detectReturnsNilWhenNothingKnownRunning() {
 
 @Test
 func detectPriorityFollowsKnownOrderNotAppOrder() {
-    // Приоритет — по порядку `known` (Zoom раньше Slack), а не по порядку в списке приложений.
+    // Priority follows the order of `known` (Zoom before Slack), not the order of the app list.
     #expect(MeetingSource.detect(fromRunningApps: ["Slack", "zoom.us"]) == "Zoom")
     #expect(MeetingSource.detect(fromRunningApps: ["zoom.us", "Slack"]) == "Zoom")
 }
 
 @Test
 func detectMatchesSubstring() {
-    // Имя процесса может отличаться от бренда — матчим по подстроке.
+    // The process name may differ from the brand name - we match on a substring.
     #expect(MeetingSource.detect(fromRunningApps: ["Discord Canary"]) == "Discord")
 }
 
@@ -37,7 +38,7 @@ func detectMatchesSubstring() {
 
 @Test
 func suggestedTitleUsesSourceWhenKnown() {
-    let date = Date(timeIntervalSince1970: 1_700_000_000) // фиксированная точка
+    let date = Date(timeIntervalSince1970: 1_700_000_000) // a fixed point in time
     let utc = TimeZone(identifier: "UTC")!
     let title = MeetingSource.suggestedTitle(source: "Zoom", date: date, timeZone: utc)
     #expect(title == "Zoom — 2023-11-14 22:13")
@@ -48,7 +49,7 @@ func suggestedTitleFallsBackWhenSourceUnknown() {
     let date = Date(timeIntervalSince1970: 1_700_000_000)
     let utc = TimeZone(identifier: "UTC")!
     #expect(MeetingSource.suggestedTitle(source: nil, date: date, timeZone: utc)
-            == "Встреча 2023-11-14 22:13")
+            == "Meeting 2023-11-14 22:13")
     #expect(MeetingSource.suggestedTitle(source: "", date: date, timeZone: utc)
-            == "Встреча 2023-11-14 22:13")
+            == "Meeting 2023-11-14 22:13")
 }

@@ -2,28 +2,28 @@ import AVFoundation
 import ActaKit
 import os
 
-/// Потоковая **сегментная** запись одной дорожки на диск.
+/// Streaming **segmented** recording of a single track to disk.
 ///
-/// Пишем не один длинный файл, а короткие сегменты по ~`SegmentLayout.defaultSegmentSeconds` с
-/// (см. скилл `crash-safe-recording`): каждый сегмент — отдельный `AVAssetWriter`, который по
-/// истечении интервала **финализируется** (`finishWriting`) и становится валидным WAV. Жёсткий
-/// краш/рестарт теряет максимум последний незакрытый сегмент.
+/// We write not one long file but short segments of about `SegmentLayout.defaultSegmentSeconds` s
+/// (see the `crash-safe-recording` skill): every segment is a separate `AVAssetWriter` which, once
+/// the interval elapses, is **finalized** (`finishWriting`) and becomes a valid WAV. A hard
+/// crash/restart loses at most the last unclosed segment.
 ///
-/// Все методы вызываются с сериализованной очереди делегата `SCStream` (по одной на дорожку),
-/// поэтому внутреннее состояние не требует дополнительной синхронизации.
+/// All methods are called from the serialized queue of the `SCStream` delegate (one per track), so
+/// the internal state needs no additional synchronization.
 final class SegmentWriter {
-    /// Каталог дорожки (например `.../system`), куда пишутся `NNNN.wav`.
+    /// The track's directory (for example `.../system`) where `NNNN.wav` files are written.
     private let directory: URL
 
-    /// Порог ротации в секундах.
+    /// The rotation threshold in seconds.
     private let segmentSeconds: Double
 
     private let log: Logger
 
-    /// Вызывается при закрытии каждого сегмента — с очереди дорожки, синхронно. Тем самым
-    /// `session.json` узнаёт о новом сегменте ровно тогда, когда тот появился на диске (Task 8.2);
-    /// подписчик обязан не блокировать очередь (запись маркера уходит на свою, см.
-    /// `RecordingSession`), иначе он подвиснет на горячем пути аудио.
+    /// Called when each segment is closed — from the track's queue, synchronously. This way
+    /// `session.json` learns about a new segment exactly when it appears on disk (Task 8.2); the
+    /// subscriber must not block the queue (writing the marker goes to its own queue, see
+    /// `RecordingSession`), otherwise it would hang on the hot audio path.
     var onSegmentFinalized: (@Sendable () -> Void)?
 
     private var writer: AVAssetWriter?
@@ -31,18 +31,19 @@ final class SegmentWriter {
     private var segmentIndex = 0
     private var segmentStart: CMTime = .invalid
 
-    /// Финализации, запущенные ротацией/рестартом и ещё не отработавшие. Файл сегмента валиден
-    /// только после completion-хэндлера, поэтому `finish()` (перед склейкой) дожидается всей
-    /// группы, а не только текущего writer'а: стоп сразу после ротации иначе отдал бы `ffmpeg`
-    /// ещё дописывающийся сегмент.
+    /// Finalizations started by a rotation/restart that have not completed yet. A segment file is
+    /// valid only after its completion handler has run, so `finish()` (before the assembly) waits
+    /// for the whole group, not just for the current writer: otherwise a stop right after a rotation
+    /// would hand `ffmpeg` a segment that is still being written.
     private let pendingWrites = DispatchGroup()
 
-    // Счётчик принятых writer'ом буферов: пишется с очереди дорожки, читается самодиагностикой с
-    // другой — отсюда замок. Сигнал «данные реально легли в сегмент», а не просто «пришли» (Task 4).
+    // Counter of buffers accepted by the writer: written from the track's queue, read by the
+    // self-diagnosis from another one — hence the lock. It is the "data really landed in a segment"
+    // signal, not just "data arrived" (Task 4).
     private let appendedLock = NSLock()
     private var appended = 0
 
-    /// Сколько буферов writer реально принял в сегмент с начала записи.
+    /// How many buffers the writer has actually accepted into a segment since the recording started.
     var appendedCount: Int {
         appendedLock.lock()
         defer { appendedLock.unlock() }
@@ -56,12 +57,12 @@ final class SegmentWriter {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    /// URL сегмента по текущему индексу.
+    /// The segment URL for the current index.
     private func segmentURL(index: Int) -> URL {
         directory.appendingPathComponent(SegmentLayout.segmentFileName(index: index))
     }
 
-    /// Записать очередной буфер. Открывает первый сегмент по первому буферу, ротирует по времени.
+    /// Write the next buffer. Opens the first segment on the first buffer, rotates by time.
     func append(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -75,7 +76,7 @@ final class SegmentWriter {
 
         guard let input, input.isReadyForMoreMediaData else { return }
         guard input.append(sampleBuffer) else {
-            log.error("Writer отверг буфер: \(String(describing: self.writer?.error), privacy: .public)")
+            log.error("Writer rejected a buffer: \(String(describing: self.writer?.error), privacy: .public)")
             return
         }
         appendedLock.lock()
@@ -83,39 +84,41 @@ final class SegmentWriter {
         appendedLock.unlock()
     }
 
-    /// Финализировать текущий сегмент (чистый стоп). После вызова writer сброшен.
+    /// Finalize the current segment (a clean stop). After the call the writer is reset.
     ///
-    /// Ждём завершения **всех** запущенных финализаций (текущей и оставшихся от ротаций): сразу
-    /// после этого вызова запускается склейка сегментов (`SegmentAssembler`), а файл валиден только
-    /// когда отработал его completion-хэндлер. Иначе `ffmpeg` прочитал бы ещё дописывающийся
-    /// сегмент — терялся бы хвост записи.
+    /// We wait for **all** started finalizations (the current one and those left over from
+    /// rotations): the segment assembly (`SegmentAssembler`) starts right after this call, and a
+    /// file is valid only once its completion handler has run. Otherwise `ffmpeg` would read a
+    /// segment that is still being written — the tail of the recording would be lost.
     func finish() {
         finalizeCurrent()
-        // Ждём с потолком: `finish()` вызывается синхронно с очереди дорожки внутри `stop()`, и
-        // зависший в AVFoundation `finishWriting` без таймаута заклинил бы стоп навсегда — UI
-        // остался бы в «идёт запись» с кнопкой, которая больше ничего не делает (`isStopping`
-        // не снимется). По таймауту идём дальше: недописанный сегмент отбракует проверка заголовка
-        // (`Recovery.isValidSegment`), потеряв хвост, но не всю запись.
+        // We wait with a cap: `finish()` is called synchronously from the track's queue inside
+        // `stop()`, and a `finishWriting` hung inside AVFoundation would, without a timeout, jam the
+        // stop forever — the UI would stay on "recording" with a button that does nothing any more
+        // (`isStopping` would never clear). On timeout we move on: an unfinished segment is rejected
+        // by the header check (`Recovery.isValidSegment`), losing the tail but not the whole
+        // recording.
         if pendingWrites.wait(timeout: .now() + Self.finishTimeoutSeconds) == .timedOut {
-            log.error("Финализация сегментов не уложилась в таймаут — продолжаем без неё")
+            log.error("Segment finalization did not fit the timeout — continuing without it")
         }
     }
 
-    /// Потолок ожидания финализации сегментов на стопе, с. С запасом больше нормального флаша
-    /// (доли секунды): срабатывать он должен только на реально зависшем writer'е.
+    /// The cap on waiting for segment finalization on stop, s. Comfortably longer than a normal
+    /// flush (a fraction of a second): it should only fire on a writer that has genuinely hung.
     private static let finishTimeoutSeconds = 30.0
 
-    /// Финализировать текущий сегмент и перейти к следующему индексу — для рестарта стрима
-    /// watchdog'ом (Task 4). В отличие от `finish()`, двигает счётчик вперёд, чтобы после
-    /// перезапуска новый стрим писал в новый файл, а уже закрытый сегмент **не перезаписывался**.
-    /// Ждать флаша не нужно: запись продолжается, а склейка будет только на стопе/восстановлении.
+    /// Finalize the current segment and move on to the next index — for a stream restart by the
+    /// watchdog (Task 4). Unlike `finish()`, it advances the counter so that after the restart the
+    /// new stream writes into a new file and the already closed segment is **not overwritten**.
+    /// There is no need to wait for the flush: recording continues, and the assembly only happens on
+    /// a stop/recovery.
     func finishAndAdvance() {
         guard writer != nil else { return }
         finalizeCurrent()
         segmentIndex += 1
     }
 
-    // MARK: - Приватное
+    // MARK: - Private
 
     private func startSegment(at pts: CMTime, formatHint: CMFormatDescription?) {
         let url = segmentURL(index: segmentIndex)
@@ -126,12 +129,15 @@ final class SegmentWriter {
                                            sourceFormatHint: formatHint)
             input.expectsMediaDataInRealTime = true
             guard writer.canAdd(input) else {
-                log.error("Не удалось добавить вход в writer для \(url.lastPathComponent, privacy: .public)")
+                log.error("""
+                    Failed to add an input to the writer for \
+                    \(url.lastPathComponent, privacy: .public)
+                    """)
                 return
             }
             writer.add(input)
             guard writer.startWriting() else {
-                log.error("startWriting не удался: \(String(describing: writer.error), privacy: .public)")
+                log.error("startWriting failed: \(String(describing: writer.error), privacy: .public)")
                 return
             }
             writer.startSession(atSourceTime: pts)
@@ -140,35 +146,39 @@ final class SegmentWriter {
             self.segmentStart = pts
         } catch {
             let name = url.lastPathComponent
-            log.error("Не удалось создать сегмент \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.error("""
+                Failed to create segment \(name, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
         }
     }
 
     private func rotate(at pts: CMTime, formatHint: CMFormatDescription?) {
-        // Ротация на горячем пути записи: не блокируем очередь дорожки ожиданием флаша — сегмент
-        // допишется в фоне, а следующий уже принимает буферы. Ожидание берёт на себя `finish()`.
+        // Rotation on the hot recording path: we do not block the track's queue waiting for the
+        // flush — the segment finishes being written in the background while the next one already
+        // accepts buffers. The waiting is `finish()`'s job.
         finalizeCurrent()
         segmentIndex += 1
         startSegment(at: pts, formatHint: formatHint)
     }
 
-    /// Закрыть текущий сегмент и запустить его финализацию в фоне, зарегистрировав её в
-    /// `pendingWrites` — чтобы `finish()` перед склейкой мог дождаться всех.
+    /// Close the current segment and start its finalization in the background, registering it in
+    /// `pendingWrites` — so that `finish()` can wait for all of them before the assembly.
     private func finalizeCurrent() {
         guard let writer, let input else { return }
         self.writer = nil
         self.input = nil
         self.segmentStart = .invalid
         input.markAsFinished()
-        // completion-хэндлер приходит на внутренней очереди AVFoundation, а не на нашей очереди
-        // дорожки, поэтому ожидание группы в `finish()` не деэдлочит.
+        // The completion handler arrives on AVFoundation's internal queue, not on our track's queue,
+        // so waiting for the group in `finish()` does not deadlock.
         pendingWrites.enter()
         writer.finishWriting { [pendingWrites] in pendingWrites.leave() }
         onSegmentFinalized?()
     }
 
-    /// Единые настройки WAV/PCM: 48 кГц, стерео, 16 бит. Приводим обе дорожки к одному формату,
-    /// чтобы сегменты склеивались `-c copy` без перекодирования.
+    /// Unified WAV/PCM settings: 48 kHz, stereo, 16 bit. We bring both tracks to the same format so
+    /// that the segments can be assembled with `-c copy` without re-encoding.
     private static var pcmOutputSettings: [String: Any] {
         [
             AVFormatIDKey: kAudioFormatLinearPCM,

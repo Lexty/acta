@@ -2,19 +2,21 @@ import ActaKit
 import Foundation
 import os
 
-/// Жизненный цикл одной записи: создать папку + `session.json` (`recording`), гонять захват через
-/// `AudioRecorder`, на чистом стопе финализировать (`done`) и склеить сегменты в итоговые файлы.
+/// The lifecycle of a single recording: create the folder + `session.json` (`recording`), drive the
+/// capture through `AudioRecorder`, and on a clean stop finalize (`done`) and assemble the segments
+/// into the final files.
 ///
-/// Разделяет ответственность с `AudioRecorder` (тот знает только про `SCStream` и сегменты):
-/// здесь — маркер сессии и сборка, то есть отказоустойчивая часть. UI-обвязка (старт/стоп из
-/// меню-бара) появится в Task 6 и будет дёргать эти методы.
+/// Splits responsibility with `AudioRecorder` (which only knows about `SCStream` and segments):
+/// here live the session marker and the assembly, that is, the fault-tolerant part. The UI wiring
+/// (start/stop from the menu bar) arrives in Task 6 and will call these methods.
 ///
-/// `@unchecked Sendable`: все методы дёргает `RecordingController` с главного актора (сериализовано),
-/// а `AudioRecorder`/`SelfCheck` внутри сами управляют своей потокобезопасностью. Это позволяет
-/// вызывать `async`-методы сессии из main-actor без предупреждений о гонках.
+/// `@unchecked Sendable`: every method is called by `RecordingController` from the main actor
+/// (serialized), while `AudioRecorder`/`SelfCheck` manage their own thread safety internally. This
+/// makes it possible to call the session's `async` methods from the main actor without data-race
+/// warnings.
 @available(macOS 15.0, *)
 final class RecordingSession: @unchecked Sendable {
-    /// Папка записи.
+    /// The recording folder.
     let directory: URL
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingSession")
@@ -25,10 +27,11 @@ final class RecordingSession: @unchecked Sendable {
     private let store = SessionManifestStore()
     private var watchdogTask: Task<Void, Never>?
 
-    /// Обновления `segment_count` идут сюда с очередей обеих дорожек: своя серийная очередь
-    /// сериализует read-modify-write маркера и уводит дисковую запись с горячего пути аудио.
+    /// `segment_count` updates arrive here from the queues of both tracks: a dedicated serial queue
+    /// serializes the read-modify-write of the marker and moves the disk write off the hot audio
+    /// path.
     private let manifestQueue = DispatchQueue(label: "dev.personal.acta.manifest")
-    /// Последний записанный счётчик (только с `manifestQueue`).
+    /// The last written counter value (only from `manifestQueue`).
     private var lastWrittenSegmentCount = 0
 
     init(directory: URL, settings: RecordingSettings = .default) {
@@ -41,12 +44,12 @@ final class RecordingSession: @unchecked Sendable {
         self.selfCheck = SelfCheck(recorder: recorder)
     }
 
-    /// Старт: создать папку, записать `session.json` (`recording`), запустить захват и
-    /// самодиагностику. Если данные реально не пошли — стоп и бросок понятной ошибки: «немого»
-    /// recording-статуса не показываем (Task 4).
-    /// - Parameter onStall: вызывается, если watchdog исчерпал попытки рестарта во время записи
-    ///   (поток буферов пропал безвозвратно). Контроллер обязан показать ошибку и остановить
-    ///   запись — «немой» recording-статус недопустим. Вызывается не на главном акторе.
+    /// Start: create the folder, write `session.json` (`recording`), launch the capture and the
+    /// self-diagnosis. If the data really did not start flowing — stop and throw a clear error: we
+    /// never show a "mute" recording status (Task 4).
+    /// - Parameter onStall: called if the watchdog exhausted its restart attempts during the
+    ///   recording (the buffer stream is gone for good). The controller must show an error and stop
+    ///   the recording — a "mute" recording status is unacceptable. Not called on the main actor.
     func start(startedAt: Date = Date(),
                onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -59,14 +62,15 @@ final class RecordingSession: @unchecked Sendable {
         do {
             try await recorder.start()
         } catch StartupFailure.streamNotStarted {
-            // Стрим не поднялся — старт не срываем: самодиагностика ниже увидит
-            // `streamStarted == false` и отработает те же 2–3 попытки рестарта, что и для
-            // вставшего стрима (Task 4). Прочие причины (нет прав) рестартом не лечатся и летят выше.
-            log.error("Стрим не поднялся на старте — отдаём самодиагностике на рестарт")
+            // The stream did not come up — we do not abort the start: the self-diagnosis below will
+            // see `streamStarted == false` and go through the same 2–3 restart attempts as it does
+            // for a stalled stream (Task 4). Other causes (missing permissions) are not healed by a
+            // restart and fly upwards.
+            log.error("Stream did not come up on start — handing it to self-diagnosis for a restart")
         }
 
         if let failure = await selfCheck.verifyStartAndHeal() {
-            log.error("Старт не подтверждён самодиагностикой: \(failure.userMessage, privacy: .public)")
+            log.error("Start not confirmed by self-diagnosis: \(failure.userMessage, privacy: .public)")
             await recorder.stop()
             throw failure
         }
@@ -74,22 +78,23 @@ final class RecordingSession: @unchecked Sendable {
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
         }
-        log.info("Сессия записи начата: \(self.directory.lastPathComponent, privacy: .public)")
+        log.info("Recording session started: \(self.directory.lastPathComponent, privacy: .public)")
     }
 
-    /// Чистый стоп: остановить захват, склеить сегменты (по выбору дорожек из настроек), пометить
-    /// маркер `done`. Удаление сегментов после склейки — тоже из настроек (`deleteSegmentsAfterAssembly`).
+    /// Clean stop: stop the capture, assemble the segments (per the track selection from the
+    /// settings), mark the marker as `done`. Deleting the segments after the assembly also comes
+    /// from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
     func stop() async -> SegmentAssembler.Result? {
-        // Дождаться завершения watchdog'а до остановки рекордера: иначе его `restart()` мог бы
-        // отработать уже после `recorder.stop()` и поднять новый `SCStream`, который писал бы
-        // сегменты после склейки (гонка за `stream`). Отмена + await сериализует переходы.
+        // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
+        // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments
+        // after the assembly (a race over `stream`). Cancel + await serializes the transitions.
         watchdogTask?.cancel()
         await watchdogTask?.value
         watchdogTask = nil
         await recorder.stop()
-        // Дождаться уже поставленных в очередь обновлений счётчика: иначе запоздавшее из них легло
-        // бы поверх финального маркера, вернув `done` обратно в `recording`.
+        // Wait for the counter updates already sitting in the queue: otherwise a late one would land
+        // on top of the final marker, turning `done` back into `recording`.
         manifestQueue.sync {}
 
         let counts = recorder.finalizedSegmentCounts()
@@ -100,10 +105,11 @@ final class RecordingSession: @unchecked Sendable {
 
         var result: SegmentAssembler.Result?
         do {
-            // Склейка синхронно ждёт `ffmpeg` (`waitUntilExit`) — на часовой встрече это десятки
-            // секунд. Из `async`-метода это заняло бы поток кооперативного пула (он размером с
-            // число ядер) на всё это время, поэтому уводим блокирующую работу с него — так же, как
-            // это уже делает восстановление в `RecordingController.runRecovery`.
+            // The assembly waits for `ffmpeg` synchronously (`waitUntilExit`) — for an hour-long
+            // meeting that is tens of seconds. From an `async` method this would occupy a thread of
+            // the cooperative pool (whose size equals the core count) for all that time, so we move
+            // the blocking work off it — exactly as recovery already does in
+            // `RecordingController.runRecovery`.
             let directory = directory
             let settings = settings
             result = try await Task.detached(priority: .utility) {
@@ -113,23 +119,25 @@ final class RecordingSession: @unchecked Sendable {
             }.value
             manifest.status = .done
         } catch {
-            // Склейка не удалась (нет ffmpeg / нет сегментов). Оставляем маркер как есть, чтобы
-            // восстановление на следующем старте попробовало снова — данные не теряем.
-            log.error("Склейка при стопе не удалась: \(error.localizedDescription, privacy: .public)")
+            // The assembly failed (no ffmpeg / no segments). We leave the marker as is so that
+            // recovery on the next start tries again — no data is lost.
+            log.error("Assembly on stop failed: \(error.localizedDescription, privacy: .public)")
         }
         try? store.write(manifest, to: directory)
-        log.info("Сессия записи остановлена: \(self.directory.lastPathComponent, privacy: .public)")
+        log.info("Recording session stopped: \(self.directory.lastPathComponent, privacy: .public)")
         return result
     }
 
-    /// Записать в `session.json` число закрытых сегментов. Вызывается только с `manifestQueue`.
+    /// Write the number of closed segments into `session.json`. Called only from `manifestQueue`.
     ///
-    /// Счётчик информационный: восстановление читает файловую систему и на него не смотрит (Task
-    /// 8.2). Но держать его вечным нулём, как было до сих пор, нельзя — при взгляде в маркер он
-    /// утверждал бы, что записывать нечего, при дюжине сегментов рядом на диске.
+    /// The counter is informational: recovery reads the file system and does not look at it (Task
+    /// 8.2). But keeping it forever at zero, as it has been so far, is not acceptable — anyone
+    /// looking into the marker would be told there is nothing recorded while a dozen segments sit
+    /// next to it on disk.
     ///
-    /// Счётчик только растёт, и статус маркера не трогаем: обновление могло разминуться со стопом,
-    /// и вернуть `done` в `recording` значило бы отправить готовую запись на восстановление.
+    /// The counter only grows, and we do not touch the marker's status: an update could have raced
+    /// past the stop, and turning `done` back into `recording` would mean sending a finished
+    /// recording off to recovery.
     private func persistSegmentCount(_ count: Int) {
         guard count > lastWrittenSegmentCount else { return }
         lastWrittenSegmentCount = count
@@ -138,8 +146,8 @@ final class RecordingSession: @unchecked Sendable {
         do {
             try store.write(manifest, to: directory)
         } catch {
-            // Не фатально: сегменты на диске целы, а восстановление и так идёт от FS.
-            log.error("Не удалось обновить segment_count: \(error.localizedDescription, privacy: .public)")
+            // Not fatal: the segments on disk are intact, and recovery goes off the FS anyway.
+            log.error("Failed to update segment_count: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

@@ -1,18 +1,18 @@
 import ActaKit
 import AppKit
 
-/// Тонкая обёртка над `NSWorkspace`: собрать имена запущенных приложений и отдать их чистой логике
-/// `MeetingSource.detect`. Здесь только доступ к системному списку процессов; само сопоставление
-/// имён с известными источниками — в `ActaKit` (покрыто тестами).
+/// A thin wrapper over `NSWorkspace`: collect the names of running applications and hand them to the
+/// pure logic in `MeetingSource.detect`. This only accesses the system process list; matching names
+/// against known sources lives in `ActaKit` (covered by tests).
 enum SourceDetector {
-    /// Имена запущенных обычных приложений (`.regular`) — те, что видны в Dock/переключателе.
+    /// Names of running regular applications (`.regular`) — those visible in the Dock/app switcher.
     static func runningAppNames() -> [String] {
         NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular }
             .compactMap { $0.localizedName }
     }
 
-    /// Распознанный источник встречи среди запущенных приложений, либо `nil`.
+    /// The recognised meeting source among the running applications, or `nil`.
     static func detectedSource() -> String? {
         MeetingSource.detect(fromRunningApps: runningAppNames())
     }

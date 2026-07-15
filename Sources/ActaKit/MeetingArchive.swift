@@ -1,32 +1,34 @@
 import Foundation
 
-/// Чистая логика раскладки архива записей: slug из заголовка, имя папки встречи и сериализация
-/// `info.md` (YAML front-matter). Держим отдельно от файловой системы (FS-часть — `MeetingStore`
-/// в таргете `Acta`), чтобы генерация slug и front-matter покрывались юнит-тестами
-/// (`MeetingArchiveTests`), а не проверялись вручную прогоном приложения.
+/// Pure logic of the recording archive layout: the slug built from a title, the meeting folder name
+/// and the serialisation of `info.md` (YAML front-matter). Kept separate from the file system (the
+/// FS part is `MeetingStore` in the `Acta` target) so that slug and front-matter generation are
+/// covered by unit tests (`MeetingArchiveTests`) instead of being checked by hand by running the
+/// app.
 ///
-/// Формат папки: `YYYY-MM-DD_HHMM__<slug>/` (см. `SPEC.md` §6). Внутри — аудио + `session.json`
-/// + `info.md`.
+/// Folder format: `YYYY-MM-DD_HHMM__<slug>/` (see `SPEC.md` §6). Inside it — the audio +
+/// `session.json` + `info.md`.
 public enum MeetingArchive {
-    /// Имя файла с метаданными встречи в папке записи.
+    /// File name of the meeting metadata inside a recording folder.
     public static let infoFileName = "info.md"
 
-    /// Значение slug по умолчанию, если из заголовка не осталось ни одного значимого символа.
+    /// Default slug value, used when the title leaves no meaningful character behind.
     public static let fallbackSlug = "meeting"
 
-    /// Максимальная длина slug (символов) — чтобы имена папок не разрастались.
+    /// Maximum slug length (in characters) — to keep folder names from growing without bound.
     public static let maxSlugLength = 60
 
     // MARK: - Slug
 
-    /// Построить slug из заголовка встречи.
+    /// Build a slug from a meeting title.
     ///
-    /// Приводит к нижнему регистру, оставляет буквы/цифры (в т.ч. кириллицу — она валидна в именах
-    /// файлов macOS), а любые пробелы/пунктуацию сворачивает в один `-`. Обрезает ведущие/замыкающие
-    /// `-` и длину. Пустой результат → `fallbackSlug`, чтобы имя папки всегда было валидным.
+    /// Lowercases the title, keeps letters and digits (including non-Latin scripts such as
+    /// Cyrillic — they are valid in macOS file names), and collapses any whitespace/punctuation into
+    /// a single `-`. Trims leading/trailing `-` and the length. An empty result → `fallbackSlug`, so
+    /// that the folder name is always valid.
     public static func slug(from title: String, maxLength: Int = maxSlugLength) -> String {
         var result = ""
-        var lastWasSeparator = true // true в начале, чтобы не появлялся ведущий '-'
+        var lastWasSeparator = true // true at the start, so no leading '-' can appear
         for character in title.lowercased() {
             if character.isLetter || character.isNumber {
                 result.append(character)
@@ -45,11 +47,11 @@ public enum MeetingArchive {
         return result.isEmpty ? fallbackSlug : result
     }
 
-    // MARK: - Имя папки
+    // MARK: - Folder name
 
-    /// Имя папки встречи: `YYYY-MM-DD_HHMM__<slug>`.
+    /// Meeting folder name: `YYYY-MM-DD_HHMM__<slug>`.
     ///
-    /// `timeZone` вынесен в параметр ради детерминизма теста (по умолчанию — локальная зона).
+    /// `timeZone` is a parameter for test determinism (it defaults to the local zone).
     public static func folderName(date: Date, slug: String, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -58,30 +60,30 @@ public enum MeetingArchive {
         return "\(formatter.string(from: date))__\(slug)"
     }
 
-    /// Имя папки прямо из заголовка (slug строится внутри).
+    /// Folder name straight from a title (the slug is built inside).
     public static func folderName(date: Date, title: String, timeZone: TimeZone = .current) -> String {
         folderName(date: date, slug: slug(from: title), timeZone: timeZone)
     }
 }
 
-/// Метаданные встречи для `info.md` — **чистая логика** сериализации в YAML front-matter.
+/// Meeting metadata for `info.md` — **pure logic** of serialising to YAML front-matter.
 ///
-/// Поля соответствуют `SPEC.md` §6: `title, date, source, duration, status`. Статус переиспользует
-/// `SessionManifest.Status` (одни и те же состояния записи).
+/// The fields follow `SPEC.md` §6: `title, date, source, duration, status`. The status reuses
+/// `SessionManifest.Status` (the very same recording states).
 public struct MeetingInfo: Equatable, Sendable {
-    /// Человекочитаемый заголовок встречи.
+    /// Human-readable meeting title.
     public var title: String
 
-    /// Момент начала записи.
+    /// Moment the recording started.
     public var date: Date
 
-    /// Источник звука/встречи (Slack, Teams, Meet, …); может быть пустым.
+    /// Audio/meeting source (Slack, Teams, Meet, …); may be empty.
     public var source: String
 
-    /// Длительность записи, с.
+    /// Recording duration, s.
     public var durationSeconds: Int
 
-    /// Состояние записи (recording/done/recovered).
+    /// Recording state (recording/done/recovered).
     public var status: SessionManifest.Status
 
     public init(title: String, date: Date, source: String, durationSeconds: Int,
@@ -93,7 +95,7 @@ public struct MeetingInfo: Equatable, Sendable {
         self.status = status
     }
 
-    /// Полное содержимое `info.md`: YAML front-matter + заголовок-разметка для читаемости.
+    /// The full contents of `info.md`: YAML front-matter + a markdown heading for readability.
     public func rendered() -> String {
         var lines = ["---"]
         lines.append("title: \(Self.quote(title))")
@@ -108,13 +110,13 @@ public struct MeetingInfo: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    /// Обновить в готовом `info.md` только `status` и `duration`, сохранив остальное как есть.
+    /// Update only `status` and `duration` in an existing `info.md`, leaving everything else as is.
     ///
-    /// Нужно восстановлению: `info.md` пишется на старте (`recording`, `00:00:00`), а после краха
-    /// заголовок/дата/источник известны только из него самого. Полный YAML-парсер ради двух полей
-    /// избыточен, поэтому правим строки внутри front-matter (блок между первой парой `---`).
-    /// Если front-matter не распознан, возвращаем исходный текст: лучше устаревшие метаданные,
-    /// чем испорченный файл.
+    /// Recovery needs this: `info.md` is written at start (`recording`, `00:00:00`), and after a
+    /// crash the title/date/source are known only from the file itself. A full YAML parser for the
+    /// sake of two fields is overkill, so we patch the lines inside the front-matter (the block
+    /// between the first pair of `---`). If the front-matter is not recognised, the original text is
+    /// returned: stale metadata beats a corrupted file.
     public static func patchedFrontMatter(_ contents: String, status: SessionManifest.Status,
                                           durationSeconds: Int) -> String {
         var lines = contents.components(separatedBy: "\n")
@@ -132,17 +134,17 @@ public struct MeetingInfo: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Хелперы сериализации
+    // MARK: - Serialisation helpers
 
-    /// Форматировать длительность как `HH:MM:SS` (отрицательные значения → ноль).
+    /// Format a duration as `HH:MM:SS` (negative values → zero).
     public static func formatDuration(seconds: Int) -> String {
         let total = max(0, seconds)
         return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
     }
 
-    /// Заключить произвольную строку в YAML-совместимый double-quoted скаляр с экранированием.
-    /// Пользовательский текст (title/source) может содержать `:`, `#`, кавычки, переводы строк —
-    /// двойные кавычки делают значение однозначно парсимым.
+    /// Wrap an arbitrary string into a YAML-compatible double-quoted scalar, with escaping.
+    /// User text (title/source) may contain `:`, `#`, quotes or newlines — double quotes make the
+    /// value unambiguously parseable.
     static func quote(_ value: String) -> String {
         var escaped = ""
         for character in value {
@@ -158,13 +160,14 @@ public struct MeetingInfo: Equatable, Sendable {
         return "\"\(escaped)\""
     }
 
-    /// Схлопнуть переводы строк в пробелы — для однострочного markdown-заголовка.
+    /// Collapse newlines into spaces — for a single-line markdown heading.
     static func singleLine(_ value: String) -> String {
         value.split(whereSeparator: \.isNewline).joined(separator: " ")
     }
 
-    /// ISO-8601 представление даты (симметрично `SessionManifest`). Форматтер создаём локально:
-    /// `ISO8601DateFormatter` не `Sendable`, а разделяемый статик ловит strict-concurrency ошибку.
+    /// ISO-8601 representation of a date (symmetric to `SessionManifest`). The formatter is created
+    /// locally: `ISO8601DateFormatter` is not `Sendable`, and a shared static would trip a
+    /// strict-concurrency error.
     static func iso8601(from date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
     }

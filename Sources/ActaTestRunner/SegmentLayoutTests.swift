@@ -1,8 +1,8 @@
 import Testing
 import ActaKit
 
-// Чистая логика имён/выбора сегментов. База и для записи (SegmentWriter), и для восстановления
-// (RecoveryManager, Task 3) — поэтому покрыта отдельно от файловой системы.
+// Pure logic for segment naming/selection. It underpins both recording (SegmentWriter) and
+// recovery (RecoveryManager, Task 3) - hence it is covered separately from the file system.
 
 @Test
 func segmentFileNameIsZeroPaddedFourDigits() {
@@ -19,8 +19,9 @@ func segmentIndexParsesValidNames() {
 
 @Test
 func segmentNameAndIndexRoundTripPastFourDigits() {
-    // Индекс ≥ 10000 (длинная запись / короткие сегменты) не помещается в 4 цифры. Имя и парсер
-    // обязаны оставаться обратимыми, иначе такие сегменты молча выпадут из склейки/восстановления.
+    // An index >= 10000 (a long recording / short segments) does not fit into 4 digits. The name
+    // and the parser must stay reversible, otherwise such segments would silently drop out of
+    // assembly/recovery.
     for index in [0, 42, 9999, 10000, 123_456] {
         let name = SegmentLayout.segmentFileName(index: index)
         #expect(SegmentLayout.segmentIndex(fromFileName: name) == index)
@@ -32,7 +33,7 @@ func segmentNameAndIndexRoundTripPastFourDigits() {
 func segmentIndexRejectsForeignNames() {
     #expect(SegmentLayout.segmentIndex(fromFileName: ".DS_Store") == nil)
     #expect(SegmentLayout.segmentIndex(fromFileName: "0000.caf") == nil)
-    #expect(SegmentLayout.segmentIndex(fromFileName: "12.wav") == nil)     // не 4 цифры
+    #expect(SegmentLayout.segmentIndex(fromFileName: "12.wav") == nil)     // not 4 digits
     #expect(SegmentLayout.segmentIndex(fromFileName: "combined.wav") == nil)
     #expect(SegmentLayout.segmentIndex(fromFileName: "00a0.wav") == nil)
 }

@@ -1,14 +1,14 @@
 import Foundation
 
-/// Чистая логика авто-подсказки источника встречи по списку запущенных приложений.
+/// Pure logic that auto-suggests the meeting source from the list of running applications.
 ///
-/// Runtime (`SourceDetector` в таргете `Acta`) собирает имена запущенных приложений через
-/// `NSWorkspace` и передаёт их сюда; сопоставление имени с известным мессенджером/конференцией —
-/// **чистая логика**, поэтому живёт в `ActaKit` и покрыта юнит-тестами (`MeetingSourceTests`),
-/// а не проверяется вручную прогоном приложения.
+/// The runtime (`SourceDetector` in the `Acta` target) collects running application names via
+/// `NSWorkspace` and passes them here; matching a name against a known messenger/conferencing app
+/// is **pure logic**, so it lives in `ActaKit` and is covered by unit tests (`MeetingSourceTests`)
+/// rather than checked by hand by running the app.
 public enum MeetingSource {
-    /// Известные приложения-источники встреч: подстрока имени процесса → человекочитаемое имя.
-    /// Порядок задаёт приоритет: если запущено несколько, выбирается первый совпавший в этом списке.
+    /// Known meeting-source apps: a substring of the process name → a human-readable name.
+    /// The order defines priority: if several are running, the first match in this list wins.
     public static let known: [(needle: String, name: String)] = [
         ("zoom", "Zoom"),
         ("microsoft teams", "Microsoft Teams"),
@@ -23,11 +23,11 @@ public enum MeetingSource {
         ("google meet", "Google Meet")
     ]
 
-    /// Определить наиболее вероятный источник встречи по именам запущенных приложений.
+    /// Determine the most likely meeting source from the names of running applications.
     ///
-    /// Сопоставление регистронезависимо и по подстроке (`"Slack"` матчит `"slack"`). Приоритет —
-    /// по порядку `known`, а не по порядку `appNames`, чтобы результат был детерминирован. `nil`,
-    /// если ничего знакомого не запущено.
+    /// Matching is case-insensitive and by substring (`"Slack"` matches `"slack"`). Priority comes
+    /// from the order of `known`, not the order of `appNames`, so the result is deterministic.
+    /// Returns `nil` if nothing familiar is running.
     public static func detect(fromRunningApps appNames: [String]) -> String? {
         let lowered = appNames.map { $0.lowercased() }
         for entry in known where lowered.contains(where: { $0.contains(entry.needle) }) {
@@ -36,9 +36,9 @@ public enum MeetingSource {
         return nil
     }
 
-    /// Заголовок-подсказка по умолчанию: `"<Источник> — YYYY-MM-DD HH:MM"` или, если источник не
-    /// распознан, `"Встреча YYYY-MM-DD HH:MM"`. Форматирование даты локальное; `timeZone` вынесен
-    /// параметром ради детерминизма теста.
+    /// Default suggested title: `"<Source> — YYYY-MM-DD HH:MM"`, or `"Meeting YYYY-MM-DD HH:MM"`
+    /// if the source was not recognised. Date formatting is local; `timeZone` is a parameter for
+    /// test determinism.
     public static func suggestedTitle(source: String?, date: Date,
                                       timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
@@ -49,6 +49,6 @@ public enum MeetingSource {
         if let source, !source.isEmpty {
             return "\(source) — \(stamp)"
         }
-        return "Встреча \(stamp)"
+        return "Meeting \(stamp)"
     }
 }

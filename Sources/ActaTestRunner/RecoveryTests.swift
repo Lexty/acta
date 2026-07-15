@@ -2,16 +2,16 @@ import Testing
 import Foundation
 import ActaKit
 
-// Логика восстановления и маркера сессии — чистая, покрыта отдельно от файловой системы/ffmpeg.
+// Recovery and session-marker logic - pure, covered separately from the file system/ffmpeg.
 
-// MARK: - Фикстуры WAV-заголовков
+// MARK: - WAV header fixtures
 
-/// Заголовок финализированного WAV: размеры проставлены и сходятся с размером файла.
+/// A finalized WAV header: the sizes are filled in and match the file size.
 private func finalizedHeader(fileSize: Int) -> Data {
     header(riffSize: fileSize - 8, dataSize: fileSize - 44)
 }
 
-/// Заголовок с произвольными размерами — для случаев недописанного файла.
+/// A header with arbitrary sizes - for the unfinalized-file cases.
 private func header(riffSize: Int, dataSize: Int) -> Data {
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
@@ -25,8 +25,8 @@ private func header(riffSize: Int, dataSize: Int) -> Data {
     return Data(bytes)
 }
 
-/// Тело чанка `fmt `: 16-битный стерео PCM 48 кГц — то, что пишет `SegmentWriter`.
-/// Поля можно переопределить, чтобы собрать заведомо битый формат.
+/// The body of the `fmt ` chunk: 16-bit stereo PCM 48 kHz - what `SegmentWriter` writes.
+/// The fields can be overridden to build a deliberately broken format.
 private func pcmFormatBody(format: Int = 1, channels: Int = 2, sampleRate: Int = 48_000,
                            bitsPerSample: Int = 16, blockAlign: Int? = nil) -> [UInt8] {
     let align = blockAlign ?? channels * bitsPerSample / 8
@@ -50,22 +50,23 @@ private func le16(_ value: Int) -> [UInt8] {
     return [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)]
 }
 
-/// Заголовки для набора валидных сегментов одного размера.
+/// Headers for a set of valid segments of the same size.
 private func headers(_ names: [String], fileSize: Int) -> [String: Data] {
     Dictionary(uniqueKeysWithValues: names.map { ($0, finalizedHeader(fileSize: fileSize)) })
 }
 
-/// Имена сегментов, попавших в план (порядок и состав — то, что уходит в `ffmpeg`).
+/// The names of the segments that made it into the plan (their order and set is what goes to
+/// `ffmpeg`).
 private func planned(_ plan: [Recovery.PlannedSegment]) -> [String] {
     plan.map(\.fileName)
 }
 
-/// Действие плана для сегмента; `nil`, если сегмент в план не попал.
+/// The plan's action for a segment; `nil` if the segment did not make it into the plan.
 private func action(_ plan: [Recovery.PlannedSegment], for name: String) -> Recovery.Action? {
     plan.first { $0.fileName == name }?.action
 }
 
-// MARK: - План склейки
+// MARK: - The assembly plan
 
 @Test
 func recoveryPlanOrdersValidSegments() {
@@ -79,7 +80,7 @@ func recoveryPlanOrdersValidSegments() {
 
 @Test
 func recoveryPlanDropsEmptyLastSegment() {
-    // Сегмент, в который не успел лечь ни один буфер: спасать нечего, отбрасываем.
+    // A segment that no buffer made it into: there is nothing to salvage, we drop it.
     let names = ["0000.wav", "0001.wav", "0002.wav"]
     let sizes = ["0000.wav": 4096, "0001.wav": 4096, "0002.wav": 0]
     var byName = headers(names, fileSize: 4096)
@@ -91,9 +92,9 @@ func recoveryPlanDropsEmptyLastSegment() {
 
 @Test
 func recoveryPlanRepairsLastSegmentWithUnfinalizedHeader() {
-    // Главный крэш-кейс (Task 8.1): убитый writer оставил килобайты аудио, но размеры в заголовке
-    // не проставлены. Такой сегмент чинится по фактическому размеру, а не выбрасывается: раньше
-    // это стоило живых секунд записи.
+    // The main crash case (Task 8.1): the killed writer left kilobytes of audio behind, but the
+    // sizes in the header were never filled in. Such a segment is repaired from its actual size
+    // rather than discarded: previously this cost real seconds of recording.
     let names = ["0000.wav", "0001.wav"]
     let sizes = ["0000.wav": 4096, "0001.wav": 8192]
     var byName = headers(names, fileSize: 4096)
@@ -102,7 +103,8 @@ func recoveryPlanRepairsLastSegmentWithUnfinalizedHeader() {
                                      headerByFileName: byName)
     #expect(planned(plan) == ["0000.wav", "0001.wav"])
     #expect(action(plan, for: "0000.wav") == .include)
-    // Данные идут с 44-го байта: 8192 - 44 = 8148, и это уже целое число кадров по 4 байта.
+    // The data starts at byte 44: 8192 - 44 = 8148, which is already a whole number of 4-byte
+    // frames.
     #expect(action(plan, for: "0001.wav")
         == .repair(WAV.HeaderRepair(riffSize: 8184, dataSizeOffset: 40,
                                     dataSize: 8148, truncatedFileSize: 8192)))
@@ -110,8 +112,9 @@ func recoveryPlanRepairsLastSegmentWithUnfinalizedHeader() {
 
 @Test
 func recoveryPlanDropsCorruptMiddleSegment() {
-    // Битый сегмент отбрасывается независимо от позиции: пропуск одного чанка допустим, но
-    // трейлинг-валидные сегменты должны сохраниться (а не обрезаться на первом битом).
+    // A corrupt segment is dropped regardless of its position: skipping one chunk is acceptable,
+    // but the trailing valid segments must survive (rather than being cut off at the first
+    // corrupt one).
     let names = ["0000.wav", "0001.wav", "0002.wav"]
     let sizes = ["0000.wav": 4096, "0001.wav": 0, "0002.wav": 4096]
     var byName = headers(names, fileSize: 4096)
@@ -124,7 +127,7 @@ func recoveryPlanDropsCorruptMiddleSegment() {
 @Test
 func recoveryPlanFiltersJunkAndMissingSizes() {
     let names = ["0000.wav", ".DS_Store", "combined.wav", "0001.wav"]
-    // 0001.wav отсутствует в размерах → трактуем как 0 → отбрасываем.
+    // 0001.wav is absent from the sizes -> treated as 0 -> dropped.
     let sizes = ["0000.wav": 4096]
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: headers(names, fileSize: 4096))
@@ -133,8 +136,8 @@ func recoveryPlanFiltersJunkAndMissingSizes() {
 
 @Test
 func recoveryPlanDropsSegmentWithUnreadableHeader() {
-    // Заголовок не прочитался (файл исчез/недоступен) — ни принять, ни починить: неизвестно даже,
-    // где в файле начинается аудио.
+    // The header could not be read (the file vanished/is inaccessible) - we can neither accept
+    // nor repair it: we do not even know where the audio starts in the file.
     let plan = Recovery.recoveryPlan(fromFileNames: ["0000.wav"], sizeByFileName: ["0000.wav": 4096],
                                      headerByFileName: [:])
     #expect(plan.isEmpty)
@@ -149,10 +152,11 @@ func recoveryPlanEmptyWhenNothingValid() {
 
 @Test
 func recoveryPlanKeepsEveryLiveRunSegment() {
-    // Приёмка Task 8.1 на фактах живого прогона (2026-07-15): на момент `kill -9` дорожка system
-    // держала 12 сегментов — 11 закрытых по 15 с и последний недописанный с 2.92 с звука.
-    // Прежнее правило оставляло 11 (165.0 с); все 12 дают ≈167.9 с.
-    let rate = 48_000 * 4 // 16-бит стерео: байт в секунду
+    // Task 8.1 acceptance based on the facts of a live run (2026-07-15): at the moment of
+    // `kill -9` the system track held 12 segments - 11 closed ones of 15 s each and a final
+    // unfinalized one with 2.92 s of audio. The former rule kept 11 (165.0 s); all 12 give
+    // approximately 167.9 s.
+    let rate = 48_000 * 4 // 16-bit stereo: bytes per second
     let closedSize = 44 + 15 * rate
     let killedSize = 44 + Int(2.92 * Double(rate))
     let names = (0..<12).map { SegmentLayout.segmentFileName(index: $0) }
@@ -177,7 +181,7 @@ func recoveryPlanKeepsEveryLiveRunSegment() {
     #expect(abs(duration - 167.92) < 0.01)
 }
 
-// MARK: - Проверка сегмента
+// MARK: - Segment validation
 
 @Test
 func isValidSegmentThreshold() {
@@ -202,32 +206,32 @@ func headerWithoutRIFFMagicRejected() {
 
 @Test
 func headerWithUnsetSizesRejected() {
-    // Незакрытый AVAssetWriter: магия на месте, размеры — плейсхолдеры.
+    // An unfinalized AVAssetWriter: the magic is in place, the sizes are placeholders.
     #expect(Recovery.isFinalizedWAVHeader(header(riffSize: 0, dataSize: 0), fileSize: 8192) == false)
     #expect(Recovery.isFinalizedWAVHeader(header(riffSize: 4, dataSize: 0), fileSize: 8192) == false)
 }
 
 @Test
 func headerPromisingMoreThanFileHasRejected() {
-    // Размер заявлен, но файл обрезан на середине — данных меньше, чем обещано.
+    // The size is declared, but the file is truncated midway - there is less data than promised.
     #expect(Recovery.isFinalizedWAVHeader(finalizedHeader(fileSize: 65_536),
                                           fileSize: 8192) == false)
-    // RIFF сходится, а data-чанк вылезает за конец файла.
+    // The RIFF size adds up, but the data chunk runs past the end of the file.
     #expect(Recovery.isFinalizedWAVHeader(header(riffSize: 4088, dataSize: 65_536),
                                           fileSize: 4096) == false)
 }
 
 @Test
 func headerWithoutChunksRejected() {
-    // RIFF/WAVE + правдоподобный размер, но осмысленных чанков нет: ffmpeg такой файл отвергает,
-    // поэтому доверять одному размеру RIFF нельзя — подтвердить целостность нечем.
+    // RIFF/WAVE + a plausible size, but no meaningful chunks: ffmpeg rejects such a file, so the
+    // RIFF size alone cannot be trusted - there is nothing to confirm the integrity with.
     var bare: [UInt8] = []
     bare += Array("RIFF".utf8)
     bare += le32(4088)
     bare += Array("WAVE".utf8)
     #expect(Recovery.isFinalizedWAVHeader(Data(bare), fileSize: 4096) == false)
 
-    // Тот же случай, но хвост забит нулями/мусором вместо чанков.
+    // The same case, but the tail is filled with zeros/junk instead of chunks.
     #expect(Recovery.isFinalizedWAVHeader(Data(bare + [UInt8](repeating: 0, count: 512)),
                                           fileSize: 4096) == false)
     #expect(Recovery.isFinalizedWAVHeader(Data(bare + Array("junk padding not a chunk".utf8)),
@@ -236,7 +240,7 @@ func headerWithoutChunksRejected() {
 
 @Test
 func headerWithDataButWithoutFormatRejected() {
-    // data без fmt — не описанный поток: ffmpeg не знает, как его читать.
+    // data without fmt is an undescribed stream: ffmpeg does not know how to read it.
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
     bytes += le32(4088)
@@ -248,7 +252,7 @@ func headerWithDataButWithoutFormatRejected() {
 
 @Test
 func headerWithChunkBeforeFormatAccepted() {
-    // Посторонний чанк (LIST) перед fmt /data пропускается по размеру, сегмент остаётся валидным.
+    // A foreign chunk (LIST) before fmt /data is skipped by its size, the segment stays valid.
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
     bytes += le32(4088)
@@ -264,9 +268,9 @@ func headerWithChunkBeforeFormatAccepted() {
     #expect(Recovery.isFinalizedWAVHeader(Data(bytes), fileSize: 4096))
 }
 
-// MARK: - Проверка чанка fmt
+// MARK: - Validating the fmt chunk
 
-/// Заголовок с телом `fmt `, собранным из произвольных полей формата.
+/// A header whose `fmt ` body is assembled from arbitrary format fields.
 private func headerWithFormat(_ body: [UInt8], fileSize: Int = 4096) -> Data {
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
@@ -276,40 +280,42 @@ private func headerWithFormat(_ body: [UInt8], fileSize: Int = 4096) -> Data {
     bytes += le32(body.count)
     bytes += body
     bytes += Array("data".utf8)
-    // Хвост data занимает всё, что осталось от файла после заголовка (тело fmt переменной длины).
+    // The data tail takes up everything left of the file after the header (the fmt body has a
+    // variable length).
     bytes += le32(fileSize - (bytes.count + 4))
     return Data(bytes)
 }
 
 @Test
 func headerWithZeroedFormatBodyRejected() {
-    // fmt на месте и размером 16, но тело — нули: ffmpeg падает с `Invalid sample rate: 0`
-    // и утаскивает склейку всей дорожки. Одного размера чанка мало.
+    // fmt is in place and 16 bytes long, but its body is zeros: ffmpeg fails with
+    // `Invalid sample rate: 0` and takes down the assembly of the entire track. The chunk size
+    // alone is not enough.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat([UInt8](repeating: 0, count: 16)),
                                           fileSize: 4096) == false)
 }
 
 @Test
 func headerWithNonsenseFormatFieldsRejected() {
-    // Каждое поле по отдельности делает поток нечитаемым.
+    // Each field on its own renders the stream unreadable.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(sampleRate: 0)),
                                           fileSize: 4096) == false)
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(channels: 0)),
                                           fileSize: 4096) == false)
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(bitsPerSample: 0)),
                                           fileSize: 4096) == false)
-    // Битность не кратна байту.
+    // The bit depth is not a multiple of a byte.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(bitsPerSample: 12)),
                                           fileSize: 4096) == false)
-    // blockAlign не сходится с channels * bits / 8 — заголовок противоречив.
+    // blockAlign does not match channels * bits / 8 - the header contradicts itself.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(blockAlign: 3)),
                                           fileSize: 4096) == false)
-    // Не PCM-тег (например, 0 — незаполненное поле).
+    // Not a PCM tag (for example 0 - an unfilled field).
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(format: 0)),
                                           fileSize: 4096) == false)
 }
 
-/// Тело `fmt ` для WAVE_FORMAT_EXTENSIBLE: PCM-раскладка + cbSize/validBits/channelMask/GUID.
+/// The `fmt ` body for WAVE_FORMAT_EXTENSIBLE: the PCM layout + cbSize/validBits/channelMask/GUID.
 func extensibleFormatBody(cbSize: Int = 22, subformat: [UInt8] = pcmSubformatGUID) -> [UInt8] {
     var bytes = pcmFormatBody(format: 0xFFFE)
     bytes += le16(cbSize)
@@ -327,44 +333,47 @@ let pcmSubformatGUID: [UInt8] = [
 
 @Test
 func headerWithExtensiblePCMAccepted() {
-    // Досказанный WAVE_FORMAT_EXTENSIBLE — та же PCM-раскладка; ffmpeg её читает, отбрасывать
-    // не за что.
+    // A fully specified WAVE_FORMAT_EXTENSIBLE is the same PCM layout; ffmpeg reads it, so there
+    // is no reason to discard it.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(extensibleFormatBody()), fileSize: 4096))
 }
 
 @Test
 func headerWithUnderspecifiedExtensibleRejected() {
-    // Тег 0xFFFE с 16-байтовым телом PCM: формат недоописан — кодека в нём нет, ffmpeg отвергает
-    // (`Codec none not supported in WAVE format`) и утаскивает склейку всей дорожки.
+    // Tag 0xFFFE with a 16-byte PCM body: the format is under-specified - it names no codec,
+    // ffmpeg rejects it (`Codec none not supported in WAVE format`) and takes down the assembly
+    // of the entire track.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(format: 0xFFFE)),
                                           fileSize: 4096) == false)
-    // Тело нужной длины, но cbSize не проставлен — расширение не заявлено.
+    // The body is of the right length, but cbSize is not set - the extension is not declared.
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(extensibleFormatBody(cbSize: 0)),
                                           fileSize: 4096) == false)
-    // Подформат не PCM (здесь IEEE float) — `-c copy` с 16-битными сегментами не склеится.
+    // The subformat is not PCM (IEEE float here) - `-c copy` will not assemble it together with
+    // the 16-bit segments.
     var float = pcmSubformatGUID
     float[0] = 0x03
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(extensibleFormatBody(subformat: float)),
                                           fileSize: 4096) == false)
-    // GUID обрезан: тело не дотягивает до 40 байт.
+    // The GUID is truncated: the body falls short of 40 bytes.
     #expect(Recovery.isFinalizedWAVHeader(
         headerWithFormat(Array(extensibleFormatBody().prefix(32))), fileSize: 4096) == false)
 }
 
 @Test
 func headerWithFormatBodyOutsideProbeRejected() {
-    // fmt объявлен, но тело не попало в прочитанный префикс — подтвердить формат нечем.
+    // fmt is declared, but its body did not fit into the prefix that was read - there is nothing
+    // to confirm the format with.
     var bytes: [UInt8] = []
     bytes += Array("RIFF".utf8)
     bytes += le32(4088)
     bytes += Array("WAVE".utf8)
     bytes += Array("fmt ".utf8)
     bytes += le32(16)
-    bytes += [UInt8](repeating: 0, count: 8) // тело обрезано на середине
+    bytes += [UInt8](repeating: 0, count: 8) // the body is truncated midway
     #expect(Recovery.isFinalizedWAVHeader(Data(bytes), fileSize: 4096) == false)
 }
 
-// MARK: - Маркер сессии
+// MARK: - The session marker
 
 @Test
 func needsRecoveryOnlyForRecordingStatus() {
@@ -399,7 +408,7 @@ func sessionManifestUsesSnakeCaseAndIsoDate() throws {
     #expect(json.contains("\"segment_seconds\""))
     #expect(json.contains("\"segment_count\""))
     #expect(json.contains("\"status\" : \"done\""))
-    // ISO-8601 для 1_700_000_000 = 2023-11-14T22:13:20Z.
+    // ISO-8601 for 1_700_000_000 = 2023-11-14T22:13:20Z.
     #expect(json.contains("2023-11-14T22:13:20Z"))
 }
 

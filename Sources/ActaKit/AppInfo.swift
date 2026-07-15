@@ -1,16 +1,16 @@
 import Foundation
 
-/// Общие константы приложения. Держим `bundleID` в одном месте: он должен совпадать с
-/// `CFBundleIdentifier` в `Resources/Info.plist` и `--identifier` в `Scripts/bundle.sh`,
-/// иначе macOS считает пересобранный бандл «другим» приложением и сбрасывает TCC-права
-/// (Screen Recording, Microphone).
+/// Shared app constants. `bundleID` lives in one place: it must match `CFBundleIdentifier` in
+/// `Resources/Info.plist` and `--identifier` in `Scripts/bundle.sh`, otherwise macOS treats a
+/// rebuilt bundle as a *different* app and resets its TCC permissions (Screen Recording,
+/// Microphone).
 public enum AppInfo {
-    /// Человекочитаемое имя.
+    /// Human-readable name.
     public static let name = "Acta"
 
-    /// Фиксированный bundle identifier (ради стабильности TCC).
+    /// Fixed bundle identifier (for TCC stability).
     public static let bundleID = "dev.personal.acta"
 
-    /// Короткая версия.
+    /// Short version.
     public static let version = "0.1.0"
 }

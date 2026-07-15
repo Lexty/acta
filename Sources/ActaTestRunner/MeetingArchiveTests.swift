@@ -2,7 +2,8 @@ import Testing
 import Foundation
 import ActaKit
 
-// Раскладка архива и сериализация info.md — чистая логика, покрыта отдельно от файловой системы.
+// The archive layout and info.md serialization - pure logic, covered separately from the file
+// system.
 
 // MARK: - Slug
 
@@ -21,8 +22,16 @@ func slugCollapsesSeparatorsAndTrimsEdges() {
 
 @Test
 func slugKeepsUnicodeLetters() {
-    // Кириллица валидна в именах файлов macOS — не режем её.
-    #expect(MeetingArchive.slug(from: "Созвон с командой") == "созвон-с-командой")
+    // Cyrillic is valid in macOS file names - we do not strip it. This asserts that a Cyrillic
+    // title slugs correctly; both strings are written as Unicode escapes to keep the sources
+    // ASCII-only. Title "Sozvon s komandoy" -> slug "sozvon-s-komandoy" in Cyrillic letters.
+    let title = "\u{0421}\u{043E}\u{0437}\u{0432}\u{043E}\u{043D} "
+        + "\u{0441} "
+        + "\u{043A}\u{043E}\u{043C}\u{0430}\u{043D}\u{0434}\u{043E}\u{0439}"
+    let expected = "\u{0441}\u{043E}\u{0437}\u{0432}\u{043E}\u{043D}-"
+        + "\u{0441}-"
+        + "\u{043A}\u{043E}\u{043C}\u{0430}\u{043D}\u{0434}\u{043E}\u{0439}"
+    #expect(MeetingArchive.slug(from: title) == expected)
 }
 
 @Test
@@ -37,12 +46,12 @@ func slugTruncatesToMaxLengthWithoutTrailingHyphen() {
     #expect(slug.count == 10)
     #expect(slug.hasSuffix("-") == false)
 
-    // Обрезка не должна оставлять висящий разделитель.
+    // Truncation must not leave a dangling separator.
     let trimmed = MeetingArchive.slug(from: "aaaaaaaaaa bbbbb", maxLength: 11)
     #expect(trimmed == "aaaaaaaaaa")
 }
 
-// MARK: - Имя папки
+// MARK: - Folder name
 
 @Test
 func folderNameFormatsDateAndSlug() {
@@ -83,7 +92,7 @@ func renderedInfoHasFrontMatterFields() {
     #expect(text.contains("source: \"Slack\""))
     #expect(text.contains("duration: \"01:01:01\""))
     #expect(text.contains("status: done"))
-    // Front-matter закрывается второй строкой из трёх дефисов.
+    // The front-matter is closed by a second line of three hyphens.
     let dashRuns = text.components(separatedBy: "\n---").count - 1
     #expect(dashRuns >= 1)
     #expect(text.contains("\n# Weekly Sync"))
@@ -95,15 +104,15 @@ func renderedInfoQuotesSpecialCharacters() {
                            date: Date(timeIntervalSince1970: 0),
                            source: "", durationSeconds: 0, status: .recovered)
     let text = info.rendered()
-    // Кавычки и обратный слэш экранированы, перевод строки свёрнут в \n внутри скаляра.
+    // Quotes and backslashes are escaped, the newline is folded into \n inside the scalar.
     #expect(text.contains("title: \"Q3: \\\"plan\\\" #1\\nline2\""))
     #expect(text.contains("source: \"\""))
     #expect(text.contains("status: recovered"))
-    // markdown-заголовок — однострочный (перевод строки схлопнут в пробел).
+    // The markdown heading is single-line (the newline is collapsed into a space).
     #expect(text.contains("# Q3: \"plan\" #1 line2"))
 }
 
-// MARK: - Патч front-matter при восстановлении
+// MARK: - Patching the front-matter during recovery
 
 @Test
 func patchedFrontMatterUpdatesStatusAndDurationOnly() {
@@ -113,7 +122,7 @@ func patchedFrontMatterUpdatesStatusAndDurationOnly() {
 
     #expect(patched.contains("status: recovered"))
     #expect(patched.contains("duration: \"01:01:01\""))
-    // Остальные поля восстановление не знает и не трогает.
+    // Recovery knows nothing about the other fields and does not touch them.
     #expect(patched.contains("title: \"Weekly Sync\""))
     #expect(patched.contains("source: \"Slack\""))
     #expect(patched.contains("# Weekly Sync"))
@@ -123,17 +132,17 @@ func patchedFrontMatterUpdatesStatusAndDurationOnly() {
 
 @Test
 func patchedFrontMatterLeavesUnrecognizedContentsIntact() {
-    // Нет front-matter → лучше устаревшие метаданные, чем испорченный файл.
+    // No front-matter -> stale metadata is better than a corrupted file.
     #expect(MeetingInfo.patchedFrontMatter("# Just a note\n", status: .recovered,
                                           durationSeconds: 10) == "# Just a note\n")
-    // Незакрытый front-matter — тоже не трогаем.
+    // An unclosed front-matter is left alone as well.
     let unclosed = "---\nstatus: recording\n"
     #expect(MeetingInfo.patchedFrontMatter(unclosed, status: .done, durationSeconds: 5) == unclosed)
 }
 
 @Test
 func patchedFrontMatterIgnoresBodyLinesLookingLikeFields() {
-    // Правим только внутри front-matter: строка в теле с тем же префиксом остаётся как есть.
+    // We only edit inside the front-matter: a body line with the same prefix stays as is.
     let contents = "---\nstatus: recording\n---\n\nstatus: recording\n"
     let patched = MeetingInfo.patchedFrontMatter(contents, status: .recovered, durationSeconds: 0)
     #expect(patched == "---\nstatus: recovered\n---\n\nstatus: recording\n")

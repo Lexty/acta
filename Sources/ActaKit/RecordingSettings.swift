@@ -1,26 +1,28 @@
 import Foundation
 
-/// Пользовательские настройки записи — **чистая, тестируемая** модель (Task 7).
+/// User recording settings — a **pure, testable** model (Task 7).
 ///
-/// Значение (`Codable`/`Equatable`): путь архива, какие итоговые дорожки сохранять
-/// (`system`/`mic`/`combined`), длина сегмента и удалять ли сегменты после склейки. Персистентность
-/// (UserDefaults) и применение к пайплайну — в `SettingsStore`/`RecordingController` (таргет `Acta`);
-/// тут только значения, нормализация и раскладка — покрыто юнит-тестами (`RecordingSettingsTests`).
+/// A value type (`Codable`/`Equatable`): the archive path, which final tracks to save
+/// (`system`/`mic`/`combined`), the segment length, and whether to delete segments after assembly.
+/// Persistence (UserDefaults) and applying the settings to the pipeline live in
+/// `SettingsStore`/`RecordingController` (the `Acta` target); here there are only values,
+/// normalisation and layout — covered by unit tests (`RecordingSettingsTests`).
 ///
-/// Нормализация (`normalized()`) — единственный «умный» кусок: длина сегмента зажимается в разумный
-/// диапазон, а полностью снятый выбор дорожек не даёт «запись в никуда» (форсим `combined`).
+/// Normalisation (`normalized()`) is the only "smart" part: the segment length is clamped to a
+/// sensible range, and clearing every track selection does not lead to "recording into nowhere"
+/// (we force `combined`).
 public struct RecordingSettings: Codable, Equatable, Sendable {
-    /// Путь папки архива. Пусто → путь по умолчанию (`~/Acta`). Поддерживает `~` в начале.
+    /// Path of the archive folder. Empty → the default path (`~/Acta`). A leading `~` is supported.
     public var archivePath: String
-    /// Сохранять итоговый `system.wav` (звук собеседников).
+    /// Save the final `system.wav` (the other participants' audio).
     public var saveSystemTrack: Bool
-    /// Сохранять итоговый `mic.wav` (микрофон).
+    /// Save the final `mic.wav` (the microphone).
     public var saveMicTrack: Bool
-    /// Сохранять итоговый `combined.wav` (микс двух дорожек).
+    /// Save the final `combined.wav` (a mix of the two tracks).
     public var saveCombinedTrack: Bool
-    /// Длина сегмента, с (зажимается в `[minSegmentSeconds, maxSegmentSeconds]`).
+    /// Segment length, s (clamped to `[minSegmentSeconds, maxSegmentSeconds]`).
     public var segmentSeconds: Int
-    /// Удалять каталоги сегментов после успешной склейки.
+    /// Delete the segment directories after a successful assembly.
     public var deleteSegmentsAfterAssembly: Bool
 
     public init(archivePath: String = "",
@@ -37,15 +39,15 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly
     }
 
-    /// Настройки по умолчанию.
+    /// Default settings.
     public static let `default` = RecordingSettings()
 
-    /// Нижняя граница длины сегмента, с. Короче — множит файлы/финализации без пользы.
+    /// Lower bound of the segment length, s. Shorter multiplies files and finalisations for nothing.
     public static let minSegmentSeconds = 5
-    /// Верхняя граница длины сегмента, с. Длиннее — крэш теряет слишком много.
+    /// Upper bound of the segment length, s. Longer means a crash loses too much.
     public static let maxSegmentSeconds = 120
 
-    /// Отсутствующие в JSON поля берут значения по умолчанию (совместимость со старым конфигом).
+    /// Fields missing from the JSON fall back to their defaults (compatibility with an old config).
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let def = RecordingSettings.default
@@ -58,7 +60,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
             ?? def.deleteSegmentsAfterAssembly
     }
 
-    /// Выбор дорожек для сборки итоговых файлов (см. `SegmentAssembler`).
+    /// Which tracks to build as final files (see `SegmentAssembler`).
     public struct TrackSelection: Equatable, Sendable {
         public var system: Bool
         public var mic: Bool
@@ -71,19 +73,19 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// Выбор дорожек, выведенный из нормализованных настроек.
+    /// The track selection derived from the normalised settings.
     public var trackSelection: TrackSelection {
         let n = normalized()
         return TrackSelection(system: n.saveSystemTrack, mic: n.saveMicTrack, combined: n.saveCombinedTrack)
     }
 
-    /// Зажать длину сегмента в допустимый диапазон.
+    /// Clamp the segment length to the allowed range.
     public static func clampSegmentSeconds(_ value: Int) -> Int {
         min(maxSegmentSeconds, max(minSegmentSeconds, value))
     }
 
-    /// Нормализованная копия: длина сегмента в диапазоне; хотя бы одна дорожка сохраняется
-    /// (иначе запись ушла бы «в никуда» — форсим `combined`).
+    /// A normalised copy: the segment length within range; at least one track is saved (otherwise
+    /// the recording would go "into nowhere" — we force `combined`).
     public func normalized() -> RecordingSettings {
         var s = self
         s.segmentSeconds = RecordingSettings.clampSegmentSeconds(segmentSeconds)
@@ -93,11 +95,11 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         return s
     }
 
-    /// Разрешённый URL корня архива относительно домашней папки.
+    /// The resolved URL of the archive root, relative to the home folder.
     ///
-    /// Пустой путь → `<home>/Acta`; ведущая `~` разворачивается в `homeDirectory`; абсолютный путь
-    /// берётся как есть; относительный — считается от домашней папки. `homeDirectory` инжектируется
-    /// для тестируемости.
+    /// An empty path → `<home>/Acta`; a leading `~` expands to `homeDirectory`; an absolute path is
+    /// taken as is; a relative one is resolved against the home folder. `homeDirectory` is injected
+    /// for testability.
     public func resolvedArchiveURL(homeDirectory: URL) -> URL {
         let trimmed = archivePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -110,9 +112,10 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
             let rel = String(trimmed.dropFirst(2))
             return homeDirectory.appendingPathComponent(rel, isDirectory: true)
         }
-        // Относительный путь разрешаем от дома, а не от рабочей директории процесса: у запущенного
-        // из Finder `.app` она `/`, и настройка вида «Recordings» молча целилась бы в корень диска
-        // (куда записи не лягут вовсе). Дом — единственное осмысленное здесь основание.
+        // A relative path is resolved against the home folder rather than the process working
+        // directory: for an `.app` launched from Finder that directory is `/`, so a setting like
+        // "Recordings" would silently aim at the disk root (where recordings will not land at all).
+        // Home is the only meaningful base here.
         guard trimmed.hasPrefix("/") else {
             return homeDirectory.appendingPathComponent(trimmed, isDirectory: true)
         }

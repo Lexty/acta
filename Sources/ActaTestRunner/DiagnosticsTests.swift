@@ -1,10 +1,11 @@
 import Testing
 import ActaKit
 
-// Самодиагностика старта и watchdog — чистая логика, покрыта отдельно от ScreenCaptureKit/таймеров:
-// детектор «данные не текут» на фейковом источнике и выбор действия по типу ошибки (Task 4).
+// Startup self-diagnosis and the watchdog - pure logic, covered separately from
+// ScreenCaptureKit/timers: the "data is not flowing" detector on a fake source and the choice of
+// action per failure type (Task 4).
 
-// MARK: - Детектор «данные не текут»
+// MARK: - The "data is not flowing" detector
 
 @Test
 func dataFlowingWhenBuffersAreWritten() {
@@ -14,7 +15,7 @@ func dataFlowingWhenBuffersAreWritten() {
 
 @Test
 func dataFlowingWhenSegmentGrows() {
-    // Второй сигнал: буферов не считали, но текущий сегмент растёт на диске.
+    // The second signal: no buffers were counted, but the current segment is growing on disk.
     #expect(SelfDiagnosis.isDataFlowing(writtenBufferCount: 0, segmentBytesDelta: 4096))
 }
 
@@ -23,7 +24,7 @@ func dataNotFlowingWhenSilent() {
     #expect(SelfDiagnosis.isDataFlowing(writtenBufferCount: 0, segmentBytesDelta: 0) == false)
 }
 
-// MARK: - Диагноз причины по снимку
+// MARK: - Diagnosing the cause from a snapshot
 
 private func snapshot(hasScreen: Bool = true, hasMic: Bool = true, streamStarted: Bool = true,
                       buffers: Int = 0, written: Int = 0, bytesDelta: Int = 0,
@@ -37,27 +38,30 @@ private func snapshot(hasScreen: Bool = true, hasMic: Bool = true, streamStarted
 
 @Test
 func diagnoseNilWhenDataFlows() {
-    // Данные идут — причины нет, даже если чего-то по мелочи не хватает.
+    // Data is flowing - there is no failure, even if some minor thing is missing.
     #expect(SelfDiagnosis.diagnose(snapshot(buffers: 5, written: 5)) == nil)
 }
 
 @Test
 func diagnoseDiskWriteFailedWhenBuffersArriveButNothingIsWritten() {
-    // Звук идёт, а writer его не принимает и файлы не растут: показывать «recording» нельзя,
-    // и «проверьте аудиоустройство» тут не поможет — проблема в записи на диск.
+    // Audio is arriving, but the writer does not accept it and the files are not growing: we
+    // must not show "recording", and "check your audio device" would not help here - the problem
+    // is the write to disk.
     let result = SelfDiagnosis.diagnose(snapshot(buffers: 120, written: 0, bytesDelta: 0))
     #expect(result == .diskWriteFailed)
 }
 
 @Test
 func diagnoseNotFooledByBuffersThatNeverReachDisk() {
-    // Ключевое требование: сигналом «идёт запись» считается записанное, а не пришедшее.
+    // Key requirement: the signal for "recording is under way" is what was written, not what
+    // arrived.
     #expect(SelfDiagnosis.diagnose(snapshot(buffers: 500, written: 0)) != nil)
 }
 
 @Test
 func diagnoseNoScreenRecordingFirst() {
-    // Нет права записи экрана — приоритетная причина (без него стрим не поднимется).
+    // No Screen Recording permission - the top-priority cause (without it the stream will not
+    // come up).
     let result = SelfDiagnosis.diagnose(snapshot(hasScreen: false, hasMic: false, streamStarted: false))
     #expect(result == .noScreenRecordingPermission)
 }
@@ -70,7 +74,8 @@ func diagnoseStreamNotStarted() {
 
 @Test
 func diagnoseStreamNotStartedBeatsMissingMic() {
-    // И стрим не поднялся, и нет микрофона: приоритет у стрима (без него звука нет вовсе).
+    // Both the stream failed to come up and there is no microphone: the stream wins (without it
+    // there is no audio at all).
     let result = SelfDiagnosis.diagnose(snapshot(hasMic: false, streamStarted: false))
     #expect(result == .streamNotStarted)
 }
@@ -83,25 +88,27 @@ func diagnoseNoMicrophone() {
 
 @Test
 func diagnoseNoDataWhenStreamUpButSilent() {
-    // Право есть, стрим поднялся, микрофон разрешён — но буферов нет: нет девайса/тишина.
+    // The permission is there, the stream came up, the microphone is allowed - but there are no
+    // buffers: no device, or silence.
     let result = SelfDiagnosis.diagnose(snapshot())
     #expect(result == .noData)
 }
 
-// MARK: - Мёртвая дорожка при живой второй
+// MARK: - A dead track while the other one is alive
 
 @Test
 func trackIsWriteBrokenOnlyWhenBuffersArriveButNothingIsWritten() {
     #expect(TrackFlow(received: 100, written: 0).isWriteBroken)
     #expect(TrackFlow(received: 100, written: 1).isWriteBroken == false)
-    // Молчащий источник поломкой не считается: писать просто нечего.
+    // A silent source is not considered broken: there is simply nothing to write.
     #expect(TrackFlow(received: 0, written: 0).isWriteBroken == false)
 }
 
 @Test
 func diagnoseDetectsDeadMicMaskedByLiveSystemAudio() {
-    // Ключевой случай: системный звук пишется и держит суммарные счётчики растущими, а буферы
-    // микрофона приходят и пропадают. Показывать «recording» нельзя — потеряется половина встречи.
+    // The key case: system audio is being written and keeps the aggregate counters growing,
+    // while the microphone buffers arrive and vanish. We must not show "recording" - half the
+    // meeting would be lost.
     let result = SelfDiagnosis.diagnose(snapshot(buffers: 200, written: 100, bytesDelta: 65_536,
                                                  system: TrackFlow(received: 100, written: 100),
                                                  mic: TrackFlow(received: 100, written: 0)))
@@ -121,7 +128,8 @@ func diagnoseDetectsDeadSystemTrackMaskedByLiveMic() {
 
 @Test
 func diagnoseAllowsSilentTrackWhenBothWritersAreAlive() {
-    // Собеседники молчат (буферов системной дорожки нет вовсе) — это не поломка записи.
+    // The other participants are silent (there are no system track buffers at all) - this is not
+    // a recording failure.
     let result = SelfDiagnosis.diagnose(snapshot(buffers: 100, written: 100, bytesDelta: 65_536,
                                                  system: TrackFlow(received: 0, written: 0),
                                                  mic: TrackFlow(received: 100, written: 100)))
@@ -136,7 +144,7 @@ func diagnoseNilWhenBothTracksWrite() {
                                             mic: TrackFlow(received: 100, written: 100))) == nil)
 }
 
-// MARK: - Выбор действия по типу ошибки
+// MARK: - Choosing the action per failure type
 
 @Test
 func actionRequestsPermissionForPermissionFailures() {
@@ -172,11 +180,11 @@ func failureMessagesAreNonEmptyAndActionable() {
     for failure in failures {
         #expect(failure.userMessage.isEmpty == false)
     }
-    // Право экрана — самый частый случай, подсказка указывает путь в Системные настройки.
-    #expect(StartupFailure.noScreenRecordingPermission.userMessage.contains("Запись экрана"))
+    // The screen permission is the most common case; the hint points the way to System Settings.
+    #expect(StartupFailure.noScreenRecordingPermission.userMessage.contains("Screen Recording"))
 }
 
-// MARK: - Watchdog потока буферов
+// MARK: - Watchdog for the buffer flow
 
 @Test
 func watchdogNoStallWhileBuffersGrow() {
@@ -189,23 +197,23 @@ func watchdogNoStallWhileBuffersGrow() {
 @Test
 func watchdogFiresAfterThresholdWithoutProgress() {
     var watchdog = FlowWatchdog(stallThreshold: 5, startTime: 0, initialBufferCount: 100)
-    // Счётчик замер на 100.
-    #expect(watchdog.observe(bufferCount: 100, at: 2) == false) // ещё в пределах порога
+    // The counter froze at 100.
+    #expect(watchdog.observe(bufferCount: 100, at: 2) == false) // still within the threshold
     #expect(watchdog.observe(bufferCount: 100, at: 4) == false)
-    #expect(watchdog.observe(bufferCount: 100, at: 5) == true)  // 5 с без прогресса → встал
+    #expect(watchdog.observe(bufferCount: 100, at: 5) == true)  // 5 s with no progress -> stalled
 }
 
 @Test
 func watchdogResetsAfterProgressResumes() {
     var watchdog = FlowWatchdog(stallThreshold: 5, startTime: 0, initialBufferCount: 0)
     #expect(watchdog.observe(bufferCount: 0, at: 4) == false)
-    // Прогресс возобновился — окно сдвигается на момент t=4.
+    // Progress resumed - the window shifts to t=4.
     #expect(watchdog.observe(bufferCount: 5, at: 4) == false)
-    #expect(watchdog.observe(bufferCount: 5, at: 8) == false) // 4 с от прогресса — ещё ок
-    #expect(watchdog.observe(bufferCount: 5, at: 9) == true)  // 5 с без прогресса → встал
+    #expect(watchdog.observe(bufferCount: 5, at: 8) == false) // 4 s since progress - still fine
+    #expect(watchdog.observe(bufferCount: 5, at: 9) == true)  // 5 s with no progress -> stalled
 }
 
-// MARK: - Watchdog отдельной дорожки
+// MARK: - Watchdog for an individual track
 
 @Test
 func trackWatchdogNoStallWhileTrackWrites() {
@@ -217,8 +225,9 @@ func trackWatchdogNoStallWhileTrackWrites() {
 
 @Test
 func trackWatchdogFiresWhenBuffersArriveButTrackWritesNothing() {
-    // Дорожка умерла: буферы идут, writer молчит. Суммарный счётчик при этом может расти за счёт
-    // живой второй дорожки — поэтому и нужен отдельный watchdog.
+    // The track died: buffers keep coming, the writer stays silent. The aggregate counter may
+    // still grow thanks to the other, live track - which is exactly why a separate watchdog is
+    // needed.
     var watchdog = TrackWatchdog(stallThreshold: 5, startTime: 0,
                                  initialFlow: TrackFlow(received: 10, written: 10))
     #expect(watchdog.observe(TrackFlow(received: 20, written: 10), at: 3) == false)
@@ -227,12 +236,14 @@ func trackWatchdogFiresWhenBuffersArriveButTrackWritesNothing() {
 
 @Test
 func trackWatchdogTreatsSilentSourceAsIdleNotStalled() {
-    // Буферы дорожки не приходят вовсе (пауза в разговоре) — записывать нечего, это не простой.
+    // No buffers arrive for the track at all (a pause in the conversation) - there is nothing to
+    // write, so this is not a stall.
     var watchdog = TrackWatchdog(stallThreshold: 5, startTime: 0,
                                  initialFlow: TrackFlow(received: 10, written: 10))
     #expect(watchdog.observe(TrackFlow(received: 10, written: 10), at: 30) == false)
     #expect(watchdog.observe(TrackFlow(received: 10, written: 10), at: 60) == false)
-    // Источник ожил, а записи по-прежнему нет — окно отсчитывается от последнего наблюдения.
+    // The source came back to life but there are still no writes - the window is counted from
+    // the last observation.
     #expect(watchdog.observe(TrackFlow(received: 20, written: 10), at: 62) == false)
     #expect(watchdog.observe(TrackFlow(received: 30, written: 10), at: 65) == true)
 }
@@ -242,18 +253,19 @@ func trackWatchdogResetsAfterWritesResume() {
     var watchdog = TrackWatchdog(stallThreshold: 5, startTime: 0,
                                  initialFlow: TrackFlow(received: 0, written: 0))
     #expect(watchdog.observe(TrackFlow(received: 10, written: 0), at: 4) == false)
-    // Запись пошла — окно сдвигается на t=4 (рестарт стрима вылечил дорожку).
+    // Writing started - the window shifts to t=4 (a stream restart healed the track).
     #expect(watchdog.observe(TrackFlow(received: 20, written: 5), at: 4) == false)
     #expect(watchdog.observe(TrackFlow(received: 30, written: 5), at: 8) == false)
     #expect(watchdog.observe(TrackFlow(received: 40, written: 5), at: 9) == true)
 }
 
-// MARK: - Возврат бюджета рестартов (SelfDiagnosis.restartHealed)
+// MARK: - Refunding the restart budget (SelfDiagnosis.restartHealed)
 
 @Test
 func restartHealedWhenBothTracksResumeWriting() {
-    // Рестарт вылечил обе дорожки — бюджет попыток честно возвращается: иначе три попытки стали бы
-    // квотой на всю встречу и часовая запись с редкими вылеченными сбоями оборвалась бы.
+    // The restart healed both tracks - the attempt budget is duly refunded: otherwise three
+    // attempts would become a quota for the whole meeting, and an hour-long recording with rare
+    // but healed glitches would be cut short.
     let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
                           mic: TrackFlow(received: 100, written: 100))
     let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
@@ -263,9 +275,10 @@ func restartHealedWhenBothTracksResumeWriting() {
 
 @Test
 func restartNotHealedWhileOneTrackStaysBroken() {
-    // Регрессия: живой системный звук тянет агрегатный счётчик вверх, а микрофон получает буферы и
-    // не пишет НИ ОДНОГО. По сумме это выглядело бы как «рестарт помог» — бюджет возвращался бы
-    // вечно, ошибка не показалась бы никогда, а половина встречи молча терялась бы.
+    // Regression: live system audio drags the aggregate counter up while the microphone receives
+    // buffers and writes NOT A SINGLE one. In aggregate this would look like "the restart
+    // helped" - the budget would be refunded forever, the error would never surface, and half
+    // the meeting would be silently lost.
     let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
                           mic: TrackFlow(received: 100, written: 50))
     let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
@@ -275,8 +288,9 @@ func restartNotHealedWhileOneTrackStaysBroken() {
 
 @Test
 func restartNotHealedWhenNothingIsWritten() {
-    // Стрим мёртв: буферы не идут вообще, обе дорожки «молчат». Молчание дорожки поломкой не
-    // считается, поэтому отсечь этот случай обязан рост агрегата — иначе рестарты были бы вечными.
+    // The stream is dead: no buffers arrive at all, both tracks are "silent". A silent track is
+    // not considered broken, so it is the growth of the aggregate that must rule this case out -
+    // otherwise the restarts would go on forever.
     let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
                           mic: TrackFlow(received: 100, written: 100))
     #expect(SelfDiagnosis.restartHealed(base, since: base) == false)
@@ -284,8 +298,9 @@ func restartNotHealedWhenNothingIsWritten() {
 
 @Test
 func restartHealedWithSilentButWorkingTrack() {
-    // Микрофона на машине нет: его буферы не приходят, писать нечего. Это норма, а не поломка —
-    // иначе Mac без микрофона исчерпывал бы бюджет рестартов на ровном месте и запись срывалась бы.
+    // There is no microphone on the machine: its buffers never arrive, there is nothing to
+    // write. This is normal, not a failure - otherwise a Mac without a microphone would burn
+    // through the restart budget for no reason and the recording would break down.
     let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
                           mic: TrackFlow(received: 0, written: 0))
     let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
@@ -296,10 +311,10 @@ func restartHealedWithSilentButWorkingTrack() {
 @Test
 func trackHealedTreatsSilenceAsHealthyAndWriteStallAsBroken() {
     let base = TrackFlow(received: 10, written: 10)
-    // Буферы идут, записи нет — сломана.
+    // Buffers arrive, nothing is written - broken.
     #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 20, written: 10), since: base) == false)
-    // Буферы не идут — писать нечего, поломкой не считаем.
+    // No buffers arrive - there is nothing to write, so we do not treat it as broken.
     #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 10, written: 10), since: base))
-    // Запись пошла — жива.
+    // Writing started - alive.
     #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 20, written: 20), since: base))
 }

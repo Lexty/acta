@@ -2,14 +2,15 @@ import ActaKit
 import Foundation
 import os
 
-/// Восстановление прерванных записей на старте приложения (см. скилл `crash-safe-recording`).
+/// Recovery of interrupted recordings at app start (see the `crash-safe-recording` skill).
 ///
-/// При `kill -9`/рестарте компьютера процесс не доходит до чистого стопа: в папке записи остаётся
-/// `session.json` со `status=recording` и несклеенные сегменты. `RecoveryManager` при запуске
-/// сканирует архив, находит такие папки, склеивает уцелевшие сегменты в `system/mic/combined.wav`
-/// (недописанный последний сегмент отбрасывается) и переводит маркер в `status=recovered`.
+/// On `kill -9`/a computer restart the process never reaches a clean stop: the recording folder is
+/// left with a `session.json` carrying `status=recording` and unassembled segments. On launch,
+/// `RecoveryManager` scans the archive, finds such folders, assembles the surviving segments into
+/// `system/mic/combined.wav` (the unfinalized last segment is dropped) and moves the marker to
+/// `status=recovered`.
 struct RecoveryManager {
-    /// Итог восстановления одной папки — для уведомления пользователя (Task 6).
+    /// The outcome of recovering one folder — for notifying the user (Task 6).
     struct Recovered: Sendable {
         var directory: URL
         var combinedWAV: URL?
@@ -20,12 +21,12 @@ struct RecoveryManager {
     private let store = SessionManifestStore()
     private let assembler = SegmentAssembler()
 
-    /// Корень архива записей.
+    /// The root of the recordings archive.
     let archiveRoot: URL
 
-    /// Какие итоговые дорожки собирать — та же настройка, что и на чистом стопе (Task 7). Иначе
-    /// восстановленная после краха встреча пришла бы с набором файлов, которого пользователь не
-    /// просил, и архив расходился бы сам с собой в зависимости от того, был ли краш.
+    /// Which final tracks to assemble — the same setting as on a clean stop (Task 7). Otherwise a
+    /// meeting recovered after a crash would arrive with a set of files the user never asked for,
+    /// and the archive would disagree with itself depending on whether there had been a crash.
     let tracks: RecordingSettings.TrackSelection
 
     init(archiveRoot: URL,
@@ -34,8 +35,8 @@ struct RecoveryManager {
         self.tracks = tracks
     }
 
-    /// Просканировать архив и восстановить все прерванные записи. Ошибка одной папки не мешает
-    /// остальным (изолируем в `do/catch`). Возвращает список восстановленного.
+    /// Scan the archive and recover every interrupted recording. An error in one folder does not
+    /// affect the others (isolated in a `do/catch`). Returns the list of what was recovered.
     @discardableResult
     func recoverInterruptedSessions() -> [Recovered] {
         guard let dirs = try? fileManager.contentsOfDirectory(
@@ -54,31 +55,37 @@ struct RecoveryManager {
                 let result = try recover(directory: dir, manifest: manifest)
                 recovered.append(result)
             } catch SegmentAssembler.AssembleError.noSegments {
-                // Спасать нечего и уже никогда не будет: краш успел создать маркер, но ни одного
-                // валидного сегмента не осталось. Оставить `recording` — обречь папку на тщетную
-                // склейку при каждом запуске и вечное «не завершена» в списке без способа убрать.
-                // В `recovered` не добавляем: восстанавливать было нечего, врать в уведомление незачем.
+                // There is nothing to salvage and never will be: the crash managed to create the
+                // marker, but not a single valid segment was left. Leaving `recording` would doom
+                // the folder to a futile assembly on every launch and an eternal "not finished" in
+                // the list with no way to clear it. We do not add it to `recovered`: there was
+                // nothing to recover, and there is no reason to lie in the notification.
                 closeEmpty(directory: dir, manifest: manifest)
             } catch {
                 let name = dir.lastPathComponent
-                log.error("Не удалось восстановить \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                log.error("""
+                    Failed to recover \(name, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
             }
         }
         return recovered
     }
 
-    /// Восстановить одну папку: склеить уцелевшие сегменты, пометить `recovered`.
+    /// Recover a single folder: assemble the surviving segments, mark it `recovered`.
     private func recover(directory: URL, manifest: SessionManifest) throws -> Recovered {
-        log.info("Восстановление прерванной записи: \(directory.lastPathComponent, privacy: .public)")
-        // При восстановлении сегменты не удаляем: сохраняем сырьё на случай проблем со склейкой.
+        log.info("Recovering an interrupted recording: \(directory.lastPathComponent, privacy: .public)")
+        // During recovery we do not delete the segments: we keep the raw material in case the
+        // assembly turns out to have problems.
         let result = try assembler.assemble(in: directory, deleteSegments: false, tracks: tracks)
 
         var updated = manifest
         updated.status = .recovered
         updated.segmentCount = result.segmentCount
         try store.write(updated, to: directory)
-        // По собранному аудио, а не по числу сегментов × длину: последний сегмент почти никогда не
-        // полон (краш приходится на середину), и оценка ×15 округлила бы его до целого сегмента.
+        // From the assembled audio, not from the segment count × length: the last segment is almost
+        // never full (the crash lands in the middle of it), and a ×15 estimate would round it up to
+        // a whole segment.
         let duration = result.durationSeconds.map { max(0, Int($0.rounded())) }
             ?? (result.segmentCount * manifest.segmentSeconds)
         updateInfo(in: directory, status: updated.status, durationSeconds: duration)
@@ -86,12 +93,15 @@ struct RecoveryManager {
         return Recovered(directory: directory, combinedWAV: result.combinedWAV)
     }
 
-    /// Закрыть маркер папки, из которой спасать нечего: `recovered` с нулём сегментов — терминальный
-    /// статус, поэтому следующий запуск её уже не тронет. Саму папку не удаляем: `info.md` с
-    /// названием и временем встречи — единственный след того, что запись пытались вести, и решение
-    /// стереть его остаётся за пользователем.
+    /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a
+    /// terminal status, so the next launch will not touch it again. We do not delete the folder
+    /// itself: `info.md` with the meeting's title and time is the only trace that a recording was
+    /// even attempted, and the decision to erase it stays with the user.
     private func closeEmpty(directory: URL, manifest: SessionManifest) {
-        log.error("Нечего восстанавливать (валидных сегментов нет): \(directory.lastPathComponent, privacy: .public)")
+        log.error("""
+            Nothing to recover (no valid segments): \
+            \(directory.lastPathComponent, privacy: .public)
+            """)
         var updated = manifest
         updated.status = .recovered
         updated.segmentCount = 0
@@ -99,9 +109,9 @@ struct RecoveryManager {
         updateInfo(in: directory, status: updated.status, durationSeconds: 0)
     }
 
-    /// Привести `info.md` в соответствие с маркером: на старте он записан как `recording` с нулевой
-    /// длительностью, и без этого восстановленная встреча навсегда осталась бы «идёт запись» —
-    /// `info.md` и есть архивные метаданные (SPEC §6), их читают уже без приложения.
+    /// Bring `info.md` in line with the marker: at start it is written as `recording` with a zero
+    /// duration, and without this a recovered meeting would stay "recording" forever — `info.md`
+    /// *is* the archive metadata (SPEC §6), and it is read without the app.
     private func updateInfo(in directory: URL, status: SessionManifest.Status,
                             durationSeconds: Int) {
         let url = directory.appendingPathComponent(MeetingArchive.infoFileName)

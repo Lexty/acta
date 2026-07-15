@@ -2,11 +2,11 @@ import Testing
 import Foundation
 import ActaKit
 
-// Настройки записи (Task 7) — чистая логика: значения по умолчанию, нормализация (зажим длины
-// сегмента + гарантия хотя бы одной дорожки), разрешение пути архива, Codable round-trip и
-// совместимость со старым/частичным JSON.
+// Recording settings (Task 7) - pure logic: default values, normalization (clamping the segment
+// length + guaranteeing at least one track), resolving the archive path, the Codable round-trip
+// and compatibility with old/partial JSON.
 
-// MARK: - Значения по умолчанию
+// MARK: - Default values
 
 @Test
 func settingsDefaultsSaveAllTracksAndDefaultSegment() {
@@ -19,7 +19,7 @@ func settingsDefaultsSaveAllTracksAndDefaultSegment() {
     #expect(s.archivePath.isEmpty)
 }
 
-// MARK: - Зажим длины сегмента
+// MARK: - Clamping the segment length
 
 @Test
 func clampSegmentSecondsStaysInRange() {
@@ -28,7 +28,7 @@ func clampSegmentSecondsStaysInRange() {
     #expect(RecordingSettings.clampSegmentSeconds(30) == 30)
 }
 
-// MARK: - Нормализация
+// MARK: - Normalization
 
 @Test
 func normalizeClampsSegmentSeconds() {
@@ -44,7 +44,7 @@ func normalizeClampsSegmentSeconds() {
 func normalizeForcesCombinedWhenNoTrackSelected() {
     var s = RecordingSettings(saveSystemTrack: false, saveMicTrack: false, saveCombinedTrack: false)
     s = s.normalized()
-    // Полностью снятый выбор превратил бы запись «в никуда» — форсим combined.
+    // Clearing every option would turn the recording into a write to nowhere - we force combined.
     #expect(s.saveCombinedTrack)
     #expect(!s.saveSystemTrack)
     #expect(!s.saveMicTrack)
@@ -73,7 +73,7 @@ func trackSelectionReflectsNormalizedSettings() {
     #expect(sel == RecordingSettings.TrackSelection(system: false, mic: false, combined: true))
 }
 
-// MARK: - Разрешение пути архива
+// MARK: - Resolving the archive path
 
 @Test
 func resolvedArchiveURLDefaultsToActaUnderHome() {
@@ -100,8 +100,9 @@ func resolvedArchiveURLUsesAbsolutePathAsIs() {
 
 @Test
 func resolvedArchiveURLResolvesRelativePathAgainstHome() {
-    // Относительный путь не должен зависеть от рабочей директории процесса: у запущенного из
-    // Finder `.app` она `/`, и «Recordings» означало бы корень диска, куда записи не лягут.
+    // A relative path must not depend on the process working directory: for an `.app` launched
+    // from Finder it is `/`, so "Recordings" would mean the root of the disk, where recordings
+    // cannot be written.
     let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
     #expect(RecordingSettings(archivePath: "Recordings")
         .resolvedArchiveURL(homeDirectory: home).path == "/Users/test/Recordings")
@@ -131,7 +132,7 @@ func settingsCodableRoundTrip() throws {
 
 @Test
 func settingsDecodesPartialJSONWithDefaults() throws {
-    // Старый/частичный конфиг: отсутствующие поля берут значения по умолчанию.
+    // An old/partial config: the missing fields take their default values.
     let json = Data(#"{"segmentSeconds": 30}"#.utf8)
     let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
     #expect(decoded.segmentSeconds == 30)

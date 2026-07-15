@@ -1,66 +1,67 @@
 import Foundation
 
-/// Причина «немой» записи: приложение думает, что пишет, а данные на диск не идут.
+/// The reason a recording is "mute": the app thinks it is recording, but no data reaches the disk.
 ///
-/// Ключевое требование Acta — **никогда** не показывать «recording», если данные не пишутся
-/// (см. скилл `crash-safe-recording`, SPEC §7). Тип и его текст держим в `ActaKit` как чистую
-/// логику: причину определяет `SelfDiagnosis.diagnose`, а runtime (`SelfCheck`) лишь собирает
-/// снимок состояния и показывает `userMessage` в меню-баре.
+/// A key Acta requirement is to **never** show "recording" when data is not being written (see the
+/// `crash-safe-recording` skill, SPEC §7). The type and its text stay in `ActaKit` as pure logic:
+/// the reason is determined by `SelfDiagnosis.diagnose`, while the runtime (`SelfCheck`) only
+/// collects a state snapshot and shows `userMessage` in the menu bar.
 public enum StartupFailure: Error, Equatable, Sendable {
-    /// Нет TCC-права на запись экрана (нужно даже для audio-only захвата через `SCStream`).
+    /// No TCC permission for screen recording (required even for an audio-only `SCStream` capture).
     case noScreenRecordingPermission
-    /// Нет TCC-права на микрофон.
+    /// No TCC permission for the microphone.
     case noMicrophonePermission
-    /// `SCStream` не поднялся / делегат сообщил об ошибке.
+    /// `SCStream` failed to come up / the delegate reported an error.
     case streamNotStarted
-    /// Буферы от системы идут, но на диск не попадают (writer не создался / нет места / нет прав).
+    /// Buffers arrive from the system but never reach the disk (the writer was not created / no free
+    /// space / no permissions).
     case diskWriteFailed
-    /// Стрим поднялся, но буферы не приходят (нет аудио-девайса / тишина на входе устройства).
+    /// The stream came up, but no buffers arrive (no audio device / silence at the device input).
     case noData
 
-    /// Понятный пользователю текст с путём к исправлению — для показа в меню-баре (Task 6).
+    /// User-facing text with a path to a fix — for display in the menu bar (Task 6).
     public var userMessage: String {
         switch self {
         case .noScreenRecordingPermission:
-            return "Нет доступа к записи экрана. Выдайте право в Системные настройки → "
-                + "Конфиденциальность и безопасность → Запись экрана и перезапустите Acta."
+            return "No Screen Recording access. Grant it in System Settings > Privacy & Security > "
+                + "Screen Recording, then restart Acta."
         case .noMicrophonePermission:
-            return "Нет доступа к микрофону. Выдайте право в Системные настройки → "
-                + "Конфиденциальность и безопасность → Микрофон."
+            return "No Microphone access. Grant it in System Settings > Privacy & Security > "
+                + "Microphone."
         case .streamNotStarted:
-            return "Не удалось запустить захват звука. Попробуйте перезапустить запись."
+            return "Could not start audio capture. Try starting the recording again."
         case .diskWriteFailed:
-            return "Звук идёт, но не записывается на диск. Проверьте свободное место и доступ "
-                + "к папке архива в настройках."
+            return "Audio is arriving but is not being written to disk. Check free space and access "
+                + "to the archive folder in Settings."
         case .noData:
-            return "Запись не идёт: звук не поступает. Проверьте аудиоустройство и источник звука."
+            return "Not recording: no audio is arriving. Check your audio device and the audio source."
         }
     }
 }
 
-/// Дорожка записи. Считаем и диагностируем дорожки раздельно: живой системный звук не должен
-/// маскировать мёртвый микрофон (и наоборот) — это половина встречи.
+/// A recording track. We count and diagnose tracks separately: live system audio must not mask a
+/// dead microphone (or the other way round) — that is half the meeting.
 public enum Track: String, Equatable, Sendable, CaseIterable {
-    /// Системный звук — голоса собеседников.
+    /// System audio — the other participants' voices.
     case system
-    /// Микрофон — голос пользователя.
+    /// Microphone — the user's own voice.
     case mic
 
-    /// Название для логов и сообщений.
+    /// Name for logs and messages.
     public var title: String {
         switch self {
-        case .system: return "системный звук"
-        case .mic: return "микрофон"
+        case .system: return "system audio"
+        case .mic: return "microphone"
         }
     }
 }
 
-/// Поток одной дорожки за окно наблюдения: сколько буферов пришло от системы и сколько из них
-/// writer реально принял в сегмент.
+/// The flow of one track over an observation window: how many buffers arrived from the system and
+/// how many of them the writer actually accepted into a segment.
 public struct TrackFlow: Equatable, Sendable {
-    /// Буферов пришло от системы.
+    /// Buffers that arrived from the system.
     public var received: Int
-    /// Буферов writer принял в сегмент.
+    /// Buffers the writer accepted into a segment.
     public var written: Int
 
     public init(received: Int = 0, written: Int = 0) {
@@ -68,15 +69,17 @@ public struct TrackFlow: Equatable, Sendable {
         self.written = written
     }
 
-    /// Запись дорожки сломана: буферы идут, а writer не принял **ни одного**.
+    /// The track's recording is broken: buffers keep arriving, but the writer accepted **none**.
     ///
-    /// Молчащий источник (`received == 0`) сюда намеренно не попадает: отличить паузу в разговоре
-    /// или отсутствующее устройство от поломки нечем, а глушить запись из-за тишины нельзя. Зато
-    /// «буферы есть, записи нет» однозначен — сломан writer дорожки (нет места, нет доступа к папке).
+    /// A silent source (`received == 0`) deliberately does not qualify: there is no way to tell a
+    /// pause in the conversation or a missing device from a breakage, and killing a recording over
+    /// silence is not acceptable. "Buffers yes, writes no", on the other hand, is unambiguous — the
+    /// track's writer is broken (no free space, no access to the folder).
     public var isWriteBroken: Bool { received > 0 && written == 0 }
 }
 
-/// Поток обеих дорожек на один момент — снимок, по которому watchdog судит о здоровье записи.
+/// The flow of both tracks at a single moment — the snapshot the watchdog judges the recording's
+/// health by.
 public struct TrackFlows: Equatable, Sendable {
     public var system: TrackFlow
     public var mic: TrackFlow
@@ -86,45 +89,48 @@ public struct TrackFlows: Equatable, Sendable {
         self.mic = mic
     }
 
-    /// Записано буферов обеими дорожками суммарно.
+    /// Buffers written by both tracks in total.
     public var written: Int { system.written + mic.written }
 }
 
-/// Действие самолечения, выбранное по причине провала. Runtime исполняет его (перезапрос права,
-/// рестарт стрима, показ ошибки); выбор действия — чистая логика (`SelfDiagnosis.action`).
+/// A self-healing action chosen from the failure reason. The runtime performs it (re-request a
+/// permission, restart the stream, show the error); choosing the action is pure logic
+/// (`SelfDiagnosis.action`).
 public enum HealingAction: Equatable, Sendable {
-    /// Запросить/подсказать право на запись экрана.
+    /// Request/prompt for the screen recording permission.
     case requestScreenRecording
-    /// Запросить/подсказать право на микрофон.
+    /// Request/prompt for the microphone permission.
     case requestMicrophone
-    /// Перезапустить стрим (попытки ещё остались).
+    /// Restart the stream (attempts still remain).
     case restartStream
-    /// Попытки исчерпаны / лечение невозможно — показать понятную ошибку.
+    /// Attempts exhausted / healing impossible — show a clear error.
     case reportError(StartupFailure)
 }
 
-/// Чистая логика самодиагностики старта: по снимку состояния определить, идёт ли запись, и если
-/// нет — назвать причину и выбрать действие. Держим отдельно от ScreenCaptureKit/таймеров, чтобы
-/// покрыть юнит-тестами (`DiagnosticsTests`) на фейковом источнике.
+/// Pure logic of startup self-diagnosis: from a state snapshot, decide whether recording is
+/// happening, and if not — name the reason and choose an action. Kept apart from
+/// ScreenCaptureKit/timers so it can be covered by unit tests (`DiagnosticsTests`) against a fake
+/// source.
 public enum SelfDiagnosis {
-    /// Снимок состояния записи для диагностики. Собирается runtime'ом из `Permissions` и рекордера.
+    /// A recording state snapshot for diagnosis. Assembled by the runtime from `Permissions` and the
+    /// recorder.
     public struct Snapshot: Equatable, Sendable {
-        /// Есть ли право Screen Recording.
+        /// Whether the Screen Recording permission is granted.
         public var hasScreenRecording: Bool
-        /// Есть ли право Microphone.
+        /// Whether the Microphone permission is granted.
         public var hasMicrophone: Bool
-        /// Поднялся ли `SCStream` (start не бросил, стрим живой).
+        /// Whether `SCStream` came up (start did not throw, the stream is alive).
         public var streamStarted: Bool
-        /// Сколько буферов пришло от системы за окно наблюдения.
+        /// How many buffers arrived from the system over the observation window.
         public var bufferCount: Int
-        /// Сколько буферов за окно наблюдения writer реально принял в сегмент. Отличается от
-        /// `bufferCount`, когда звук идёт, а запись на диск сломана.
+        /// How many buffers over the observation window the writer actually accepted into a segment.
+        /// Differs from `bufferCount` when audio is arriving but writing to disk is broken.
         public var writtenBufferCount: Int
-        /// Насколько выросли сегменты на диске за окно наблюдения, байт.
+        /// How much the segments on disk grew over the observation window, bytes.
         public var segmentBytesDelta: Int
-        /// Поток дорожки системного звука за окно наблюдения.
+        /// The system-audio track's flow over the observation window.
         public var system: TrackFlow
-        /// Поток дорожки микрофона за окно наблюдения.
+        /// The microphone track's flow over the observation window.
         public var mic: TrackFlow
 
         public init(hasScreenRecording: Bool, hasMicrophone: Bool, streamStarted: Bool,
@@ -141,34 +147,37 @@ public enum SelfDiagnosis {
         }
     }
 
-    /// Реально ли **пишутся** данные: writer принял хотя бы один буфер **или** сегменты выросли
-    /// на диске. Основной сигнал самодиагностики и watchdog'а.
+    /// Whether data is really being **written**: the writer accepted at least one buffer **or** the
+    /// segments grew on disk. The primary signal of self-diagnosis and of the watchdog.
     ///
-    /// Считаем именно записанное, а не пришедшее от системы: «буферы идут» ещё не значит «данные
-    /// на диске», а показывать «recording» без данных на диске нельзя (SPEC §7).
+    /// We count what was written, not what arrived from the system: "buffers are arriving" does not
+    /// yet mean "data on disk", and showing "recording" without data on disk is not allowed
+    /// (SPEC §7).
     public static func isDataFlowing(writtenBufferCount: Int, segmentBytesDelta: Int) -> Bool {
         writtenBufferCount > 0 || segmentBytesDelta > 0
     }
 
-    /// Дорожка, чья запись сломана, либо `nil`, если обе в порядке. Проверяется, даже когда данные
-    /// в целом идут: без этого живая дорожка маскирует мёртвую и приложение показывает «recording»,
-    /// записывая половину встречи.
+    /// The track whose recording is broken, or `nil` if both are fine. Checked even when data is
+    /// flowing overall: without this a live track masks a dead one and the app shows "recording"
+    /// while capturing half the meeting.
     public static func brokenTrack(_ snapshot: Snapshot) -> Track? {
         if snapshot.system.isWriteBroken { return .system }
         if snapshot.mic.isWriteBroken { return .mic }
         return nil
     }
 
-    /// Определить причину «немой» записи по снимку, либо `nil`, если данные идут.
+    /// Determine the reason a recording is "mute" from a snapshot, or `nil` if data is flowing.
     ///
-    /// Порядок важен: сперва самый частый и легко лечимый случай (нет права на запись экрана →
-    /// без него стрим вообще не поднимется), затем не поднявшийся стрим, затем нет микрофона;
-    /// далее «звук идёт, но не пишется» (сломан writer) и, наконец, «стрим есть, но тишина».
+    /// The order matters: first the most common and most easily fixed case (no screen recording
+    /// permission → without it the stream will not come up at all), then a stream that failed to
+    /// start, then a missing microphone; after that "audio arrives but is not written" (a broken
+    /// writer) and, finally, "the stream is there, but it is silent".
     public static func diagnose(_ snapshot: Snapshot) -> StartupFailure? {
         if isDataFlowing(writtenBufferCount: snapshot.writtenBufferCount,
                          segmentBytesDelta: snapshot.segmentBytesDelta) {
-            // Суммарно данные идут — но если у одной из дорожек буферы есть, а записи нет, писать
-            // будем только половину встречи. Это тот же сломанный writer, лечится тем же рестартом.
+            // Data is flowing in aggregate — but if one of the tracks has buffers and no writes, we
+            // will record only half the meeting. That is the same broken writer, healed by the same
+            // restart.
             return brokenTrack(snapshot) == nil ? nil : .diskWriteFailed
         }
         if !snapshot.hasScreenRecording { return .noScreenRecordingPermission }
@@ -178,37 +187,41 @@ public enum SelfDiagnosis {
         return .noData
     }
 
-    /// Вылечил ли рестарт стрима запись — решение watchdog'а о возврате бюджета попыток.
+    /// Whether restarting the stream healed the recording — the watchdog's decision on refunding the
+    /// budget of attempts.
     ///
-    /// Бюджет возвращается, только если записанного стало больше **и** ни одна дорожка не осталась
-    /// сломанной. Обе части обязательны:
+    /// The budget is refunded only if more has been written **and** no track was left broken. Both
+    /// halves are mandatory:
     ///
-    /// - Один агрегат (`written` двух дорожек) — и живая дорожка тянет счётчик вверх за мёртвую:
-    ///   бюджет возвращался бы после каждого рестарта, попытки никогда бы не кончились, ошибка о
-    ///   вставшей записи не показалась бы ни разу. Приложение крутило бы «идёт запись»,
-    ///   пересоздавая стрим каждые несколько секунд и теряя половину встречи, — ровно то, ради чего
-    ///   заведены watchdog'и на дорожку.
-    /// - Одни дорожки — и наоборот: у мёртвого стрима буферы не идут вообще, обе дорожки выглядят
-    ///   «молчащими», а молчание поломкой не считается (см. `trackHealed`), и рестарт сочли бы
-    ///   успешным. Рост агрегата это исключает.
+    /// - With the aggregate alone (`written` of the two tracks), a live track pulls the counter up
+    ///   on behalf of a dead one: the budget would be refunded after every restart, the attempts
+    ///   would never run out, and the error about a stalled recording would never show up once. The
+    ///   app would keep spinning "recording in progress", recreating the stream every few seconds
+    ///   and losing half the meeting — exactly what the per-track watchdogs exist to prevent.
+    /// - With the tracks alone it is the other way round: a dead stream delivers no buffers at all,
+    ///   both tracks look "silent", and silence does not count as a breakage (see `trackHealed`), so
+    ///   the restart would be deemed successful. A growing aggregate rules that out.
     public static func restartHealed(_ now: TrackFlows, since base: TrackFlows) -> Bool {
         now.written > base.written
             && trackHealed(now.system, since: base.system)
             && trackHealed(now.mic, since: base.mic)
     }
 
-    /// Жива ли дорожка: writer снова принимает буферы — либо источник молчит, и писать нечего.
+    /// Whether a track is alive: the writer is accepting buffers again — or the source is silent and
+    /// there is nothing to write.
     ///
-    /// Тишину поломкой не считаем (та же логика, что в `TrackWatchdog`/`TrackFlow.isWriteBroken`):
-    /// иначе Mac без микрофона исчерпывал бы бюджет рестартов на ровном месте.
+    /// Silence is not treated as a breakage (the same logic as in
+    /// `TrackWatchdog`/`TrackFlow.isWriteBroken`): otherwise a Mac without a microphone would burn
+    /// through the restart budget for no reason.
     public static func trackHealed(_ now: TrackFlow, since base: TrackFlow) -> Bool {
         now.written > base.written || now.received == base.received
     }
 
-    /// Выбрать действие по причине с учётом оставшихся попыток рестарта.
+    /// Choose an action for a reason, taking the remaining restart attempts into account.
     ///
-    /// Проблемы прав лечатся запросом/подсказкой; не поднявшийся стрим и «тишину» пробуем
-    /// перезапустить (2–3 раза), а когда попытки кончились — показываем понятную ошибку.
+    /// Permission problems are healed by a request/prompt; a stream that failed to come up and
+    /// "silence" are worth a restart (2–3 times), and once the attempts run out we show a clear
+    /// error.
     public static func action(for failure: StartupFailure, restartAttemptsLeft: Int) -> HealingAction {
         switch failure {
         case .noScreenRecordingPermission:
@@ -216,19 +229,23 @@ public enum SelfDiagnosis {
         case .noMicrophonePermission:
             return .requestMicrophone
         case .streamNotStarted, .diskWriteFailed, .noData:
-            // Рестарт пересоздаёт и стрим, и сегмент — лечит и вставший стрим, и разовый сбой записи.
+            // A restart recreates both the stream and the segment — it heals a stalled stream as well
+            // as a one-off write failure.
             return restartAttemptsLeft > 0 ? .restartStream : .reportError(failure)
         }
     }
 }
 
-/// Watchdog потока буферов во время записи — **чистая логика** обнаружения «поток встал».
+/// Watchdog over the buffer flow during a recording — the **pure logic** of detecting "the flow has
+/// stalled".
 ///
-/// Runtime (`SelfCheck`) периодически скармливает сюда монотонное время и накопленный счётчик
-/// буферов; watchdog помнит момент последнего роста счётчика и сигналит, если прогресса не было
-/// дольше порога. Время передаётся снаружи, поэтому детектор детерминирован и тестируем.
+/// The runtime (`SelfCheck`) periodically feeds monotonic time and the accumulated buffer counter in
+/// here; the watchdog remembers the moment the counter last grew and raises a signal if there has
+/// been no progress for longer than the threshold. Time is passed in from outside, which makes the
+/// detector deterministic and testable.
 public struct FlowWatchdog: Sendable, Equatable {
-    /// Порог простоя, с: нет роста счётчика дольше — поток считается вставшим.
+    /// Stall threshold, s: no growth of the counter for longer than this and the flow is considered
+    /// stalled.
     public let stallThreshold: Double
 
     private var lastBufferCount: Int
@@ -240,8 +257,8 @@ public struct FlowWatchdog: Sendable, Equatable {
         self.lastProgressTime = startTime
     }
 
-    /// Записать наблюдение. Возвращает `true`, если поток встал: счётчик буферов не рос дольше
-    /// `stallThreshold` с момента последнего прогресса.
+    /// Record an observation. Returns `true` if the flow has stalled: the buffer counter has not
+    /// grown for longer than `stallThreshold` since the last progress.
     public mutating func observe(bufferCount: Int, at time: Double) -> Bool {
         if bufferCount > lastBufferCount {
             lastBufferCount = bufferCount
@@ -252,14 +269,17 @@ public struct FlowWatchdog: Sendable, Equatable {
     }
 }
 
-/// Watchdog **одной дорожки** — ловит то, что агрегатный `FlowWatchdog` пропускает по построению:
-/// дорожка получает буферы, но не пишет их, а вторая дорожка жива и держит общий счётчик растущим.
-/// Без этого мёртвый микрофон при живом системном звуке (или наоборот) не обнаруживается вообще.
+/// Watchdog over a **single track** — it catches what the aggregate `FlowWatchdog` misses by
+/// construction: a track receives buffers but does not write them, while the other track is alive
+/// and keeps the shared counter growing. Without this, a dead microphone alongside live system audio
+/// (or the other way round) is never detected at all.
 ///
-/// Тишина простоем не считается: если буферы дорожки не приходят, писать нечего — окно наблюдения
-/// просто сдвигается. Иначе пауза в разговоре роняла бы запись (см. `TrackFlow.isWriteBroken`).
+/// Silence does not count as a stall: if a track's buffers are not arriving, there is nothing to
+/// write — the observation window simply shifts. Otherwise a pause in the conversation would bring
+/// the recording down (see `TrackFlow.isWriteBroken`).
 public struct TrackWatchdog: Sendable, Equatable {
-    /// Порог простоя, с: буферы идут, а записи нет дольше этого — дорожка считается вставшей.
+    /// Stall threshold, s: buffers arriving with no writes for longer than this and the track is
+    /// considered stalled.
     public let stallThreshold: Double
 
     private var lastFlow: TrackFlow
@@ -271,8 +291,9 @@ public struct TrackWatchdog: Sendable, Equatable {
         self.lastProgressTime = startTime
     }
 
-    /// Записать наблюдение (накопленные с начала записи счётчики дорожки). Возвращает `true`, если
-    /// дорожка получает буферы, но не записала ни одного дольше `stallThreshold`.
+    /// Record an observation (the track's counters accumulated since the recording started). Returns
+    /// `true` if the track is receiving buffers but has not written a single one for longer than
+    /// `stallThreshold`.
     public mutating func observe(_ flow: TrackFlow, at time: Double) -> Bool {
         let wrote = flow.written > lastFlow.written
         let sourceIdle = flow.received <= lastFlow.received

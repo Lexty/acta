@@ -1,37 +1,40 @@
 import Foundation
 
-/// Маркер сессии записи — содержимое `session.json` в папке записи.
+/// Marker of a recording session — the contents of `session.json` in the recording folder.
 ///
-/// Пишется при старте (`status=recording`), обновляется по ходу и на финализации. Наличие
-/// `status=recording` на следующем запуске приложения = запись была прервана нештатно
-/// (краш/рестарт) → её подхватывает `RecoveryManager` (см. скилл `crash-safe-recording`).
+/// Written at start (`status=recording`), updated as the recording proceeds and on finalisation.
+/// Finding `status=recording` on the app's next launch means the recording was interrupted
+/// abnormally (crash/restart) → `RecoveryManager` picks it up (see the `crash-safe-recording`
+/// skill).
 ///
-/// Сериализация — **чистая логика** (JSON round-trip), поэтому тип и его кодек живут в `ActaKit`
-/// и покрыты юнит-тестом (`SessionManifestTests`), отдельно от файловой системы.
+/// Serialisation is **pure logic** (a JSON round-trip), so the type and its codec live in `ActaKit`
+/// and are covered by a unit test (`SessionManifestTests`), separately from the file system.
 public struct SessionManifest: Codable, Equatable, Sendable {
-    /// Состояние записи.
+    /// Recording state.
     public enum Status: String, Codable, Sendable {
-        /// Идёт запись (или процесс прерван, пока файл не обновлён на `done`/`recovered`).
+        /// Recording is in progress (or the process was interrupted before the file was updated to
+        /// `done`/`recovered`).
         case recording
-        /// Чистый стоп: сегменты склеены в итоговые файлы.
+        /// Clean stop: the segments were assembled into the final files.
         case done
-        /// Запись была прервана нештатно и восстановлена на старте из уцелевших сегментов.
+        /// The recording was interrupted abnormally and recovered at startup from the surviving
+        /// segments.
         case recovered
     }
 
-    /// Имя файла маркера в папке записи.
+    /// File name of the marker inside the recording folder.
     public static let fileName = "session.json"
 
-    /// Текущее состояние.
+    /// Current state.
     public var status: Status
 
-    /// Момент старта записи.
+    /// Moment the recording started.
     public var startedAt: Date
 
-    /// Длина сегмента (с), с которой шла запись — нужна восстановлению для оценки длительности.
+    /// Segment length (s) the recording ran with — recovery needs it to estimate the duration.
     public var segmentSeconds: Int
 
-    /// Число финализированных сегментов на момент последнего обновления маркера.
+    /// Number of finalised segments as of the last update of the marker.
     public var segmentCount: Int
 
     public init(status: Status, startedAt: Date, segmentSeconds: Int, segmentCount: Int) {
@@ -41,8 +44,8 @@ public struct SessionManifest: Codable, Equatable, Sendable {
         self.segmentCount = segmentCount
     }
 
-    /// Кодер с фиксированной раскладкой: snake_case ключи + ISO-8601 даты (человекочитаемо и
-    /// стабильно между запусками). `prettyPrinted` — чтобы `session.json` было удобно смотреть глазом.
+    /// Encoder with a fixed layout: snake_case keys + ISO-8601 dates (human-readable and stable
+    /// across runs). `prettyPrinted` keeps `session.json` comfortable to read by eye.
     public static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -51,7 +54,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
         return encoder
     }
 
-    /// Декодер, симметричный `makeEncoder()`.
+    /// Decoder symmetric to `makeEncoder()`.
     public static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -59,12 +62,12 @@ public struct SessionManifest: Codable, Equatable, Sendable {
         return decoder
     }
 
-    /// Сериализовать в JSON.
+    /// Serialise to JSON.
     public func encoded() throws -> Data {
         try Self.makeEncoder().encode(self)
     }
 
-    /// Разобрать из JSON.
+    /// Parse from JSON.
     public static func decode(from data: Data) throws -> SessionManifest {
         try makeDecoder().decode(SessionManifest.self, from: data)
     }

@@ -1,15 +1,16 @@
 import Foundation
 
-/// Чистые построители аргументов `ffmpeg` для склейки сегментов и микса дорожек.
+/// Pure builders of `ffmpeg` arguments for assembling segments and mixing tracks.
 ///
-/// Runtime-запуск процесса живёт в executable-таргете `Acta`; здесь только **чистая логика**
-/// (её покрываем юнит-тестами — см. `FFmpegTests`). Так требование крэш-безопасной сборки
-/// финальных файлов из сегментов остаётся проверяемым без запуска аудио-стека.
+/// Launching the actual process lives in the `Acta` executable target; this file holds only
+/// **pure logic** (covered by unit tests — see `FFmpegTests`). That keeps the requirement of
+/// crash-safe assembly of final files from segments verifiable without starting the audio stack.
 public enum FFmpeg {
-    /// Содержимое `list.txt` для concat-демультиплексора ffmpeg.
+    /// Contents of `list.txt` for the ffmpeg concat demuxer.
     ///
-    /// Каждая строка — `file '<path>'`. Одинарные кавычки внутри пути экранируются как `'\''`
-    /// (стандартный приём для concat-демуксера), иначе путь с апострофом ломает разбор списка.
+    /// Each line is `file '<path>'`. Single quotes inside a path are escaped as `'\''` (the
+    /// standard trick for the concat demuxer); otherwise a path with an apostrophe breaks list
+    /// parsing.
     public static func concatListContents(segmentPaths: [String]) -> String {
         segmentPaths
             .map { "file '\(escapeForConcatList($0))'" }
@@ -17,18 +18,19 @@ public enum FFmpeg {
             + (segmentPaths.isEmpty ? "" : "\n")
     }
 
-    /// Аргументы конкатенации сегментов одной дорожки в единый файл (без перекодирования).
+    /// Arguments that concatenate one track's segments into a single file (without re-encoding).
     ///
-    /// `-f concat -safe 0 -i list.txt -c copy output` — быстрая склейка одинаковых по формату
-    /// сегментов. `-y` перезаписывает существующий выход (актуально при восстановлении).
+    /// `-f concat -safe 0 -i list.txt -c copy output` — a fast assembly of segments that share the
+    /// same format. `-y` overwrites an existing output (which matters during recovery).
     public static func concatArgs(listPath: String, outputPath: String) -> [String] {
         ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
     }
 
-    /// Аргументы микса двух дорожек (система + микрофон) в объединённый файл.
+    /// Arguments that mix the two tracks (system + microphone) into a combined file.
     ///
-    /// `amix=inputs=2:duration=longest` — длительность по самой длинной дорожке. `normalize=0`
-    /// отключает деление амплитуды на число входов (иначе микс звучит вдвое тише).
+    /// `amix=inputs=2:duration=longest` — the duration follows the longest track. `normalize=0`
+    /// disables dividing the amplitude by the number of inputs (otherwise the mix sounds half as
+    /// loud).
     public static func mixArgs(systemPath: String, micPath: String, outputPath: String) -> [String] {
         [
             "-y",
@@ -39,7 +41,7 @@ public enum FFmpeg {
         ]
     }
 
-    /// Экранирование одинарной кавычки для строки `file '...'` concat-списка.
+    /// Escaping of a single quote for a `file '...'` line of the concat list.
     static func escapeForConcatList(_ path: String) -> String {
         path.replacingOccurrences(of: "'", with: "'\\''")
     }

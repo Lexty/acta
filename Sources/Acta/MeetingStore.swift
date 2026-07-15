@@ -2,13 +2,13 @@ import ActaKit
 import Foundation
 import os
 
-/// Файловое хранилище записей: корень архива `~/Acta/`, создание папки встречи
-/// (`YYYY-MM-DD_HHMM__<slug>/`), запись `info.md` и перечисление сохранённых записей.
+/// File storage for recordings: the `~/Acta/` archive root, creating the meeting folder
+/// (`YYYY-MM-DD_HHMM__<slug>/`), writing `info.md` and listing the saved recordings.
 ///
-/// Тонкая обёртка над FS: раскладка имён и сериализация `info.md` — чистая логика в `ActaKit`
-/// (`MeetingArchive`/`MeetingInfo`, покрыто юнит-тестами); тут только работа с диском.
+/// A thin wrapper over the FS: the name layout and the `info.md` serialization are pure logic in
+/// `ActaKit` (`MeetingArchive`/`MeetingInfo`, covered by unit tests); this file only touches disk.
 struct MeetingStore {
-    /// Одна запись в списке архива — папка + разобранный маркер сессии (если есть).
+    /// One entry in the archive listing — the folder + the parsed session marker (if any).
     struct Recording {
         var directory: URL
         var manifest: SessionManifest?
@@ -18,22 +18,22 @@ struct MeetingStore {
     private let fileManager = FileManager.default
     private let manifestStore = SessionManifestStore()
 
-    /// Корень архива записей (`~/Acta/` по умолчанию).
+    /// The root of the recordings archive (`~/Acta/` by default).
     let archiveRoot: URL
 
     init(archiveRoot: URL = MeetingStore.defaultArchiveRoot()) {
         self.archiveRoot = archiveRoot
     }
 
-    /// Путь архива по умолчанию: `~/Acta/`.
+    /// The default archive path: `~/Acta/`.
     static func defaultArchiveRoot() -> URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Acta", isDirectory: true)
     }
 
-    /// Создать папку новой встречи и вернуть её URL. Гарантирует существование корня архива.
+    /// Create the folder for a new meeting and return its URL. Guarantees the archive root exists.
     ///
-    /// Если папка с таким именем уже существует (совпали минута и slug), добавляет суффикс `-2`,
-    /// `-3`, … к slug, чтобы не смешать две записи в одной папке.
+    /// If a folder with that name already exists (the minute and the slug coincided), appends a
+    /// `-2`, `-3`, … suffix to the slug so as not to mix two recordings in one folder.
     func createMeetingDirectory(title: String, date: Date = Date()) throws -> URL {
         try ensureArchiveRoot()
         let slug = MeetingArchive.slug(from: title)
@@ -46,19 +46,20 @@ struct MeetingStore {
             attempt += 1
         }
         try fileManager.createDirectory(at: candidate, withIntermediateDirectories: true)
-        log.info("Создана папка встречи: \(candidate.lastPathComponent, privacy: .public)")
+        log.info("Created meeting folder: \(candidate.lastPathComponent, privacy: .public)")
         return candidate
     }
 
-    /// Записать `info.md` в папку встречи (атомарно, полной перезаписью).
+    /// Write `info.md` into the meeting folder (atomically, as a full overwrite).
     func writeInfo(_ info: MeetingInfo, to directory: URL) throws {
         let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
         try info.rendered().data(using: .utf8)!.write(to: url, options: .atomic)
     }
 
-    /// Перечислить записи архива: подпапки корня с разобранным `session.json`, новые сверху.
+    /// List the archive's recordings: the root's subfolders with their `session.json` parsed,
+    /// newest first.
     ///
-    /// Сортировка по имени папки по убыванию = по времени старта по убыванию (имя начинается с
+    /// Sorting by folder name descending = by start time descending (the name begins with
     /// `YYYY-MM-DD_HHMM`).
     func listRecordings() -> [Recording] {
         guard let dirs = try? fileManager.contentsOfDirectory(
@@ -72,23 +73,24 @@ struct MeetingStore {
             .sorted { $0.directory.lastPathComponent > $1.directory.lastPathComponent }
     }
 
-    // MARK: - Приватное
+    // MARK: - Private
 
-    /// Гарантировать существование корня архива и положить в него описание для Claude Code
-    /// пользователя (`~/Acta/CLAUDE.md`, см. `SPEC.md` §6) — один раз, если файла ещё нет.
+    /// Guarantee that the archive root exists and drop a description for the user's Claude Code into
+    /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6) — once, if the file is not there yet.
     private func ensureArchiveRoot() throws {
         try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
         guard !fileManager.fileExists(atPath: claudeMD.path) else { return }
         let contents = """
-        # Acta — архив записей встреч
+        # Acta — meeting recordings archive
 
-        Каждая подпапка — одна встреча (`YYYY-MM-DD_HHMM__<slug>/`):
-        - `system.wav` — звук собеседников, `mic.wav` — микрофон, `combined.wav` — микс.
-        - `info.md` — метаданные (YAML front-matter: title, date, source, duration, status).
-        - `session.json` — служебный маркер состояния записи.
+        Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
+        - `system.wav` — the other participants' audio, `mic.wav` — the microphone,
+          `combined.wav` — the mix.
+        - `info.md` — metadata (YAML front-matter: title, date, source, duration, status).
+        - `session.json` — the internal recording-state marker.
 
-        Транскрипция/саммари делаются отдельно (локально, `mlx_whisper`).
+        Transcription/summarisation are done separately (locally, via `mlx_whisper`).
         """
         try? contents.data(using: .utf8)?.write(to: claudeMD, options: .atomic)
     }
