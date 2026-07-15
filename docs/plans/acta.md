@@ -136,37 +136,108 @@ user-facing strings and Russian comments left in the Swift sources.
 - [x] Translate `Resources/`: `NSMicrophoneUsageDescription` in `Info.plist` (macOS shows it verbatim in the TCC microphone dialog — the most visible string the app has) and the comments in `Acta.entitlements`. Missed on the first pass because the acceptance grep below was scoped to `Sources/ Tests/ Package.swift` and never looked at `Resources/`
 - [x] Acceptance: `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .` returns nothing — repo-wide, **not** scoped to `Sources/`: the narrow grep is exactly what let a Russian TCC prompt through. Plus `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh` (exit 0) and `bash Scripts/bundle.sh` (codesign valid) all green. Note: `os.Logger` takes an `OSLogMessage`, not a `String`, so long log lines are wrapped with `"""` + `\` continuations rather than `+` concatenation
 
-### Task 10: Offer to record when another app starts using the microphone
+### Task 10: Always two tracks — drop combined from the pipeline, mix on demand
 
-Problem this solves: the recording is easy to forget. When a call starts, some app (Slack, Teams,
-Meet in a browser, …) opens the microphone — that is a reliable "a meeting is probably starting"
-signal. Acta should notice it and offer to record **once**, with a button, without stealing focus.
+This task **removes** code. `combined.wav` is derived data and it costs three ways:
 
-Read the `.claude/skills/mic-activity-detection` skill before starting — it holds the verified API
-facts and the gotchas (unreliable `IsRunningInput` listeners, Bluetooth mics, the Swift listener
-removal bug). **Do not invent CoreAudio API — check the docs.**
+1. **A full extra copy on disk** — a 100 s recording is ~19 MB per track; the mix adds ~19 MB more
+   for something `ffmpeg` reproduces in seconds.
+2. **It is the most fragile path in assembly.** Nearly every bug from the review history clusters
+   around the mix: "mix impossible was indistinguishable from mix failed", "combined is built via
+   intermediate wavs even when system/mic are deselected", "do not delete the only copies of audio
+   when the mix failed". Removing the mix deletes that whole class of failures.
+3. **It destroys the attribution the two tracks exist for.** Separate `system`/`mic` give
+   "me vs. them" for free; the mix collapses it back into a single blur. For transcription two files
+   are strictly better — run each one and you know who said what.
 
-Decided behaviour (agreed with the user):
-- Trigger on **any** app, not an allow-list — a new meeting tool must not be missed.
-- **Dwell filter ≥ 5 s**: only treat sustained input as a real session; this drops Siri and short
-  device probes.
-- The notification names the app ("Slack is using the microphone. Record this meeting?").
-- **Once per activation**: fire on the idle → active transition only; do not repeat while the mic
-  stays busy, and do not re-prompt if the user ignored/dismissed that activation. Re-arm only after
-  the mic goes idle again.
-- Never prompt while Acta is already recording.
-- Ignore list in Settings (by bundle identifier) + a master toggle to disable the whole feature.
+The only honest use for a mix is *listening back* to a meeting, where two files are awkward. That is
+an on-demand need, not a reason to write a third file on every recording.
 
-- [ ] `MicActivityMonitor.swift` (in `Acta`): enumerate `kAudioHardwarePropertyProcessObjectList`, read `kAudioProcessPropertyPID` + `kAudioProcessPropertyIsRunningInput`, map PID → `NSRunningApplication`. Use a listener **plus** a light poll (1–2 s) — per the skill, `IsRunningInput` listeners are unreliable on their own
-- [ ] **Exclude Acta's own PID**, otherwise recording triggers the monitor on itself
-- [ ] Pure logic in `ActaKit` (`MicActivity`): given snapshots of (pid, bundleID, isRunningInput, timestamp) decide `shouldPrompt` — dwell threshold, idle→active edge, one-shot per activation, re-arm on idle, ignore list, self-exclusion. No I/O here so it is unit-testable
-- [ ] Actionable notification: `UNNotificationCategory` + `UNNotificationAction` "Start Recording"; handle the response in `UNUserNotificationCenterDelegate` and start recording with the detected app as the title source (reuse `MeetingSource`/`suggestedTitle`). Extend the existing `Notifier`
-- [ ] Settings: master toggle (default on) + ignore list by bundle identifier; extend `RecordingSettings` (Codable + normalisation) and the Settings section in `MenuContent`
-- [ ] Unit tests for `MicActivity` (pure): blip < 5 s → no prompt; sustained ≥ 5 s → exactly one prompt; still active → no second prompt; idle then active again → prompts again; ignored bundle → no prompt; Acta's own PID → no prompt
+Decided (agreed with the user): **always write both tracks**; no mix in the recording pipeline;
+provide an on-demand "Export mix" action. The track-selection setting disappears with it.
+
+- [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`. Remove the mix from the pipeline and with it the special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
+- [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `segmentSeconds`, `archivePath`, `deleteSegmentsAfterAssembly`
+- [ ] **Settings migration:** existing `UserDefaults` hold JSON with the removed keys (verified: `{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,...}`). Decoding must ignore unknown keys and keep the surviving ones — no crash, no reset to defaults. Cover with a unit test using that exact legacy JSON
+- [ ] `MenuContent`: drop the "Save tracks" section from Settings; add a per-recording **"Export mix"** action to the recordings list (next to "Open folder")
+- [ ] `ExportMix` in `Acta`: run `ffmpeg` `amix=inputs=2:duration=longest` over `system.wav`/`mic.wav` → `combined.wav` in the same folder. Reuse `FFmpeg.mixArgs` and `SegmentAssembler.locateFFmpeg()`. Handle honestly: `ffmpeg` missing → the existing actionable error; a track file missing → clear message; `combined.wav` already present → overwrite. Run off the main actor; never block the UI
+- [ ] Recovery path: assemble both tracks the same way, no mix (`RecoveryManager` must not gain a mix branch)
+- [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` + `mic.wav`; `combined.wav` appears only if exported on demand
+- [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (it is still used by Export mix)
+- [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces exactly `system.wav` + `mic.wav` and no `combined.wav`; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): record → only two files appear; press "Export mix" → a valid `combined.wav` is produced (`ffprobe` duration > 0, non-silent); existing recordings that already contain `combined.wav` are left untouched
+
+### Task 11: Survive sleep and lid close
+
+Verified gap: nothing in `Sources/` observes sleep (`grep` for `willSleep|didWake|NSWorkspace.*[Ss]leep`
+returns nothing). Yet on a laptop this is **the most common interruption of all** — far more likely
+than the `kill -9` we already defend against. `SCStream` does not survive sleep, so today the
+behaviour is unknown: at best the watchdog thrashes restarts, at worst we show "recording" while
+nothing is written — the exact invariant the app exists to protect.
+
+See the sleep section of the `.claude/skills/crash-safe-recording` skill.
+
+- [ ] Observe `NSWorkspace.shared.notificationCenter` `willSleepNotification` / `didWakeNotification`. `screensDidSleepNotification` is a different event (screen sleep ≠ system sleep, e.g. lid closed with an external display) — do not conflate them
+- [ ] On `willSleep`: finalise the current segment as cheaply as possible. **The system will not wait**: `finishWriting` is async and may not complete. Do not attempt assembly (`ffmpeg`) from the handler. Accept truncation — `SegmentRepair` (Task 8.1) already rescues a truncated tail, so this is not data loss
+- [ ] On `didWake`: the stream is dead → restart it via the existing `AudioRecorder.restart` path, advancing the segment index so a closed segment is never overwritten. If the restart fails → surface the error; **never keep showing "recording"**
+- [ ] The watchdog must not fight the sleep handler: suppress stall detection between `willSleep` and `didWake`, otherwise it will burn its restart budget on a sleeping machine
+- [ ] A sleep gap means the assembled audio is shorter than wall-clock — that is correct and consistent, since duration comes from the audio (Task 8.3). Do not try to pad the gap
+- [ ] Pure logic in `ActaKit` where there is a decision to make (e.g. suppress-window state); the `NSWorkspace` I/O stays in `Acta`
+- [ ] Unit tests: watchdog stalls are ignored inside the sleep window and resume after wake; a restart failure after wake produces an error state rather than a "recording" state
 - [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): start a Slack/Meet call → within ~5 s a notification with a "Start Recording" button appears naming the app; pressing it starts a recording; no second notification for the same call; Siri or a 1–2 s mic blip produces no notification; starting a recording from the menu bar does not trigger a self-prompt
+- [ ] Acceptance (manual, needs a human): start a recording → close the lid / sleep for ~1 min → wake → recording continues, the segment closed before sleep is valid, new segments appear after wake, and stopping assembles audio containing both sides of the gap
 
-### Task 11: Attach calendar event data to the recording
+### Task 12: Show the recording timer in the menu bar
+
+Today the elapsed time lives inside the popover — you must click to learn whether anything is being
+recorded. Putting it in the menu bar makes the state permanently visible, which both reinforces the
+"never a silent recording" invariant and stops you forgetting to hit Stop on a finished call.
+
+- [ ] `MenuBarExtra` label reflects state: idle → icon only; recording → icon + elapsed time (`MM:SS`, hours as `H:MM:SS` past an hour); error → a clearly distinct warning icon
+- [ ] Use **monospaced digits** so the menu bar does not jitter as the seconds change
+- [ ] Update once per second while recording only; no timer work while idle
+- [ ] The already-present `RecordingController.elapsedString` should be reused rather than duplicated
+- [ ] Unit test the formatting (pure): seconds → `MM:SS`, crossing an hour → `H:MM:SS`, zero, and a long recording
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): during a recording the menu bar shows a ticking timer without opening the popover; it disappears on stop; an error state is visible at a glance
+
+### Task 13: Auto-stop on prolonged silence, with a cancellable countdown
+
+Problem: it is easy to forget to stop. A forgotten recording writes gigabytes of silence
+(~1.38 GB/hour for two tracks, measured). But stopping silently would be as bad as recording
+silently — hence the symmetry with the app's core invariant: **never record silently, never stop
+silently**.
+
+Decided (agreed with the user): trigger on **silence in all channels**, not on the app releasing the
+microphone — if you are listening with your mic muted the meeting is still going. When silence
+persists, show a notification with a **countdown** ("recording stops in …") and a way to **cancel**.
+
+- [ ] Measure levels **streaming**, from the `CMSampleBuffer`s as they are written (cheap, per track). Do **not** shell out to `ffmpeg volumedetect` for this
+- [ ] Pure `SilenceWatcher`/`AutoStop` in `ActaKit`: given (timestamp, systemLevel, micLevel) snapshots → state machine `active → silent → countdown → stop`, plus `cancelled`. Thresholds are parameters, no I/O — fully unit-testable
+- [ ] **Both tracks must be quiet** to count as silence (mic muted + system audio playing = the meeting is on)
+- [ ] Grounded defaults: measured levels from real recordings are system ≈ −21…−24 dB, mic ≈ −34…−40 dB mean, so a silence threshold around **−50 dB** is sane. Silence duration default **10 min**, countdown default **2 min**. All configurable
+- [ ] Notification with a countdown and a **"Keep recording"** action that cancels the auto-stop. After a cancel, re-arm only on a **fresh** silence period — never re-notify immediately
+- [ ] Never auto-stop within the first minute of a recording; a thinking pause in a meeting is seconds, not minutes — the thresholds must not fire on one
+- [ ] If not cancelled → a normal **clean stop** (status `done`, assembly, the usual saved notification) — identical to pressing Stop, not a special path
+- [ ] Settings: master toggle (default on), silence duration, countdown duration; extend `RecordingSettings` (Codable + normalisation, clamp to sane ranges)
+- [ ] Unit tests: sustained speech → never fires; short pause → no countdown; silence ≥ threshold → countdown starts exactly once; cancel → no stop and no immediate re-notify; sound returns during the countdown → countdown aborts; system silent but mic active (you are talking) → no fire; both silent → fires; nothing fires in the first minute
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): leave a recording in silence → a countdown notification appears → pressing "Keep recording" cancels it and recording continues → left alone, it stops cleanly and the audio is assembled normally
+
+### Task 14: Handle audio device changes mid-recording
+
+Verified gap: nothing observes the default input device (`grep` for
+`kAudioHardwarePropertyDefaultInputDevice` returns nothing). Plugging in AirPods mid-call switches
+the default input — a routine event that currently has undefined behaviour. The per-track watchdog
+may notice the mic track dying, but that is a slow, indirect rescue at best.
+
+- [ ] Observe `kAudioHardwarePropertyDefaultInputDevice` via `AudioObjectAddPropertyListener`. Mind the Swift listener-removal bug noted in the `mic-activity-detection` skill (`AudioObjectRemovePropertyListenerBlock` — use `AudioObjectPropertyListenerProc`)
+- [ ] On a device change: restart the stream via the existing `AudioRecorder.restart` path, advancing the segment index and keeping every written segment. This must be faster and more explicit than waiting for the watchdog to spot a dead track
+- [ ] A device change must not consume the `SelfCheck` restart budget meant for genuine failures — it is an expected event, not a fault
+- [ ] Unit tests (pure): a device-change event triggers exactly one restart; the restart does not reset or consume the failure budget; a change while idle does nothing
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): start a recording on the built-in mic → connect AirPods mid-recording → recording continues, no segment is lost or overwritten, and the assembled audio spans the switch
+### Task 15: Attach calendar event data to the recording
 
 Problem this solves: a recording is currently identified by "Slack — 2026-07-15 18:28". If the
 meeting is in the calendar, the archive should carry the real thing — title, agenda, participants —
@@ -220,107 +291,36 @@ Design:
 - [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
 - [ ] Acceptance (manual, needs a human): with a real meeting in the calendar, start a recording → `info.md` front-matter carries the event title/participants/organizer and the agenda appears in the body; the folder is named after the event. **Drift check:** start a recording ~10 min after the scheduled start and confirm the event is still matched. **Degradation check:** deny Calendar access → recording proceeds normally, no calendar fields, no crash
 
-Synergy with Task 10: once this lands, the mic-activity notification can name the meeting
+Synergy with Task 16: once this lands, the mic-activity notification can name the meeting
 ("Record 'Weekly sync'?") instead of just the app. Wire it up if both tasks are done.
 
-### Task 12: Always two tracks — drop combined from the pipeline, mix on demand
+### Task 16: Offer to record when another app starts using the microphone
 
-This task **removes** code. `combined.wav` is derived data and it costs three ways:
+Problem this solves: the recording is easy to forget. When a call starts, some app (Slack, Teams,
+Meet in a browser, …) opens the microphone — that is a reliable "a meeting is probably starting"
+signal. Acta should notice it and offer to record **once**, with a button, without stealing focus.
 
-1. **A full extra copy on disk** — a 100 s recording is ~19 MB per track; the mix adds ~19 MB more
-   for something `ffmpeg` reproduces in seconds.
-2. **It is the most fragile path in assembly.** Nearly every bug from the review history clusters
-   around the mix: "mix impossible was indistinguishable from mix failed", "combined is built via
-   intermediate wavs even when system/mic are deselected", "do not delete the only copies of audio
-   when the mix failed". Removing the mix deletes that whole class of failures.
-3. **It destroys the attribution the two tracks exist for.** Separate `system`/`mic` give
-   "me vs. them" for free; the mix collapses it back into a single blur. For transcription two files
-   are strictly better — run each one and you know who said what.
+Read the `.claude/skills/mic-activity-detection` skill before starting — it holds the verified API
+facts and the gotchas (unreliable `IsRunningInput` listeners, Bluetooth mics, the Swift listener
+removal bug). **Do not invent CoreAudio API — check the docs.**
 
-The only honest use for a mix is *listening back* to a meeting, where two files are awkward. That is
-an on-demand need, not a reason to write a third file on every recording.
+Decided behaviour (agreed with the user):
+- Trigger on **any** app, not an allow-list — a new meeting tool must not be missed.
+- **Dwell filter ≥ 5 s**: only treat sustained input as a real session; this drops Siri and short
+  device probes.
+- The notification names the app ("Slack is using the microphone. Record this meeting?").
+- **Once per activation**: fire on the idle → active transition only; do not repeat while the mic
+  stays busy, and do not re-prompt if the user ignored/dismissed that activation. Re-arm only after
+  the mic goes idle again.
+- Never prompt while Acta is already recording.
+- Ignore list in Settings (by bundle identifier) + a master toggle to disable the whole feature.
 
-Decided (agreed with the user): **always write both tracks**; no mix in the recording pipeline;
-provide an on-demand "Export mix" action. The track-selection setting disappears with it.
-
-- [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`. Remove the mix from the pipeline and with it the special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
-- [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `segmentSeconds`, `archivePath`, `deleteSegmentsAfterAssembly`
-- [ ] **Settings migration:** existing `UserDefaults` hold JSON with the removed keys (verified: `{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,...}`). Decoding must ignore unknown keys and keep the surviving ones — no crash, no reset to defaults. Cover with a unit test using that exact legacy JSON
-- [ ] `MenuContent`: drop the "Save tracks" section from Settings; add a per-recording **"Export mix"** action to the recordings list (next to "Open folder")
-- [ ] `ExportMix` in `Acta`: run `ffmpeg` `amix=inputs=2:duration=longest` over `system.wav`/`mic.wav` → `combined.wav` in the same folder. Reuse `FFmpeg.mixArgs` and `SegmentAssembler.locateFFmpeg()`. Handle honestly: `ffmpeg` missing → the existing actionable error; a track file missing → clear message; `combined.wav` already present → overwrite. Run off the main actor; never block the UI
-- [ ] Recovery path: assemble both tracks the same way, no mix (`RecoveryManager` must not gain a mix branch)
-- [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` + `mic.wav`; `combined.wav` appears only if exported on demand
-- [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (it is still used by Export mix)
-- [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces exactly `system.wav` + `mic.wav` and no `combined.wav`; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): record → only two files appear; press "Export mix" → a valid `combined.wav` is produced (`ffprobe` duration > 0, non-silent); existing recordings that already contain `combined.wav` are left untouched
-
-### Task 13: Survive sleep and lid close
-
-Verified gap: nothing in `Sources/` observes sleep (`grep` for `willSleep|didWake|NSWorkspace.*[Ss]leep`
-returns nothing). Yet on a laptop this is **the most common interruption of all** — far more likely
-than the `kill -9` we already defend against. `SCStream` does not survive sleep, so today the
-behaviour is unknown: at best the watchdog thrashes restarts, at worst we show "recording" while
-nothing is written — the exact invariant the app exists to protect.
-
-See the sleep section of the `.claude/skills/crash-safe-recording` skill.
-
-- [ ] Observe `NSWorkspace.shared.notificationCenter` `willSleepNotification` / `didWakeNotification`. `screensDidSleepNotification` is a different event (screen sleep ≠ system sleep, e.g. lid closed with an external display) — do not conflate them
-- [ ] On `willSleep`: finalise the current segment as cheaply as possible. **The system will not wait**: `finishWriting` is async and may not complete. Do not attempt assembly (`ffmpeg`) from the handler. Accept truncation — `SegmentRepair` (Task 8.1) already rescues a truncated tail, so this is not data loss
-- [ ] On `didWake`: the stream is dead → restart it via the existing `AudioRecorder.restart` path, advancing the segment index so a closed segment is never overwritten. If the restart fails → surface the error; **never keep showing "recording"**
-- [ ] The watchdog must not fight the sleep handler: suppress stall detection between `willSleep` and `didWake`, otherwise it will burn its restart budget on a sleeping machine
-- [ ] A sleep gap means the assembled audio is shorter than wall-clock — that is correct and consistent, since duration comes from the audio (Task 8.3). Do not try to pad the gap
-- [ ] Pure logic in `ActaKit` where there is a decision to make (e.g. suppress-window state); the `NSWorkspace` I/O stays in `Acta`
-- [ ] Unit tests: watchdog stalls are ignored inside the sleep window and resume after wake; a restart failure after wake produces an error state rather than a "recording" state
+- [ ] `MicActivityMonitor.swift` (in `Acta`): enumerate `kAudioHardwarePropertyProcessObjectList`, read `kAudioProcessPropertyPID` + `kAudioProcessPropertyIsRunningInput`, map PID → `NSRunningApplication`. Use a listener **plus** a light poll (1–2 s) — per the skill, `IsRunningInput` listeners are unreliable on their own
+- [ ] **Exclude Acta's own PID**, otherwise recording triggers the monitor on itself
+- [ ] Pure logic in `ActaKit` (`MicActivity`): given snapshots of (pid, bundleID, isRunningInput, timestamp) decide `shouldPrompt` — dwell threshold, idle→active edge, one-shot per activation, re-arm on idle, ignore list, self-exclusion. No I/O here so it is unit-testable
+- [ ] Actionable notification: `UNNotificationCategory` + `UNNotificationAction` "Start Recording"; handle the response in `UNUserNotificationCenterDelegate` and start recording with the detected app as the title source (reuse `MeetingSource`/`suggestedTitle`). Extend the existing `Notifier`
+- [ ] Settings: master toggle (default on) + ignore list by bundle identifier; extend `RecordingSettings` (Codable + normalisation) and the Settings section in `MenuContent`
+- [ ] Unit tests for `MicActivity` (pure): blip < 5 s → no prompt; sustained ≥ 5 s → exactly one prompt; still active → no second prompt; idle then active again → prompts again; ignored bundle → no prompt; Acta's own PID → no prompt
 - [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): start a recording → close the lid / sleep for ~1 min → wake → recording continues, the segment closed before sleep is valid, new segments appear after wake, and stopping assembles audio containing both sides of the gap
+- [ ] Acceptance (manual, needs a human): start a Slack/Meet call → within ~5 s a notification with a "Start Recording" button appears naming the app; pressing it starts a recording; no second notification for the same call; Siri or a 1–2 s mic blip produces no notification; starting a recording from the menu bar does not trigger a self-prompt
 
-### Task 14: Show the recording timer in the menu bar
-
-Today the elapsed time lives inside the popover — you must click to learn whether anything is being
-recorded. Putting it in the menu bar makes the state permanently visible, which both reinforces the
-"never a silent recording" invariant and stops you forgetting to hit Stop on a finished call.
-
-- [ ] `MenuBarExtra` label reflects state: idle → icon only; recording → icon + elapsed time (`MM:SS`, hours as `H:MM:SS` past an hour); error → a clearly distinct warning icon
-- [ ] Use **monospaced digits** so the menu bar does not jitter as the seconds change
-- [ ] Update once per second while recording only; no timer work while idle
-- [ ] The already-present `RecordingController.elapsedString` should be reused rather than duplicated
-- [ ] Unit test the formatting (pure): seconds → `MM:SS`, crossing an hour → `H:MM:SS`, zero, and a long recording
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): during a recording the menu bar shows a ticking timer without opening the popover; it disappears on stop; an error state is visible at a glance
-
-### Task 15: Auto-stop on prolonged silence, with a cancellable countdown
-
-Problem: it is easy to forget to stop. A forgotten recording writes gigabytes of silence
-(~1.38 GB/hour for two tracks, measured). But stopping silently would be as bad as recording
-silently — hence the symmetry with the app's core invariant: **never record silently, never stop
-silently**.
-
-Decided (agreed with the user): trigger on **silence in all channels**, not on the app releasing the
-microphone — if you are listening with your mic muted the meeting is still going. When silence
-persists, show a notification with a **countdown** ("recording stops in …") and a way to **cancel**.
-
-- [ ] Measure levels **streaming**, from the `CMSampleBuffer`s as they are written (cheap, per track). Do **not** shell out to `ffmpeg volumedetect` for this
-- [ ] Pure `SilenceWatcher`/`AutoStop` in `ActaKit`: given (timestamp, systemLevel, micLevel) snapshots → state machine `active → silent → countdown → stop`, plus `cancelled`. Thresholds are parameters, no I/O — fully unit-testable
-- [ ] **Both tracks must be quiet** to count as silence (mic muted + system audio playing = the meeting is on)
-- [ ] Grounded defaults: measured levels from real recordings are system ≈ −21…−24 dB, mic ≈ −34…−40 dB mean, so a silence threshold around **−50 dB** is sane. Silence duration default **10 min**, countdown default **2 min**. All configurable
-- [ ] Notification with a countdown and a **"Keep recording"** action that cancels the auto-stop. After a cancel, re-arm only on a **fresh** silence period — never re-notify immediately
-- [ ] Never auto-stop within the first minute of a recording; a thinking pause in a meeting is seconds, not minutes — the thresholds must not fire on one
-- [ ] If not cancelled → a normal **clean stop** (status `done`, assembly, the usual saved notification) — identical to pressing Stop, not a special path
-- [ ] Settings: master toggle (default on), silence duration, countdown duration; extend `RecordingSettings` (Codable + normalisation, clamp to sane ranges)
-- [ ] Unit tests: sustained speech → never fires; short pause → no countdown; silence ≥ threshold → countdown starts exactly once; cancel → no stop and no immediate re-notify; sound returns during the countdown → countdown aborts; system silent but mic active (you are talking) → no fire; both silent → fires; nothing fires in the first minute
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): leave a recording in silence → a countdown notification appears → pressing "Keep recording" cancels it and recording continues → left alone, it stops cleanly and the audio is assembled normally
-
-### Task 16: Handle audio device changes mid-recording
-
-Verified gap: nothing observes the default input device (`grep` for
-`kAudioHardwarePropertyDefaultInputDevice` returns nothing). Plugging in AirPods mid-call switches
-the default input — a routine event that currently has undefined behaviour. The per-track watchdog
-may notice the mic track dying, but that is a slow, indirect rescue at best.
-
-- [ ] Observe `kAudioHardwarePropertyDefaultInputDevice` via `AudioObjectAddPropertyListener`. Mind the Swift listener-removal bug noted in the `mic-activity-detection` skill (`AudioObjectRemovePropertyListenerBlock` — use `AudioObjectPropertyListenerProc`)
-- [ ] On a device change: restart the stream via the existing `AudioRecorder.restart` path, advancing the segment index and keeping every written segment. This must be faster and more explicit than waiting for the watchdog to spot a dead track
-- [ ] A device change must not consume the `SelfCheck` restart budget meant for genuine failures — it is an expected event, not a fault
-- [ ] Unit tests (pure): a device-change event triggers exactly one restart; the restart does not reset or consume the failure budget; a change while idle does nothing
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): start a recording on the built-in mic → connect AirPods mid-recording → recording continues, no segment is lost or overwritten, and the assembled audio spans the switch
