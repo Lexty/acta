@@ -51,11 +51,24 @@ public struct RecoveryManager {
                 // `segmentsUnrepairable` deliberately does not come here: there the segments *do*
                 // hold audio, so it gets its own bounded retry below.
                 closeEmpty(directory: dir, manifest: manifest)
-            } catch SegmentAssembler.AssembleError.segmentsUnrepairable {
-                // The segments hold audio that the repair could not get into a final file. Retry on
-                // a later launch — but not forever; see `retryOrCloseIncomplete`.
-                retryOrCloseIncomplete(directory: dir, manifest: manifest)
+            } catch SegmentAssembler.AssembleError.segmentsUnrepairable,
+                    SegmentAssembler.AssembleError.concatFailed {
+                // The segments hold audio that never reached a final file — the repair could not
+                // place it, or `ffmpeg` refused to concat it. Either way the segments are its only
+                // copy, so retry on a later launch — but not forever; see `retryOrCloseIncomplete`.
+                //
+                // `concatFailed` belongs here and not in the generic `catch` below: `-xerror` is
+                // what turned it from a failure `ffmpeg` used to swallow (exit 0, short file) into a
+                // live one, and its usual causes — segments `-c copy` cannot splice, a torn file —
+                // are as permanent as a failed repair. Left unbounded it would re-run a full concat
+                // on every launch, with every `start()` waiting on it, forever.
+                if retryOrCloseIncomplete(directory: dir, manifest: manifest) {
+                    recovered.append(dir)
+                }
             } catch {
+                // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the
+                // binary nothing assembles for reasons outside this folder, and installing it is
+                // exactly the kind of fix a later launch is meant to pick up.
                 let name = dir.lastPathComponent
                 log.error("""
                     Failed to recover \(name, privacy: .public): \
@@ -85,24 +98,26 @@ public struct RecoveryManager {
         updateInfo(in: directory, status: updated.status, durationSeconds: duration)
     }
 
-    /// How many times a folder may come back `segmentsUnrepairable` before recovery stops retrying
-    /// it. Three, because the two outcomes it arbitrates are asymmetric: a retry costs one more
-    /// `ffmpeg` concat at launch, whereas giving up too early costs the audio its last chance of
-    /// reaching a file.
+    /// How many times a folder may come back with audio that reached no final file before recovery
+    /// stops retrying it. Three, because the two outcomes it arbitrates are asymmetric: a retry costs
+    /// one more `ffmpeg` concat at launch, whereas giving up too early costs the audio its last
+    /// chance of reaching a file.
     public static let maxAssemblyAttempts = 3
 
-    /// A folder whose segments still hold audio the repair could not place. Spend an attempt and
-    /// leave it `recording` so the next launch tries again — until the attempts run out, at which
-    /// point keep the tracks that did assemble and close the folder.
+    /// A folder whose segments still hold audio the assembly could not place — a failed repair, or a
+    /// concat `ffmpeg` refused. Spend an attempt and leave it `recording` so the next launch tries
+    /// again — until the attempts run out, at which point keep the tracks that did assemble and close
+    /// the folder. Returns whether the folder is worth reporting to the user.
     ///
-    /// Bounded rather than eternal because the causes of a failed repair are mostly *not* transient:
-    /// `SegmentRepair.apply` overwrites eight bytes of an existing file, so it does not need a free
-    /// block, and what actually stops it — a read-only volume, a wrong permission, an immutable
-    /// flag, failing hardware — will still be there on the next launch and the one after it.
+    /// Bounded rather than eternal because neither cause is reliably transient. A failed concat is a
+    /// property of the segments themselves — a stream `-c copy` cannot splice, a torn file — and they
+    /// do not change between launches. A failed repair is the same story: `SegmentRepair.apply`
+    /// overwrites eight bytes of an existing file, so it never needs a free block, and what actually
+    /// stops it — a wrong permission, an immutable flag, failing hardware — is still there next time.
     ///
     /// Giving up loses nothing: `assemble` throws before any deletion and recovery never deletes
     /// anyway, so the segments outlive us and stay the audio's copy of record.
-    private func retryOrCloseIncomplete(directory: URL, manifest: SessionManifest) {
+    private func retryOrCloseIncomplete(directory: URL, manifest: SessionManifest) -> Bool {
         let name = directory.lastPathComponent
         var updated = manifest
         updated.assemblyAttempts += 1
@@ -110,31 +125,43 @@ public struct RecoveryManager {
         guard updated.assemblyAttempts >= Self.maxAssemblyAttempts else {
             // Status stays `recording`: that marker *is* the retry request.
             log.error("""
-                \(name, privacy: .public): segments hold audio that could not be repaired into the \
-                assembly (attempt \(updated.assemblyAttempts, privacy: .public) of \
+                \(name, privacy: .public): segments hold audio that did not reach the assembly \
+                (attempt \(updated.assemblyAttempts, privacy: .public) of \
                 \(Self.maxAssemblyAttempts, privacy: .public)) — will retry on the next launch
                 """)
             try? store.write(updated, to: directory)
-            return
+            return false
         }
 
         log.error("""
-            \(name, privacy: .public): segments still hold audio that could not be repaired after \
-            \(Self.maxAssemblyAttempts, privacy: .public) attempts — closing the recording with the \
-            tracks that did assemble; the segments are kept and remain the only copy of the rest
+            \(name, privacy: .public): segments still hold audio that did not reach the assembly \
+            after \(Self.maxAssemblyAttempts, privacy: .public) attempts — closing the recording \
+            with the tracks that did assemble; the segments are kept and remain the only copy of the \
+            rest
             """)
-        updated.status = .recovered
-        try? store.write(updated, to: directory)
         // Measured off the tracks that made it, exactly as a clean assembly would — they are on disk
         // already (`concatTrack` renames each into place before the throw). Short by the audio that
-        // never got repaired, but it is the length of the files the user actually has, and `info.md`
+        // never assembled, but it is the length of the files the user actually has, and `info.md`
         // must match them.
-        let duration = [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName]
+        let tracks = [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName]
             .map { directory.appendingPathComponent($0) }
-            .compactMap { SegmentAssembler.measuredDuration(of: $0) }
-            .max()
+            .filter { fileManager.fileExists(atPath: $0.path) }
+        let duration = tracks.compactMap { SegmentAssembler.measuredDuration(of: $0) }.max()
+
+        updated.status = .recovered
+        // The count the crash left behind describes segments, not the assembly that just closed over
+        // them; sealing a terminal marker around a number this path never corrected would leave it
+        // permanently wrong in a file the user is told to read by eye.
+        updated.segmentCount = tracks.count
+        try? store.write(updated, to: directory)
         updateInfo(in: directory, status: updated.status,
                    durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0)
+
+        // Report it only if a track actually landed. With one on disk the folder genuinely holds
+        // recovered audio and the archive just changed, so staying silent would leave the user to
+        // notice by chance. With none, the folder is `closeEmpty`'s shape and takes its reasoning:
+        // there is no reason to lie in a notification.
+        return !tracks.isEmpty
     }
 
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a

@@ -109,7 +109,11 @@ func assembleLeavesNoPlausibleTrackFileBehindWhenConcatFails() throws {
         // Nothing under the final name, and no temp left lying around either.
         #expect(!exists(directory.appendingPathComponent("system.wav")))
         #expect(!exists(directory.appendingPathComponent("system.partial.wav")))
-        #expect(finalFileNames(in: directory).isEmpty)
+        // The mic track is whole and has nothing to do with why `system` failed, so it must still
+        // assemble: the failure is deterministic, and a track skipped because a *sibling* threw
+        // would never be attempted again on any later launch either.
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.micTrackFileName)))
+        #expect(finalFileNames(in: directory) == [SegmentLayout.micTrackFileName])
     }
 }
 

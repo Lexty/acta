@@ -73,12 +73,19 @@ public struct SegmentAssembler {
     public func assemble(in directory: URL, deleteSegments: Bool) throws -> Result {
         guard let ffmpeg = Self.locateFFmpeg() else { throw AssembleError.ffmpegNotFound }
 
-        let system = try concatTrack(dirName: SegmentLayout.systemDirName,
-                                     outputName: SegmentLayout.systemTrackFileName,
-                                     in: directory, ffmpeg: ffmpeg)
-        let mic = try concatTrack(dirName: SegmentLayout.micDirName,
-                                  outputName: SegmentLayout.micTrackFileName,
-                                  in: directory, ffmpeg: ffmpeg)
+        // Both tracks are attempted before either failure is reported. A concat dies on properties
+        // of its own segments — a mid-meeting device change leaves `system` unconcatable while `mic`
+        // is perfectly whole — and throwing out of the first call would mean the second track never
+        // ran at all. Its audio would then reach no file for a reason that has nothing to do with
+        // it, and the cause being deterministic, no later retry would rescue it either.
+        let systemOutcome = Swift.Result { try concatTrack(dirName: SegmentLayout.systemDirName,
+                                                           outputName: SegmentLayout.systemTrackFileName,
+                                                           in: directory, ffmpeg: ffmpeg) }
+        let micOutcome = Swift.Result { try concatTrack(dirName: SegmentLayout.micDirName,
+                                                        outputName: SegmentLayout.micTrackFileName,
+                                                        in: directory, ffmpeg: ffmpeg) }
+        let system = try systemOutcome.get()
+        let mic = try micOutcome.get()
 
         // A planned segment that failed its repair means audio the plan saw and vouched for reached
         // no final file, and the segment is its only copy. That is the same statement whether the

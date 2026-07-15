@@ -13,6 +13,19 @@ import ActaRuntime
 // The two outcomes under test are the ones that decide whether audio is ever seen again: retry while
 // the cause might clear, and stop before the folder becomes a launch-time tax that never resolves.
 
+/// The marker and metadata a crash leaves behind: `status=recording` and an `info.md` to patch.
+private func writeInterruptedMarker(in directory: URL, title: String, segmentCount: Int) throws {
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let manifest = SessionManifest(status: .recording, startedAt: startedAt,
+                                   segmentSeconds: 15, segmentCount: segmentCount)
+    try manifest.encoded().write(to: directory.appendingPathComponent(SessionManifest.fileName))
+    try MeetingInfo(title: title, date: startedAt, source: "Slack",
+                    durationSeconds: 0, status: .recording)
+        .rendered()
+        .write(to: directory.appendingPathComponent(MeetingArchive.infoFileName),
+               atomically: true, encoding: .utf8)
+}
+
 /// An archive root holding one interrupted meeting: `status=recording`, an `info.md` to patch, two
 /// healthy system segments, and a mic segment holding real audio that the repair cannot write back.
 private func withInterruptedMeeting(_ body: (URL, URL) throws -> Void) throws {
@@ -28,16 +41,22 @@ private func withInterruptedMeeting(_ body: (URL, URL) throws -> Void) throws {
         try FileManager.default.setAttributes([.posixPermissions: 0o444],
                                               ofItemAtPath: micSegment.path)
 
-        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let manifest = SessionManifest(status: .recording, startedAt: startedAt,
-                                       segmentSeconds: 15, segmentCount: 2)
-        try manifest.encoded().write(to: directory.appendingPathComponent(SessionManifest.fileName))
-        try MeetingInfo(title: "Standup", date: startedAt, source: "Slack",
-                        durationSeconds: 0, status: .recording)
-            .rendered()
-            .write(to: directory.appendingPathComponent(MeetingArchive.infoFileName),
-                   atomically: true, encoding: .utf8)
+        try writeInterruptedMarker(in: directory, title: "Standup", segmentCount: 2)
+        try body(root, directory)
+    }
+}
 
+/// The same interrupted folder, failing at the other end of the assembly: the system segments are
+/// ones `ffmpeg` will not splice under `-c copy`, while the mic track is perfectly whole.
+private func withConcatFailingMeeting(_ body: (URL, URL) throws -> Void) throws {
+    try withRecordingDirectory { root in
+        let directory = root.appendingPathComponent("2026-07-15-1300-planning", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        try makeRecording(in: directory, systemSegments: 0, micSegments: 2)
+        try makeConcatFailingSystemTrack(in: directory)
+
+        try writeInterruptedMarker(in: directory, title: "Planning", segmentCount: 2)
         try body(root, directory)
     }
 }
@@ -126,6 +145,75 @@ func recoveryStopsRetryingAfterTheAttemptBoundAndKeepsTheSegments() throws {
         manager.recoverInterruptedSessions()
         let afterExtraLaunch = try readManifest(in: directory)
         #expect(afterExtraLaunch.assemblyAttempts == RecoveryManager.maxAssemblyAttempts)
+    }
+}
+
+/// A failed concat has to be bounded exactly like a failed repair, and this is the test that says so.
+///
+/// `-xerror` is what makes this reachable: before it, `ffmpeg` swallowed a failed concat (exit 0, a
+/// short file) and this path was effectively dead. Left in the generic `catch`, such a folder spends
+/// no attempt and keeps `status=recording` forever — re-running a full concat on every launch, with
+/// every `start()` waiting on it, and reading "not finished" with no way for the user to clear it.
+@Test
+func recoveryStopsRetryingAFolderWhoseTrackCannotBeConcatenated() throws {
+    try withConcatFailingMeeting { root, directory in
+        let manager = RecoveryManager(archiveRoot: root)
+
+        // The attempts have to be *spent* — a failure that never increments the counter is the
+        // unbounded loop wearing a bound.
+        manager.recoverInterruptedSessions()
+        #expect(try readManifest(in: directory).assemblyAttempts == 1)
+        #expect(try readManifest(in: directory).status == .recording)
+
+        for _ in 1..<RecoveryManager.maxAssemblyAttempts {
+            manager.recoverInterruptedSessions()
+        }
+
+        let manifest = try readManifest(in: directory)
+        #expect(manifest.status == .recovered)
+        #expect(manifest.assemblyAttempts == RecoveryManager.maxAssemblyAttempts)
+        // The system audio reached no file, so its segments stay its only copy.
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.systemDirName)))
+        #expect(!exists(directory.appendingPathComponent(SegmentLayout.systemTrackFileName)))
+
+        // The next launch must walk past the folder rather than pay for the concat again.
+        manager.recoverInterruptedSessions()
+        #expect(try readManifest(in: directory).assemblyAttempts == RecoveryManager.maxAssemblyAttempts)
+    }
+}
+
+/// A track that fails to concat must not take its healthy sibling down with it. `system` and `mic`
+/// fail for reasons of their own, and a mic track skipped because *system* threw would be audio lost
+/// to a deterministic cause no retry can clear — while the folder closes over it.
+@Test
+func recoveryAssemblesTheHealthyTrackWhenTheOtherCannotBeConcatenated() throws {
+    try withConcatFailingMeeting { root, directory in
+        let manager = RecoveryManager(archiveRoot: root)
+        for _ in 0..<RecoveryManager.maxAssemblyAttempts {
+            manager.recoverInterruptedSessions()
+        }
+
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.micTrackFileName)))
+        // And the folder is reported, so the user hears about the recording it just closed.
+        let reported = manager.recoverInterruptedSessions()
+        #expect(reported.isEmpty) // terminal by now — the report happened on the closing launch
+    }
+}
+
+/// A give-up that reports the folder must only do so when a track actually landed. With no audio at
+/// all the folder is `closeEmpty`'s shape, and a "recovered" notification over nothing is a lie.
+@Test
+func recoveryReportsAClosedFolderOnlyWhenATrackActuallyAssembled() throws {
+    try withConcatFailingMeeting { root, directory in
+        let manager = RecoveryManager(archiveRoot: root)
+        for _ in 1..<RecoveryManager.maxAssemblyAttempts {
+            manager.recoverInterruptedSessions()
+        }
+        // The closing launch: `mic.wav` assembles, so this folder is worth telling the user about.
+        // Compared by name: the scan walks the archive root, and `/var` resolving to `/private/var`
+        // makes the two URLs unequal while naming the same folder.
+        let reported = manager.recoverInterruptedSessions()
+        #expect(reported.map(\.lastPathComponent) == [directory.lastPathComponent])
     }
 }
 
