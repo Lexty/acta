@@ -29,6 +29,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingController.shared.onLaunch()
         }
     }
+
+    /// Не дать выходу оборвать активную запись. Без этого «Выход» во время записи ничем не
+    /// отличается от `kill -9`: текущий сегмент остаётся нефинализированным, маркер — `recording`,
+    /// и до `segmentSeconds` звука теряется. Восстановление на такое рассчитано, но оно про крах,
+    /// а не про штатное действие пользователя — здесь запись надо честно дописать и склеить.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard #available(macOS 15.0, *) else { return .terminateNow }
+        // AppKit зовёт этот метод на главном потоке, где и живёт контроллер.
+        return MainActor.assumeIsolated {
+            let controller = RecordingController.shared
+            guard controller.isBusy else { return .terminateNow }
+            Task {
+                await controller.stopAndWait()
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
 }
 
 /// Заглушка для macOS < 15 (захват микрофона одним `SCStream` появился в 15).
@@ -114,15 +132,23 @@ struct MenuContent: View {
     private var titleField: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Заголовок").font(.caption).foregroundStyle(.secondary)
-            TextField("Название встречи", text: $controller.title)
+            TextField(controller.suggestedTitle.isEmpty ? "Название встречи"
+                                                        : controller.suggestedTitle,
+                      text: $controller.title)
                 .textFieldStyle(.roundedBorder)
-                .disabled(controller.isRecording)
+                .disabled(controller.isBusy)
         }
     }
 
     private var controls: some View {
         HStack {
-            if controller.isRecording {
+            if controller.phase == .saving {
+                Button {} label: {
+                    Label("Сохранение…", systemImage: "square.and.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(true)
+            } else if controller.isRecording {
                 Button {
                     controller.stop()
                 } label: {
@@ -210,7 +236,7 @@ struct MenuContent: View {
                     .font(.caption)
             }
             .padding(.top, 6)
-            .disabled(controller.isRecording)
+            .disabled(controller.isBusy)
             .onChange(of: controller.settings) { controller.saveSettings() }
         } label: {
             Label("Настройки", systemImage: "gearshape").font(.caption)
@@ -240,6 +266,7 @@ struct MenuContent: View {
         switch controller.phase {
         case .idle: return "waveform"
         case .recording: return "record.circle.fill"
+        case .saving: return "square.and.arrow.down"
         case .error: return "exclamationmark.triangle.fill"
         }
     }
@@ -248,6 +275,7 @@ struct MenuContent: View {
         switch controller.phase {
         case .idle: return .secondary
         case .recording: return .red
+        case .saving: return .secondary
         case .error: return .red
         }
     }
@@ -256,6 +284,7 @@ struct MenuContent: View {
         switch controller.phase {
         case .idle: return "Готов к записи"
         case .recording: return "Идёт запись"
+        case .saving: return "Сохранение…"
         case .error: return "Ошибка"
         }
     }

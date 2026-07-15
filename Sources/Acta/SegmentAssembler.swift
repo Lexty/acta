@@ -12,7 +12,7 @@ import os
 /// Аргументы `ffmpeg` — чистые функции `FFmpeg.*` (покрыты юнит-тестами); тут только запуск процесса.
 struct SegmentAssembler {
     /// Результат сборки — какие итоговые файлы получились.
-    struct Result {
+    struct Result: Sendable {
         var systemWAV: URL?
         var micWAV: URL?
         var combinedWAV: URL?
@@ -97,8 +97,11 @@ struct SegmentAssembler {
             result.micWAV = nil
         }
 
-        // Сюда доходим только при успешной склейке всех запрошенных дорожек, поэтому сегменты —
-        // уже избыточное сырьё. Mac без микрофона (микс невозможен в принципе) тоже не копит их вечно.
+        // Сюда доходим, когда каждая дорожка, которую вообще было из чего собрать, уже лежит рядом
+        // отдельным wav: любой провал склейки бросает исключение выше, а `combinedMissing` означает,
+        // что одной из исходных дорожек не существовало, и уцелевшая (`system.wav`/`mic.wav`) выше
+        // намеренно оставлена. То есть сегменты — уже избыточное сырьё, и Mac без микрофона (микс
+        // невозможен в принципе) тоже не копит их вечно.
         if deleteSegments {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))

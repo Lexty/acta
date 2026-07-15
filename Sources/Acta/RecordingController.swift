@@ -16,6 +16,10 @@ final class RecordingController: ObservableObject {
     enum Phase: Equatable {
         case idle
         case recording
+        /// Захват уже остановлен, идёт склейка сегментов (`ffmpeg`) — секунды, а для часовой
+        /// встречи и десятки секунд. Отдельная фаза, потому что показывать всё это время «идёт
+        /// запись» значит врать: в файлы уже ничего не пишется.
+        case saving
         case error
     }
 
@@ -35,6 +39,10 @@ final class RecordingController: ObservableObject {
     @Published private(set) var elapsedSeconds: Int = 0
     /// Заголовок встречи (редактируется в поле; пустой → берётся авто-подсказка).
     @Published var title: String = ""
+    /// Авто-подсказка заголовка — показывается плейсхолдером в поле. Только подсказка: подставлять
+    /// её в `title` заранее нельзя, иначе меню, открытое за час до старта, зафиксировало бы в
+    /// `info.md` время открытия меню, а не время начала записи.
+    @Published private(set) var suggestedTitle: String = ""
     /// Список сохранённых записей (новые сверху).
     @Published private(set) var recordings: [MeetingStore.Recording] = []
 
@@ -54,6 +62,8 @@ final class RecordingController: ObservableObject {
     /// (или watchdog, сработавший в этот момент) запустил бы вторую склейку той же папки: два
     /// `ffmpeg` писали бы одни и те же wav и list-файлы, вплоть до потери записи.
     private var isStopping = false
+    /// Активная задача стопа — её дожидается `stopAndWait()` при выходе из приложения.
+    private var stopTask: Task<Void, Never>?
     /// Восстановление прерванных записей запускаем один раз за запуск приложения (из `onLaunch`).
     /// `RecoveryManager` считает любую папку со статусом `recording` прерванной — включая активную
     /// запись, склейку которой нельзя запускать на лету, поэтому старт ждёт эту задачу.
@@ -71,6 +81,10 @@ final class RecordingController: ObservableObject {
 
     /// Идёт ли запись прямо сейчас.
     var isRecording: Bool { phase == .recording }
+
+    /// Занят ли контроллер записью или её сохранением — на это время редактирование настроек и
+    /// заголовка заблокировано, а кнопка старта недоступна.
+    var isBusy: Bool { phase == .recording || phase == .saving }
 
     /// Хранилище записей для текущего пути архива из настроек. Читается на каждом обращении, чтобы
     /// смена пути в настройках подхватывалась без перезапуска (Task 7).
@@ -103,12 +117,11 @@ final class RecordingController: ObservableObject {
         recoveryTask = Task { [weak self] in await self?.runRecovery() }
     }
 
-    /// Вызывать при появлении меню: запросить право на уведомления, подсказать источник и
-    /// обновить список.
+    /// Вызывать при появлении меню: подсказать источник и обновить список. Право на уведомления
+    /// запрашивается один раз в `onLaunch()` — дёргать его на каждое открытие меню незачем.
     func onAppear() {
-        Notifier.requestAuthorization()
-        if title.isEmpty {
-            title = SourceDetector.detectedSource().map {
+        if !isBusy {
+            suggestedTitle = SourceDetector.detectedSource().map {
                 MeetingSource.suggestedTitle(source: $0, date: Date())
             } ?? ""
         }
@@ -145,7 +158,7 @@ final class RecordingController: ObservableObject {
 
     /// Начать запись. Заголовок берётся из поля, а если оно пусто — из авто-подсказки.
     func start() {
-        guard phase != .recording, !isStarting, !isStopping else { return }
+        guard !isBusy, !isStarting, !isStopping else { return }
         isStarting = true
         recoveredBanner = ""
         errorMessage = ""
@@ -274,15 +287,37 @@ final class RecordingController: ObservableObject {
 
     /// Остановить запись: финализировать сегменты, обновить `info.md`, уведомить, обновить список.
     func stop() {
+        beginStop()
+    }
+
+    /// Остановить запись и дождаться, пока она реально сохранится. Нужно при выходе из приложения:
+    /// без ожидания склейки процесс умрёт ровно как от `kill -9` — последний сегмент останется
+    /// нефинализированным, маркер `recording`, и чистый выход по кнопке потерял бы до
+    /// `segmentSeconds` звука, свалив спасение записи на восстановление при следующем запуске.
+    /// Если стоп уже идёт (кнопка «Остановить» нажата до «Выход») — просто дожидаемся его.
+    func stopAndWait() async {
+        beginStop()
+        await stopTask?.value
+    }
+
+    /// Запустить стоп, если есть что останавливать. Флаг `isStopping` ставится синхронно: `phase`
+    /// уходит из `.recording` только внутри задачи, и без флага второй клик успел бы проскочить
+    /// проверку до её старта.
+    private func beginStop() {
         guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
         isStopping = true
-        Task { await performStop(session: session, directory: directory, startedAt: startedAt) }
+        stopTask = Task { [weak self] in
+            await self?.performStop(session: session, directory: directory, startedAt: startedAt)
+        }
     }
 
     private func performStop(session: RecordingSession, directory: URL, startedAt: Date) async {
         defer { isStopping = false }
         stopTimer()
+        // Захват останавливается первым же делом внутри `session.stop()`, а дальше идёт склейка —
+        // на это время состояние честно «Сохранение…», а не «Идёт запись».
+        phase = .saving
         let result = await session.stop()
         let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
         let stoppedTitle = currentTitle

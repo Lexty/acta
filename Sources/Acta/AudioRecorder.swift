@@ -27,7 +27,26 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     private let micQueue = DispatchQueue(label: "dev.personal.acta.audio.mic")
     private let screenQueue = DispatchQueue(label: "dev.personal.acta.audio.screen")
 
-    private var stream: SCStream?
+    // Текущий стрим под замком: его ставит `startStream()` и снимают `stop()`/`restart()` (пул
+    // Swift concurrency), а делегат `didStopWithError` — со своей очереди ScreenCaptureKit; читает
+    // же его самодиагностика с третьей. Без замка это гонка за ссылкой: параллельный релиз старого
+    // стрима и запись нового рвут ретейн-счётчик, а несинхронизированное чтение в `===`-сверке
+    // может увидеть устаревшее значение и обнулить уже перезапущенный стрим.
+    private let streamLock = NSLock()
+    private var currentStream: SCStream?
+
+    private var activeStream: SCStream? {
+        get { streamLock.lock(); defer { streamLock.unlock() }; return currentStream }
+        set { streamLock.lock(); currentStream = newValue; streamLock.unlock() }
+    }
+
+    /// Снять стрим, только если он всё ещё тот же самый — сверка и обнуление под одним замком,
+    /// иначе между ними мог бы влезть `restart()` со своим новым стримом.
+    private func clearStream(ifIdentical stream: SCStream) {
+        streamLock.lock()
+        if currentStream === stream { currentStream = nil }
+        streamLock.unlock()
+    }
 
     // Счётчики пришедших буферов по дорожкам под замком: делегат дёргают разные очереди
     // (`systemQueue`/`micQueue`), а читает самодиагностика/watchdog с ещё одной. Считаем дорожки
@@ -79,7 +98,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     }
 
     /// Поднят ли сейчас `SCStream` (для снимка самодиагностики).
-    var isStreaming: Bool { stream != nil }
+    var isStreaming: Bool { activeStream != nil }
 
     /// - Parameter directory: папка записи; сегменты пишутся в её подкаталоги `system/` и `mic/`.
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
@@ -137,7 +156,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: micQueue)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
         try await stream.startCapture()
-        self.stream = stream
+        activeStream = stream
         log.info("Захват запущен")
     }
 
@@ -169,10 +188,10 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     /// и watchdog'а. Текущие сегменты финализируются и остаются валидными, счётчики дорожек
     /// сдвигаются вперёд, поднимается новый `SCStream`.
     func restart() async throws {
-        if let stream {
+        if let stream = activeStream {
             try? await stream.stopCapture()
         }
-        stream = nil
+        activeStream = nil
         systemQueue.sync { systemWriter.finishAndAdvance() }
         micQueue.sync { micWriter.finishAndAdvance() }
         log.info("Перезапуск стрима")
@@ -181,10 +200,10 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     /// Остановить захват и финализировать текущие сегменты обеих дорожек.
     func stop() async {
-        if let stream {
+        if let stream = activeStream {
             try? await stream.stopCapture()
         }
-        stream = nil
+        activeStream = nil
         systemQueue.sync { systemWriter.finish() }
         micQueue.sync { micWriter.finish() }
         log.info("Захват остановлен")
@@ -232,6 +251,6 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         // поднятый стрим, и упавший захват она объяснит пользователю неисправным аудиоустройством
         // вместо реальной причины. Сверяем тождество: за время доставки ошибки `restart()` мог уже
         // поставить новый стрим, и обнулить его тут значило бы соврать в обратную сторону.
-        if self.stream === stream { self.stream = nil }
+        clearStream(ifIdentical: stream)
     }
 }

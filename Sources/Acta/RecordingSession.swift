@@ -23,7 +23,6 @@ final class RecordingSession: @unchecked Sendable {
     private let recorder: AudioRecorder
     private let selfCheck: SelfCheck
     private let store = SessionManifestStore()
-    private let assembler = SegmentAssembler()
     private var watchdogTask: Task<Void, Never>?
 
     init(directory: URL, settings: RecordingSettings = .default) {
@@ -89,9 +88,17 @@ final class RecordingSession: @unchecked Sendable {
 
         var result: SegmentAssembler.Result?
         do {
-            result = try assembler.assemble(in: directory,
-                                            deleteSegments: settings.deleteSegmentsAfterAssembly,
-                                            tracks: settings.trackSelection)
+            // Склейка синхронно ждёт `ffmpeg` (`waitUntilExit`) — на часовой встрече это десятки
+            // секунд. Из `async`-метода это заняло бы поток кооперативного пула (он размером с
+            // число ядер) на всё это время, поэтому уводим блокирующую работу с него — так же, как
+            // это уже делает восстановление в `RecordingController.runRecovery`.
+            let directory = directory
+            let settings = settings
+            result = try await Task.detached(priority: .utility) {
+                try SegmentAssembler().assemble(in: directory,
+                                                deleteSegments: settings.deleteSegmentsAfterAssembly,
+                                                tracks: settings.trackSelection)
+            }.value
             manifest.status = .done
         } catch {
             // Склейка не удалась (нет ffmpeg / нет сегментов). Оставляем маркер как есть, чтобы
