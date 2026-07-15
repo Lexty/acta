@@ -75,22 +75,28 @@ struct SegmentAssembler {
             }
         }
 
-        // Если микс запрошен, но не получился (сбой ffmpeg / одна из дорожек пуста), исходные
-        // system.wav/mic.wav и сегменты — единственные уцелевшие копии аудио. Не удаляем их, иначе
-        // при конфигурации «только combined» чистый стоп потерял бы запись целиком.
-        let combinedRequestedButMissing = tracks.combined && result.combinedWAV == nil
+        // Микс запрошен, но его нет — итоговые system.wav/mic.wav остаются единственным результатом
+        // записи, и удалять их по настройке «только combined» нельзя: стоп потерял бы встречу целиком.
+        let combinedMissing = tracks.combined && result.combinedWAV == nil
+
+        // Почему именно нет — определяет судьбу сегментов. Обе дорожки склеились, а микс не вышел =
+        // ffmpeg сбойнул: доверия к склейке нет, сегменты держим как сырьё. Но если одной дорожки
+        // просто не было (мик отключён — `concatTrack` вернул nil, сбой бы бросил `concatFailed`),
+        // микс невозможен в принципе, а уцелевшая дорожка склеена целиком: сегменты уже избыточны.
+        // Без этого различия Mac без микрофона копил бы сегменты каждой записи вечно, вопреки настройке.
+        let combinedMixFailed = combinedMissing && systemWAV != nil && micWAV != nil
 
         // Убрать промежуточные дорожки, которые пользователь не просил сохранять.
-        if !tracks.system, let systemWAV, !combinedRequestedButMissing {
+        if !tracks.system, let systemWAV, !combinedMissing {
             try? fileManager.removeItem(at: systemWAV)
             result.systemWAV = nil
         }
-        if !tracks.mic, let micWAV, !combinedRequestedButMissing {
+        if !tracks.mic, let micWAV, !combinedMissing {
             try? fileManager.removeItem(at: micWAV)
             result.micWAV = nil
         }
 
-        if deleteSegments, !combinedRequestedButMissing {
+        if deleteSegments, !combinedMixFailed {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }

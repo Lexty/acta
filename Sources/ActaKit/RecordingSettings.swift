@@ -95,8 +95,9 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
 
     /// Разрешённый URL корня архива относительно домашней папки.
     ///
-    /// Пустой путь → `<home>/Acta`; ведущая `~` разворачивается в `homeDirectory`; иначе путь
-    /// используется как есть. `homeDirectory` инжектируется для тестируемости.
+    /// Пустой путь → `<home>/Acta`; ведущая `~` разворачивается в `homeDirectory`; абсолютный путь
+    /// берётся как есть; относительный — считается от домашней папки. `homeDirectory` инжектируется
+    /// для тестируемости.
     public func resolvedArchiveURL(homeDirectory: URL) -> URL {
         let trimmed = archivePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -108,6 +109,12 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         if trimmed.hasPrefix("~/") {
             let rel = String(trimmed.dropFirst(2))
             return homeDirectory.appendingPathComponent(rel, isDirectory: true)
+        }
+        // Относительный путь разрешаем от дома, а не от рабочей директории процесса: у запущенного
+        // из Finder `.app` она `/`, и настройка вида «Recordings» молча целилась бы в корень диска
+        // (куда записи не лягут вовсе). Дом — единственное осмысленное здесь основание.
+        guard trimmed.hasPrefix("/") else {
+            return homeDirectory.appendingPathComponent(trimmed, isDirectory: true)
         }
         return URL(fileURLWithPath: trimmed, isDirectory: true)
     }

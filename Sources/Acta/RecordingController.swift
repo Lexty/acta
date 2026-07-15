@@ -122,8 +122,9 @@ final class RecordingController: ObservableObject {
     /// него, а на главный возвращаются только баннер и уведомление.
     private func runRecovery() async {
         let root = store.archiveRoot
+        let tracks = settings.trackSelection
         let recovered = await Task.detached(priority: .utility) {
-            RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+            RecoveryManager(archiveRoot: root, tracks: tracks).recoverInterruptedSessions()
         }.value
         guard !recovered.isEmpty else { return }
         recoveredBanner = recovered.count == 1
@@ -208,13 +209,25 @@ final class RecordingController: ObservableObject {
         }
     }
 
-    /// Убрать папку неудавшегося старта. Данные не потекли (иначе самопроверка бы прошла), значит
-    /// сегментов нет — а брошенная папка со статусом `recording` иначе застряла бы навсегда:
-    /// восстановление на каждом запуске пыталось бы её склеить (нет сегментов → ошибка) и она
-    /// маячила бы «не завершена» в списке.
+    /// Убрать папку неудавшегося старта — но только если писать в неё так и не начали.
+    ///
+    /// Пустую папку удалить надо: со статусом `recording` она застряла бы навсегда — восстановление
+    /// на каждом запуске пыталось бы её склеить (нет сегментов → ошибка), и она маячила бы
+    /// «не завершена» в списке. Но «старт не удался» не означает «на диске пусто»: `.diskWriteFailed`
+    /// ставится и когда одна дорожка писалась нормально, а сломалась вторая (`brokenTrack`), — там
+    /// уже лежит реальный звук, и он единственный. Такую папку отдаём восстановлению, а не удаляем.
     private func cleanupFailedStart(_ directory: URL?) {
-        guard let directory else { return }
+        guard let directory, !Self.hasSegments(in: directory) else { return }
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// Записан ли в папку хоть один сегмент любой из дорожек.
+    private static func hasSegments(in directory: URL) -> Bool {
+        [SegmentLayout.systemDirName, SegmentLayout.micDirName].contains { trackDir in
+            let path = directory.appendingPathComponent(trackDir).path
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+            return !SegmentLayout.orderedSegments(fromFileNames: names).isEmpty
+        }
     }
 
     /// Watchdog исчерпал попытки рестарта во время записи — поток буферов пропал безвозвратно.

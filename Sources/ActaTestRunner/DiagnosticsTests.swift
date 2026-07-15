@@ -247,3 +247,59 @@ func trackWatchdogResetsAfterWritesResume() {
     #expect(watchdog.observe(TrackFlow(received: 30, written: 5), at: 8) == false)
     #expect(watchdog.observe(TrackFlow(received: 40, written: 5), at: 9) == true)
 }
+
+// MARK: - Возврат бюджета рестартов (SelfDiagnosis.restartHealed)
+
+@Test
+func restartHealedWhenBothTracksResumeWriting() {
+    // Рестарт вылечил обе дорожки — бюджет попыток честно возвращается: иначе три попытки стали бы
+    // квотой на всю встречу и часовая запись с редкими вылеченными сбоями оборвалась бы.
+    let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
+                          mic: TrackFlow(received: 100, written: 100))
+    let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
+                         mic: TrackFlow(received: 200, written: 200))
+    #expect(SelfDiagnosis.restartHealed(now, since: base))
+}
+
+@Test
+func restartNotHealedWhileOneTrackStaysBroken() {
+    // Регрессия: живой системный звук тянет агрегатный счётчик вверх, а микрофон получает буферы и
+    // не пишет НИ ОДНОГО. По сумме это выглядело бы как «рестарт помог» — бюджет возвращался бы
+    // вечно, ошибка не показалась бы никогда, а половина встречи молча терялась бы.
+    let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
+                          mic: TrackFlow(received: 100, written: 50))
+    let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
+                         mic: TrackFlow(received: 200, written: 50))
+    #expect(SelfDiagnosis.restartHealed(now, since: base) == false)
+}
+
+@Test
+func restartNotHealedWhenNothingIsWritten() {
+    // Стрим мёртв: буферы не идут вообще, обе дорожки «молчат». Молчание дорожки поломкой не
+    // считается, поэтому отсечь этот случай обязан рост агрегата — иначе рестарты были бы вечными.
+    let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
+                          mic: TrackFlow(received: 100, written: 100))
+    #expect(SelfDiagnosis.restartHealed(base, since: base) == false)
+}
+
+@Test
+func restartHealedWithSilentButWorkingTrack() {
+    // Микрофона на машине нет: его буферы не приходят, писать нечего. Это норма, а не поломка —
+    // иначе Mac без микрофона исчерпывал бы бюджет рестартов на ровном месте и запись срывалась бы.
+    let base = TrackFlows(system: TrackFlow(received: 100, written: 100),
+                          mic: TrackFlow(received: 0, written: 0))
+    let now = TrackFlows(system: TrackFlow(received: 200, written: 200),
+                         mic: TrackFlow(received: 0, written: 0))
+    #expect(SelfDiagnosis.restartHealed(now, since: base))
+}
+
+@Test
+func trackHealedTreatsSilenceAsHealthyAndWriteStallAsBroken() {
+    let base = TrackFlow(received: 10, written: 10)
+    // Буферы идут, записи нет — сломана.
+    #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 20, written: 10), since: base) == false)
+    // Буферы не идут — писать нечего, поломкой не считаем.
+    #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 10, written: 10), since: base))
+    // Запись пошла — жива.
+    #expect(SelfDiagnosis.trackHealed(TrackFlow(received: 20, written: 20), since: base))
+}

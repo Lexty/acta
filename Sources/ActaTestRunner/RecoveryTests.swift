@@ -40,7 +40,7 @@ private func pcmFormatBody(format: Int = 1, channels: Int = 2, sampleRate: Int =
     return bytes
 }
 
-private func le32(_ value: Int) -> [UInt8] {
+func le32(_ value: Int) -> [UInt8] {
     let v = UInt32(truncatingIfNeeded: value)
     return [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
 }
@@ -262,7 +262,7 @@ func headerWithNonsenseFormatFieldsRejected() {
 }
 
 /// Тело `fmt ` для WAVE_FORMAT_EXTENSIBLE: PCM-раскладка + cbSize/validBits/channelMask/GUID.
-private func extensibleFormatBody(cbSize: Int = 22, subformat: [UInt8] = pcmSubformatGUID) -> [UInt8] {
+func extensibleFormatBody(cbSize: Int = 22, subformat: [UInt8] = pcmSubformatGUID) -> [UInt8] {
     var bytes = pcmFormatBody(format: 0xFFFE)
     bytes += le16(cbSize)
     bytes += le16(16) // wValidBitsPerSample
@@ -272,7 +272,7 @@ private func extensibleFormatBody(cbSize: Int = 22, subformat: [UInt8] = pcmSubf
 }
 
 /// KSDATAFORMAT_SUBTYPE_PCM.
-private let pcmSubformatGUID: [UInt8] = [
+let pcmSubformatGUID: [UInt8] = [
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
     0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
 ]

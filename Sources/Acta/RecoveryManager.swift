@@ -23,8 +23,15 @@ struct RecoveryManager {
     /// Корень архива записей.
     let archiveRoot: URL
 
-    init(archiveRoot: URL) {
+    /// Какие итоговые дорожки собирать — та же настройка, что и на чистом стопе (Task 7). Иначе
+    /// восстановленная после краха встреча пришла бы с набором файлов, которого пользователь не
+    /// просил, и архив расходился бы сам с собой в зависимости от того, был ли краш.
+    let tracks: RecordingSettings.TrackSelection
+
+    init(archiveRoot: URL,
+         tracks: RecordingSettings.TrackSelection = RecordingSettings.default.trackSelection) {
         self.archiveRoot = archiveRoot
+        self.tracks = tracks
     }
 
     /// Просканировать архив и восстановить все прерванные записи. Ошибка одной папки не мешает
@@ -58,7 +65,7 @@ struct RecoveryManager {
     private func recover(directory: URL, manifest: SessionManifest) throws -> Recovered {
         log.info("Восстановление прерванной записи: \(directory.lastPathComponent, privacy: .public)")
         // При восстановлении сегменты не удаляем: сохраняем сырьё на случай проблем со склейкой.
-        let result = try assembler.assemble(in: directory, deleteSegments: false)
+        let result = try assembler.assemble(in: directory, deleteSegments: false, tracks: tracks)
 
         var updated = manifest
         updated.status = .recovered

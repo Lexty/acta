@@ -40,6 +40,9 @@ final class SelfCheck: @unchecked Sendable {
         var received: Int { system.received + mic.received }
         var written: Int { system.written + mic.written }
 
+        /// Снимок дорожек для чистой логики диагностики (`SelfDiagnosis`).
+        var flows: TrackFlows { TrackFlows(system: system, mic: mic) }
+
         /// Прирост счётчиков относительно базового снимка — то, что и оценивает диагностика.
         func delta(from base: Counters) -> Counters {
             Counters(system: TrackFlow(received: system.received - base.system.received,
@@ -50,12 +53,17 @@ final class SelfCheck: @unchecked Sendable {
         }
     }
 
-    private func counters() -> Counters {
+    /// - Parameter includingBytes: считать ли размер сегментов на диске. Это обход обоих каталогов
+    ///   со `stat` на каждый файл; за час записи их сотни, а watchdog опрашивает счётчики раз в
+    ///   секунду — растущая на ровном месте нагрузка. Нужен размер только стартовой пробе (второй,
+    ///   независимый от writer'а признак «данные легли на диск»); watchdog смотрит на счётчики
+    ///   буферов и `bytes` не читает вовсе.
+    private func counters(includingBytes: Bool = true) -> Counters {
         let received = recorder.receivedBufferCounts
         let written = recorder.writtenBufferCounts
         return Counters(system: TrackFlow(received: received.system, written: written.system),
                         mic: TrackFlow(received: received.mic, written: written.mic),
-                        bytes: recorder.segmentBytesOnDisk)
+                        bytes: includingBytes ? recorder.segmentBytesOnDisk : 0)
     }
 
     /// После старта убедиться, что данные идут; при провале — самолечение. Возвращает `nil` при
@@ -169,11 +177,11 @@ final class SelfCheck: @unchecked Sendable {
         // системы продолжат идти, и watchdog по ним ничего бы не заметил. Плюс к суммарному
         // счётчику — по watchdog'у на дорожку: сумма растёт, пока жива хотя бы одна, и мёртвую
         // вторую (половину встречи!) агрегатный watchdog не увидит никогда.
-        var trackers = makeWatchdogs(from: counters())
+        var trackers = makeWatchdogs(from: counters(includingBytes: false))
         var receivedAtWindowStart = trackers.received
         var restartsLeft = Self.maxRestartAttempts
-        /// Сколько было записано сразу после последнего рестарта: рост сверх этого = рестарт помог.
-        var writtenAfterRestart = 0
+        /// Счётчики сразу после последнего рестарта: по росту относительно них судим, помог ли он.
+        var countersAfterRestart = Counters(system: TrackFlow(), mic: TrackFlow(), bytes: 0)
         // Причина последнего неудавшегося рестарта: по счётчикам её потом не восстановить, а
         // сообщить пользователю надо именно её, а не догадку «нет данных / не пишется диск».
         var restartFailure: StartupFailure?
@@ -183,13 +191,14 @@ final class SelfCheck: @unchecked Sendable {
             try? await Task.sleep(nanoseconds: tickNanos)
             if Task.isCancelled { break }
 
-            let now = counters()
+            let now = counters(includingBytes: false)
             let time = Self.monotonicSeconds()
             // Рестарт вылечил поток — возвращаем бюджет попыток. Иначе три попытки были бы квотой
             // на всю запись: часовая встреча с редкими, каждый раз успешно вылеченными провалами
             // оборвалась бы на четвёртом. Лимит должен ловить безнадёжный стрим (подряд идущие
             // неудачные рестарты), а не сумму давно устранённых сбоев.
-            if restartsLeft < Self.maxRestartAttempts, now.written > writtenAfterRestart {
+            if restartsLeft < Self.maxRestartAttempts,
+               SelfDiagnosis.restartHealed(now.flows, since: countersAfterRestart.flows) {
                 restartsLeft = Self.maxRestartAttempts
                 restartFailure = nil
             }
@@ -217,10 +226,10 @@ final class SelfCheck: @unchecked Sendable {
                     break watch
                 }
                 // После рестарта сбрасываем окна наблюдения на новые счётчики.
-                let fresh = counters()
+                let fresh = counters(includingBytes: false)
                 trackers = makeWatchdogs(from: fresh)
                 receivedAtWindowStart = trackers.received
-                writtenAfterRestart = fresh.written
+                countersAfterRestart = fresh
             } else {
                 // Рестарт падал с конкретной причиной — она точнее догадки по счётчикам. Иначе:
                 // дорожка получает буферы, но не пишет их (или буферы шли всё окно, а записи нет)

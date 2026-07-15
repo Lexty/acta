@@ -99,6 +99,17 @@ func resolvedArchiveURLUsesAbsolutePathAsIs() {
 }
 
 @Test
+func resolvedArchiveURLResolvesRelativePathAgainstHome() {
+    // Относительный путь не должен зависеть от рабочей директории процесса: у запущенного из
+    // Finder `.app` она `/`, и «Recordings» означало бы корень диска, куда записи не лягут.
+    let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+    #expect(RecordingSettings(archivePath: "Recordings")
+        .resolvedArchiveURL(homeDirectory: home).path == "/Users/test/Recordings")
+    #expect(RecordingSettings(archivePath: "Meetings/Acta")
+        .resolvedArchiveURL(homeDirectory: home).path == "/Users/test/Meetings/Acta")
+}
+
+@Test
 func resolvedArchiveURLTrimsWhitespace() {
     let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
     let url = RecordingSettings(archivePath: "   ").resolvedArchiveURL(homeDirectory: home)

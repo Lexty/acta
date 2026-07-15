@@ -76,6 +76,20 @@ public struct TrackFlow: Equatable, Sendable {
     public var isWriteBroken: Bool { received > 0 && written == 0 }
 }
 
+/// Поток обеих дорожек на один момент — снимок, по которому watchdog судит о здоровье записи.
+public struct TrackFlows: Equatable, Sendable {
+    public var system: TrackFlow
+    public var mic: TrackFlow
+
+    public init(system: TrackFlow = TrackFlow(), mic: TrackFlow = TrackFlow()) {
+        self.system = system
+        self.mic = mic
+    }
+
+    /// Записано буферов обеими дорожками суммарно.
+    public var written: Int { system.written + mic.written }
+}
+
 /// Действие самолечения, выбранное по причине провала. Runtime исполняет его (перезапрос права,
 /// рестарт стрима, показ ошибки); выбор действия — чистая логика (`SelfDiagnosis.action`).
 public enum HealingAction: Equatable, Sendable {
@@ -162,6 +176,33 @@ public enum SelfDiagnosis {
         if !snapshot.hasMicrophone { return .noMicrophonePermission }
         if snapshot.bufferCount > 0 { return .diskWriteFailed }
         return .noData
+    }
+
+    /// Вылечил ли рестарт стрима запись — решение watchdog'а о возврате бюджета попыток.
+    ///
+    /// Бюджет возвращается, только если записанного стало больше **и** ни одна дорожка не осталась
+    /// сломанной. Обе части обязательны:
+    ///
+    /// - Один агрегат (`written` двух дорожек) — и живая дорожка тянет счётчик вверх за мёртвую:
+    ///   бюджет возвращался бы после каждого рестарта, попытки никогда бы не кончились, ошибка о
+    ///   вставшей записи не показалась бы ни разу. Приложение крутило бы «идёт запись»,
+    ///   пересоздавая стрим каждые несколько секунд и теряя половину встречи, — ровно то, ради чего
+    ///   заведены watchdog'и на дорожку.
+    /// - Одни дорожки — и наоборот: у мёртвого стрима буферы не идут вообще, обе дорожки выглядят
+    ///   «молчащими», а молчание поломкой не считается (см. `trackHealed`), и рестарт сочли бы
+    ///   успешным. Рост агрегата это исключает.
+    public static func restartHealed(_ now: TrackFlows, since base: TrackFlows) -> Bool {
+        now.written > base.written
+            && trackHealed(now.system, since: base.system)
+            && trackHealed(now.mic, since: base.mic)
+    }
+
+    /// Жива ли дорожка: writer снова принимает буферы — либо источник молчит, и писать нечего.
+    ///
+    /// Тишину поломкой не считаем (та же логика, что в `TrackWatchdog`/`TrackFlow.isWriteBroken`):
+    /// иначе Mac без микрофона исчерпывал бы бюджет рестартов на ровном месте.
+    public static func trackHealed(_ now: TrackFlow, since base: TrackFlow) -> Bool {
+        now.written > base.written || now.received == base.received
     }
 
     /// Выбрать действие по причине с учётом оставшихся попыток рестарта.
