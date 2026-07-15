@@ -74,17 +74,16 @@ public struct MeetingStore {
             .sorted { $0.directory.lastPathComponent > $1.directory.lastPathComponent }
     }
 
-    /// Guarantee that the archive root exists and drop a description for the user's Claude Code into
-    /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6) — once, if the file is not there yet.
-    ///
-    /// Also called before opening the archive in Finder: until the first recording the root does not
-    /// exist, and opening a missing path is a silent no-op — the button would look broken on a fresh
-    /// install.
-    public func ensureArchiveRoot() throws {
-        try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
-        let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
-        guard !fileManager.fileExists(atPath: claudeMD.path) else { return }
-        let contents = """
+    /// Marker identifying the revision of the generated archive doc that is on disk. Bumped whenever
+    /// `archiveDoc` changes, so an archive written by an older build can be told apart from a current
+    /// one — without it, `ensureArchiveRoot` only ever reached a brand-new archive and every existing
+    /// one kept describing a layout that no longer ships (`combined.wav`, which the pipeline dropped).
+    static let archiveDocMarker = "<!-- acta-archive-doc: v2 -->"
+
+    /// The description of the archive Acta writes for the user's Claude Code (`SPEC.md` §6). This
+    /// file is Acta's own account of a layout Acta decides, so it is regenerated rather than treated
+    /// as the user's to edit: a stale copy misinforms the one consumer it exists for.
+    static let archiveDoc = """
         # Acta — meeting recordings archive
 
         Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
@@ -95,7 +94,24 @@ public struct MeetingStore {
         - `session.json` — the internal recording-state marker.
 
         Transcription/summarisation are done separately (locally, via `mlx_whisper`).
+
+        \(archiveDocMarker)
         """
-        try? contents.data(using: .utf8)?.write(to: claudeMD, options: .atomic)
+
+    /// Guarantee that the archive root exists and drop a description for the user's Claude Code into
+    /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6), refreshing it when the copy on disk predates the
+    /// current layout.
+    ///
+    /// Also called before opening the archive in Finder: until the first recording the root does not
+    /// exist, and opening a missing path is a silent no-op — the button would look broken on a fresh
+    /// install.
+    public func ensureArchiveRoot() throws {
+        try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
+        let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
+        // Rewrite unless the current marker is already there: absent = a fresh archive, stale/missing
+        // marker = written by a build whose layout has since changed.
+        let existing = try? String(contentsOf: claudeMD, encoding: .utf8)
+        guard existing?.contains(Self.archiveDocMarker) != true else { return }
+        try? Self.archiveDoc.data(using: .utf8)?.write(to: claudeMD, options: .atomic)
     }
 }

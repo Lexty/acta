@@ -327,8 +327,16 @@ public struct SegmentAssembler {
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         try? handle.seek(toOffset: size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0)
-        guard let data = try? handle.readToEnd(), !data.isEmpty,
-              let text = String(data: data, encoding: .utf8) else { return "stderr empty" }
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return "stderr empty" }
+        // Lenient decode, not `String(data:encoding:)`: the window starts at an arbitrary byte offset,
+        // so a strict decode returns nil whenever it lands mid-character — and `ffmpeg` echoes the
+        // path it was given, which `MeetingArchive.slug` keeps Unicode-aware. A non-ASCII meeting
+        // title would then turn the only diagnosis of an `-xerror` failure into "stderr empty".
+        // The failable initializer `optional_data_string_conversion` asks for is the defect itself:
+        // there is no valid-UTF-8 guarantee to assert here, and replacement characters on a torn
+        // edge beat losing the message.
+        // swiftlint:disable:next optional_data_string_conversion
+        let text = String(decoding: data, as: UTF8.self)
         return text.split(separator: "\n").suffix(5).joined(separator: " | ")
     }
 
