@@ -40,13 +40,17 @@ config.width = 2; config.height = 2
 Делегат `SCStreamOutput.stream(_:didOutputSampleBuffer:of:)`: по `of type` разводить
 `.audio` → system-writer, `.microphone` → mic-writer, `.screen` → игнор.
 
-## Микс для транскрипции
+## Объединённый файл
 
-Транскрипции нужен один mono 16 kHz WAV. Использовать установленный `ffmpeg`:
+Кроме раздельных дорожек, собрать объединённый `combined.wav` (микс двух) через `ffmpeg`:
 ```
-ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest -ar 16000 -ac 1 mixed-16k.wav
+ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest combined.wav
 ```
-Сырые `system.wav`/`mic.wav` сохранять (пригодятся для будущей диаризации/атрибуции спикеров).
+Сырые `system.wav`/`mic.wav` сохранять (раздельные дорожки = будущая атрибуция «я/собеседник»).
+
+**Важно:** записывать не одним файлом, а **сегментами** — см. скилл `crash-safe-recording`
+(потоковая запись, восстановление после краша). Финальные `system/mic/combined.wav` собираются
+из сегментов на чистом стопе или при восстановлении.
 
 ## Ссылки
 - captureMicrophone: https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturemicrophone

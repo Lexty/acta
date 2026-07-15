@@ -17,7 +17,7 @@ description: Сборка SwiftUI menu-bar приложения через Swift
 ## Package.swift (скелет)
 ```swift
 // executable target Acta + testTarget ActaTests
-// dependency: .package(url: "https://github.com/argmaxinc/WhisperKit", from: "...")
+// без внешних зависимостей (транскрипции нет)
 // platforms: [.macOS(.v14)]
 ```
 
