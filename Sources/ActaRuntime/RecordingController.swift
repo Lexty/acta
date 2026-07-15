@@ -150,9 +150,8 @@ public final class RecordingController: ObservableObject {
     /// off it and only the banner and the notification come back to the main one.
     private func runRecovery() async {
         let root = store.archiveRoot
-        let tracks = settings.trackSelection
         let recovered = await Task.detached(priority: .utility) {
-            RecoveryManager(archiveRoot: root, tracks: tracks).recoverInterruptedSessions()
+            RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
         }.value
         guard !recovered.isEmpty else { return }
         recoveredBanner = recovered.count == 1

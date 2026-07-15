@@ -54,8 +54,7 @@ func audioRecorderIsReachableFromTests() {
 @Test
 func recoveryManagerIsReachableFromTests() {
     withTemporaryDirectory { directory in
-        let manager = RecoveryManager(archiveRoot: directory,
-                                      tracks: RecordingSettings.default.trackSelection)
+        let manager = RecoveryManager(archiveRoot: directory)
         #expect(manager.archiveRoot == directory)
         // An empty archive: nothing to recover, and scanning it must not throw.
         #expect(manager.recoverInterruptedSessions().isEmpty)

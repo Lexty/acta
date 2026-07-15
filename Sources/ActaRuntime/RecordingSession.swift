@@ -176,8 +176,7 @@ public final class RecordingSession: @unchecked Sendable {
             let settings = settings
             result = try await Task.detached(priority: .utility) {
                 try SegmentAssembler().assemble(in: directory,
-                                                deleteSegments: settings.deleteSegmentsAfterAssembly,
-                                                tracks: settings.trackSelection)
+                                                deleteSegments: settings.deleteSegmentsAfterAssembly)
             }.value
             manifest.status = .done
         } catch {

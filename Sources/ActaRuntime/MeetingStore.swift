@@ -88,8 +88,9 @@ public struct MeetingStore {
         # Acta — meeting recordings archive
 
         Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
-        - `system.wav` — the other participants' audio, `mic.wav` — the microphone,
-          `combined.wav` — the mix.
+        - `system.wav` — the other participants' audio, `mic.wav` — the microphone.
+          A mix is not produced: two tracks keep "me vs. them" apart, and `ffmpeg` merges them on
+          demand if you ever need one file.
         - `info.md` — metadata (YAML front-matter: title, date, source, duration, status).
         - `session.json` — the internal recording-state marker.
 

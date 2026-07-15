@@ -226,15 +226,6 @@ struct MenuContent: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Save tracks").font(.caption2).foregroundStyle(.secondary)
-                    Toggle("System audio (system.wav)", isOn: $controller.settings.saveSystemTrack)
-                    Toggle("Microphone (mic.wav)", isOn: $controller.settings.saveMicTrack)
-                    Toggle("Mix (combined.wav)", isOn: $controller.settings.saveCombinedTrack)
-                }
-                .toggleStyle(.checkbox)
-                .font(.caption)
-
                 Stepper(value: $controller.settings.segmentSeconds,
                         in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
                         step: 5) {

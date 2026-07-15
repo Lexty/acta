@@ -2,39 +2,24 @@ import Foundation
 
 /// User recording settings — a **pure, testable** model (Task 7).
 ///
-/// A value type (`Codable`/`Equatable`): the archive path, which final tracks to save
-/// (`system`/`mic`/`combined`), the segment length, and whether to delete segments after assembly.
-/// Persistence (UserDefaults) and applying the settings to the pipeline live in
-/// `SettingsStore`/`RecordingController` (the `Acta` target); here there are only values,
-/// normalisation and layout — covered by unit tests (`RecordingSettingsTests`).
+/// A value type (`Codable`/`Equatable`): the archive path, the segment length, and whether to
+/// delete segments after assembly. Persistence (UserDefaults) and applying the settings to the
+/// pipeline live in `SettingsStore`/`RecordingController` (the `Acta` target); here there are only
+/// values, normalisation and layout — covered by unit tests (`RecordingSettingsTests`).
 ///
-/// Normalisation (`normalized()`) is the only "smart" part: the segment length is clamped to a
-/// sensible range, and clearing every track selection does not lead to "recording into nowhere"
-/// (we force `combined`).
+/// Normalisation (`normalized()`) only clamps the segment length to a sensible range.
 public struct RecordingSettings: Codable, Equatable, Sendable {
     /// Path of the archive folder. Empty → the default path (`~/Acta`). A leading `~` is supported.
     public var archivePath: String
-    /// Save the final `system.wav` (the other participants' audio).
-    public var saveSystemTrack: Bool
-    /// Save the final `mic.wav` (the microphone).
-    public var saveMicTrack: Bool
-    /// Save the final `combined.wav` (a mix of the two tracks).
-    public var saveCombinedTrack: Bool
     /// Segment length, s (clamped to `[minSegmentSeconds, maxSegmentSeconds]`).
     public var segmentSeconds: Int
     /// Delete the segment directories after a successful assembly.
     public var deleteSegmentsAfterAssembly: Bool
 
     public init(archivePath: String = "",
-                saveSystemTrack: Bool = true,
-                saveMicTrack: Bool = true,
-                saveCombinedTrack: Bool = true,
                 segmentSeconds: Int = SegmentLayout.defaultSegmentSeconds,
                 deleteSegmentsAfterAssembly: Bool = true) {
         self.archivePath = archivePath
-        self.saveSystemTrack = saveSystemTrack
-        self.saveMicTrack = saveMicTrack
-        self.saveCombinedTrack = saveCombinedTrack
         self.segmentSeconds = segmentSeconds
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly
     }
@@ -48,35 +33,15 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     public static let maxSegmentSeconds = 120
 
     /// Fields missing from the JSON fall back to their defaults (compatibility with an old config).
+    /// Keys of removed settings (the track selection) are simply ignored by the keyed container, so
+    /// a config written by an older build still decodes with every surviving value intact.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let def = RecordingSettings.default
         archivePath = try c.decodeIfPresent(String.self, forKey: .archivePath) ?? def.archivePath
-        saveSystemTrack = try c.decodeIfPresent(Bool.self, forKey: .saveSystemTrack) ?? def.saveSystemTrack
-        saveMicTrack = try c.decodeIfPresent(Bool.self, forKey: .saveMicTrack) ?? def.saveMicTrack
-        saveCombinedTrack = try c.decodeIfPresent(Bool.self, forKey: .saveCombinedTrack) ?? def.saveCombinedTrack
         segmentSeconds = try c.decodeIfPresent(Int.self, forKey: .segmentSeconds) ?? def.segmentSeconds
         deleteSegmentsAfterAssembly = try c.decodeIfPresent(Bool.self, forKey: .deleteSegmentsAfterAssembly)
             ?? def.deleteSegmentsAfterAssembly
-    }
-
-    /// Which tracks to build as final files (see `SegmentAssembler`).
-    public struct TrackSelection: Equatable, Sendable {
-        public var system: Bool
-        public var mic: Bool
-        public var combined: Bool
-
-        public init(system: Bool, mic: Bool, combined: Bool) {
-            self.system = system
-            self.mic = mic
-            self.combined = combined
-        }
-    }
-
-    /// The track selection derived from the normalised settings.
-    public var trackSelection: TrackSelection {
-        let n = normalized()
-        return TrackSelection(system: n.saveSystemTrack, mic: n.saveMicTrack, combined: n.saveCombinedTrack)
     }
 
     /// Clamp the segment length to the allowed range.
@@ -84,14 +49,10 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         min(maxSegmentSeconds, max(minSegmentSeconds, value))
     }
 
-    /// A normalised copy: the segment length within range; at least one track is saved (otherwise
-    /// the recording would go "into nowhere" — we force `combined`).
+    /// A normalised copy: the segment length within range.
     public func normalized() -> RecordingSettings {
         var s = self
         s.segmentSeconds = RecordingSettings.clampSegmentSeconds(segmentSeconds)
-        if !saveSystemTrack && !saveMicTrack && !saveCombinedTrack {
-            s.saveCombinedTrack = true
-        }
         return s
     }
 

@@ -3,17 +3,14 @@ import Foundation
 import ActaKit
 
 // Recording settings (Task 7) - pure logic: default values, normalization (clamping the segment
-// length + guaranteeing at least one track), resolving the archive path, the Codable round-trip
-// and compatibility with old/partial JSON.
+// length), resolving the archive path, the Codable round-trip and compatibility with old/partial
+// JSON.
 
 // MARK: - Default values
 
 @Test
-func settingsDefaultsSaveAllTracksAndDefaultSegment() {
+func settingsDefaultsUseTheDefaultSegmentLength() {
     let s = RecordingSettings.default
-    #expect(s.saveSystemTrack)
-    #expect(s.saveMicTrack)
-    #expect(s.saveCombinedTrack)
     #expect(s.segmentSeconds == SegmentLayout.defaultSegmentSeconds)
     #expect(s.deleteSegmentsAfterAssembly)
     #expect(s.archivePath.isEmpty)
@@ -54,36 +51,18 @@ func normalizeClampsSegmentSeconds() {
 }
 
 @Test
-func normalizeForcesCombinedWhenNoTrackSelected() {
-    var s = RecordingSettings(saveSystemTrack: false, saveMicTrack: false, saveCombinedTrack: false)
-    s = s.normalized()
-    // Clearing every option would turn the recording into a write to nowhere - we force combined.
-    #expect(s.saveCombinedTrack)
-    #expect(!s.saveSystemTrack)
-    #expect(!s.saveMicTrack)
-}
-
-@Test
-func normalizeKeepsPartialTrackSelection() {
-    let s = RecordingSettings(saveSystemTrack: true, saveMicTrack: false, saveCombinedTrack: false)
-    let n = s.normalized()
-    #expect(n.saveSystemTrack)
-    #expect(!n.saveMicTrack)
-    #expect(!n.saveCombinedTrack)
-}
-
-@Test
 func normalizeIsIdempotent() {
-    let s = RecordingSettings(saveSystemTrack: false, saveMicTrack: false, saveCombinedTrack: false,
-                              segmentSeconds: 3).normalized()
+    let s = RecordingSettings(archivePath: "~/Recordings", segmentSeconds: 3).normalized()
     #expect(s.normalized() == s)
 }
 
 @Test
-func trackSelectionReflectsNormalizedSettings() {
-    let sel = RecordingSettings(saveSystemTrack: false, saveMicTrack: false,
-                                saveCombinedTrack: false).trackSelection
-    #expect(sel == RecordingSettings.TrackSelection(system: false, mic: false, combined: true))
+func normalizeLeavesEverythingButTheSegmentLengthAlone() {
+    let s = RecordingSettings(archivePath: "~/Recordings", segmentSeconds: 3,
+                              deleteSegmentsAfterAssembly: false).normalized()
+    #expect(s.segmentSeconds == RecordingSettings.minSegmentSeconds)
+    #expect(s.archivePath == "~/Recordings")
+    #expect(!s.deleteSegmentsAfterAssembly)
 }
 
 // MARK: - Resolving the archive path
@@ -159,9 +138,7 @@ func resolvedArchiveURLTrimsWhitespace() {
 
 @Test
 func settingsCodableRoundTrip() throws {
-    let original = RecordingSettings(archivePath: "~/Recordings",
-                                     saveSystemTrack: true, saveMicTrack: false,
-                                     saveCombinedTrack: true, segmentSeconds: 20,
+    let original = RecordingSettings(archivePath: "~/Recordings", segmentSeconds: 20,
                                      deleteSegmentsAfterAssembly: false)
     let data = try JSONEncoder().encode(original)
     let decoded = try JSONDecoder().decode(RecordingSettings.self, from: data)
@@ -174,8 +151,38 @@ func settingsDecodesPartialJSONWithDefaults() throws {
     let json = Data(#"{"segmentSeconds": 30}"#.utf8)
     let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
     #expect(decoded.segmentSeconds == 30)
-    #expect(decoded.saveSystemTrack == RecordingSettings.default.saveSystemTrack)
-    #expect(decoded.saveCombinedTrack == RecordingSettings.default.saveCombinedTrack)
     #expect(decoded.deleteSegmentsAfterAssembly == RecordingSettings.default.deleteSegmentsAfterAssembly)
     #expect(decoded.archivePath == RecordingSettings.default.archivePath)
+}
+
+/// Task 12 removed the track-selection settings, and real `UserDefaults` on an upgraded machine
+/// still hold JSON carrying those keys. Swift's keyed container ignores unknown keys, so no
+/// migration code is needed — but "no migration needed" is a claim about someone's saved settings,
+/// so it is proven here rather than assumed.
+///
+/// Every surviving value is asserted, not just that decoding succeeded: a decode that quietly reset
+/// the settings to defaults would sail past an "it decodes" assertion while silently losing the
+/// user's archive path and segment length.
+@Test
+func settingsDecodeIgnoresRemovedTrackKeysAndKeepsEverySurvivingValue() throws {
+    // The exact payload found in UserDefaults on this machine, written by the pre-Task-12 build.
+    let json = Data((#"{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,"#
+        + #""segmentSeconds":15,"archivePath":"","deleteSegmentsAfterAssembly":true}"#).utf8)
+    let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
+    #expect(decoded.segmentSeconds == 15)
+    #expect(decoded.archivePath == "")
+    #expect(decoded.deleteSegmentsAfterAssembly)
+}
+
+/// The same, with non-default surviving values: the payload above happens to carry an empty
+/// `archivePath` and `deleteSegmentsAfterAssembly: true`, which are also the defaults — so on its
+/// own it cannot tell "the values were preserved" from "the values were reset". This one can.
+@Test
+func settingsDecodeWithRemovedKeysPreservesNonDefaultValues() throws {
+    let json = Data((#"{"saveSystemTrack":false,"saveMicTrack":true,"saveCombinedTrack":true,"#
+        + #""segmentSeconds":45,"archivePath":"~/Meetings","deleteSegmentsAfterAssembly":false}"#).utf8)
+    let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
+    #expect(decoded.segmentSeconds == 45)
+    #expect(decoded.archivePath == "~/Meetings")
+    #expect(!decoded.deleteSegmentsAfterAssembly)
 }
