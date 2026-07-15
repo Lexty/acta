@@ -1,30 +1,30 @@
 ---
 name: screencapturekit-audio
-description: Захват системного звука И микрофона одним SCStream на macOS 15+/26 (ScreenCaptureKit). Использовать при работе с AudioRecorder / записью звука встреч.
+description: Capture system audio AND microphone with a single SCStream on macOS 15+/26 (ScreenCaptureKit). Use when working on AudioRecorder / meeting audio capture.
 ---
 
-# ScreenCaptureKit: системный звук + микрофон одним стримом
+# ScreenCaptureKit: system audio + microphone in one stream
 
-> Источник истины — официальные доки Apple (ссылки внизу). Ниже — проверенные факты и
-> подводные камни; API-детали сверять по докам, версии меняются.
+> The source of truth is Apple's official docs (links below). Below are verified facts and gotchas;
+> check API details against the docs — versions change.
 
-## Ключевые проверенные факты (macOS 15+/26)
+## Verified facts (macOS 15+/26)
 
-- Один `SCStream` может отдавать **и системный звук, и микрофон** одновременно.
-  - `SCStreamConfiguration.capturesAudio = true` — системный звук (голоса собеседников).
-  - `SCStreamConfiguration.captureMicrophone = true` — микрофон (мой голос). Добавлено в macOS 15.
-  - `SCStreamConfiguration.excludesCurrentProcessAudio = true` — не писать собственный звук приложения.
-- Буферы приходят в делегат с **разными типами**: `SCStreamOutputType.audio` (система) и
-  `.microphone` (микрофон), с **разными `CMFormatDescription`**.
-- **Гатча №1:** нельзя писать оба потока в один `AVAssetWriterInput` — из-за разных форматов/частот
-  контейнер побьётся. Нужно **два отдельных writer'а** → `system.wav` и `mic.wav`.
-- **Гатча №2:** даже для audio-only нужно задать `SCContentFilter` на дисплей. Видео не нужно —
-  задать минимальный видео-конфиг и **игнорировать `.screen`-кадры** в делегате.
-- **Гатча №3:** Screen Recording — это TCC-разрешение, спрашивается рантаймом при старте стрима.
-  Проверять статус через `CGPreflightScreenCaptureAccess()`, запрос — `CGRequestScreenCaptureAccess()`.
-  Микрофон требует `NSMicrophoneUsageDescription` в Info.plist.
+- A single `SCStream` can deliver **both system audio and the microphone** at the same time.
+  - `SCStreamConfiguration.capturesAudio = true` — system audio (the other participants).
+  - `SCStreamConfiguration.captureMicrophone = true` — microphone (your own voice). Added in macOS 15.
+  - `SCStreamConfiguration.excludesCurrentProcessAudio = true` — do not record the app's own audio.
+- Buffers arrive in the delegate with **different types**: `SCStreamOutputType.audio` (system) and
+  `.microphone` (microphone), with **different `CMFormatDescription`s**.
+- **Gotcha 1:** you cannot write both streams into one `AVAssetWriterInput` — differing
+  formats/sample rates corrupt the container. You need **two separate writers** → `system.wav` and `mic.wav`.
+- **Gotcha 2:** even for audio-only you must provide an `SCContentFilter` for a display. Video is not
+  needed — set a minimal video config and **ignore `.screen` frames** in the delegate.
+- **Gotcha 3:** Screen Recording is a TCC permission requested at runtime when the stream starts.
+  Check the status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`.
+  The microphone requires `NSMicrophoneUsageDescription` in Info.plist.
 
-## Скелет конфигурации (сверять по докам)
+## Configuration sketch (verify against the docs)
 
 ```swift
 let config = SCStreamConfiguration()
@@ -33,27 +33,27 @@ config.captureMicrophone = true
 config.excludesCurrentProcessAudio = true
 config.sampleRate = 48_000
 config.channelCount = 2
-// минимальный видео, кадры .screen игнорируем
+// minimal video; .screen frames are ignored
 config.width = 2; config.height = 2
 ```
 
-Делегат `SCStreamOutput.stream(_:didOutputSampleBuffer:of:)`: по `of type` разводить
-`.audio` → system-writer, `.microphone` → mic-writer, `.screen` → игнор.
+In `SCStreamOutput.stream(_:didOutputSampleBuffer:of:)`, route by `of type`:
+`.audio` → system writer, `.microphone` → mic writer, `.screen` → ignore.
 
-## Объединённый файл
+## Combined file
 
-Кроме раздельных дорожек, собрать объединённый `combined.wav` (микс двух) через `ffmpeg`:
+Besides the separate tracks, build a combined `combined.wav` (a mix of the two) via `ffmpeg`:
 ```
 ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest combined.wav
 ```
-Сырые `system.wav`/`mic.wav` сохранять (раздельные дорожки = будущая атрибуция «я/собеседник»).
+Keep the raw `system.wav`/`mic.wav` — separate tracks enable future "me vs. them" attribution.
 
-**Важно:** записывать не одним файлом, а **сегментами** — см. скилл `crash-safe-recording`
-(потоковая запись, восстановление после краша). Финальные `system/mic/combined.wav` собираются
-из сегментов на чистом стопе или при восстановлении.
+**Important:** do not record into a single file — write **segments** instead; see the
+`crash-safe-recording` skill (streaming writes, recovery after a crash). The final
+`system/mic/combined.wav` are assembled from segments on a clean stop or during recovery.
 
-## Ссылки
+## References
 - captureMicrophone: https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturemicrophone
 - capturesAudio: https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturesaudio
-- Гайд audio+mic: https://creavit.studio/blog/screencapturekit-audio-recording-mac-guide
-- ScreenCaptureKit обзор: https://developer.apple.com/documentation/screencapturekit/
+- Audio+mic guide: https://creavit.studio/blog/screencapturekit-audio-recording-mac-guide
+- ScreenCaptureKit overview: https://developer.apple.com/documentation/screencapturekit/

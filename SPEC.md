@@ -1,134 +1,138 @@
-# Acta — спецификация для реализации
+# Acta — implementation specification
 
-> **Статус:** спецификация для автономной реализации (исполнитель — ralphex).
-> Документ самодостаточный: решения зафиксированы, критерии приёмки проверяемы.
-> При неоднозначности выбирать вариант, минимизирующий зависимости и повышающий надёжность записи.
+> **Status:** specification for autonomous implementation (executor — ralphex).
+> Self-contained: decisions are fixed, acceptance criteria are verifiable.
+> When in doubt, pick the option that minimises dependencies and maximises recording reliability.
+> **Language:** English only across UI, code, docs and git — see `CLAUDE.md`.
 
-## 1. Что это и зачем
+## 1. What this is and why
 
-Личное минималистичное **macOS menu-bar** приложение, которое **только записывает** онлайн-встречи
-(Slack, Teams, Google Meet и **любой** источник звука): системный звук (собеседники) + микрофон.
-Транскрипция и саммари **вне scope** — делаются отдельно (у пользователя локально настроен `mlx_whisper`).
+A personal, minimal **macOS menu-bar** app that **only records** online meetings (Slack, Teams,
+Google Meet and **any** other audio source): system audio (the other participants) + microphone.
+Transcription and summarisation are **out of scope** — done separately (the user already has
+`mlx_whisper` set up locally).
 
-**Три обязательных свойства записи:**
-1. **Потоковая запись на диск** — инкрементально по ходу встречи, без буферизации всей записи в памяти.
-2. **Отказоустойчивость** — при рестарте/краше уже записанное валидно и восстанавливается.
-3. **Самодиагностика** — если запись не началась/встала из-за ошибки, это ловится сразу и лечится.
+**Three mandatory recording properties:**
+1. **Streaming writes to disk** — incremental, as the meeting goes; never buffer it all in memory.
+2. **Fault tolerance** — after a restart/crash, whatever was recorded is valid and gets recovered.
+3. **Self-diagnosis** — if recording fails to start or stalls, it is detected at once and healed.
 
-**Definition of Done (v1):** из меню-бара стартуется/останавливается запись; системный звук и
-микрофон пишутся раздельно потоком сегментами; при `kill -9`/рестарте уже записанные сегменты
-сохраняются и на следующем запуске автоматически финализируются; при неудачном старте приложение
-диагностирует причину и лечит/сообщает; всё собирается без полного Xcode.
+**Definition of Done (v1):** start/stop from the menu bar; system audio and microphone written as
+separate streaming segment tracks; after `kill -9`/restart the recorded segments survive and are
+finalised automatically on the next launch; a failed start is diagnosed and healed or reported;
+everything builds without full Xcode.
 
-## 2. Среда (факт)
+## 2. Environment (facts)
 
-- Apple M3, 16 GB, **macOS 26.2** (таргет `arm64-apple-macosx26`).
-- **Swift 6.3.3**, только **Command Line Tools**, полного Xcode **нет** → сборка через SwiftPM.
-- Установлено: `ffmpeg` (склейка/микс дорожек), `swiftlint` (через обёртку `Scripts/lint.sh`).
-- Дом проекта: `/Users/<user>/dev/personal/acta`.
+- Apple M3, 16 GB, **macOS 26.2** (target `arm64-apple-macosx26`).
+- **Swift 6.3.3**, **Command Line Tools only**, no full Xcode → build via SwiftPM.
+- Installed: `ffmpeg` (concat/mix), `swiftlint` (via the `Scripts/lint.sh` wrapper).
+- Project home: `/Users/<user>/dev/personal/acta`.
 
-## 3. Зафиксированные решения
+## 3. Fixed decisions
 
-| Аспект | Решение | Почему |
+| Aspect | Decision | Why |
 |---|---|---|
-| Тип приложения | SwiftUI `MenuBarExtra`, `LSUIElement=true` | минимализм, без дока |
-| Сборка | **SwiftPM** + скрипт упаковки в `.app` + ad-hoc `codesign` | полного Xcode нет |
-| Зависимости | **без внешних** (WhisperKit не нужен — транскрипции нет) | проще, надёжнее |
-| Захват звука | **один `SCStream`**: системный звук + микрофон | универсально для любого источника |
-| Запись на диск | **потоково, сегментами ~10–15 с** (каждый сегмент — валидный файл) | крэш теряет ≤ длину сегмента |
-| Отказоустойчивость | `session.json` + восстановление на старте (склейка сегментов) | переживает рестарт/краш |
-| Самодиагностика | проверка «данные текут» на старте + watchdog + авто-лечение | не «немой» recording без данных |
-| Хранилище | папка на запись: аудио + `session.json` + `info.md` (front-matter) | «возвращаться к записям», agent-friendly |
+| App type | SwiftUI `MenuBarExtra`, `LSUIElement=true` | minimal, no Dock icon |
+| Build | **SwiftPM** + bundling script + ad-hoc `codesign` | no full Xcode available |
+| Dependencies | **none external** (no WhisperKit — no transcription) | simpler, more reliable |
+| Audio capture | **a single `SCStream`**: system audio + microphone | works for any source app |
+| Disk writes | **streaming, ~10–15 s segments** (each a valid file) | a crash loses ≤ one segment |
+| Fault tolerance | `session.json` + recovery on launch (segment assembly) | survives restart/crash |
+| Self-diagnosis | verify data flow at start + watchdog + auto-heal | never a "silent" recording |
+| Storage | one folder per recording: audio + `session.json` + `info.md` | returnable, agent-friendly |
 
-## 4. Технические координаты
+## 4. Technical coordinates
 
-- **ScreenCaptureKit** (см. скилл `screencapturekit-audio`): один `SCStream`,
+- **ScreenCaptureKit** (see the `screencapturekit-audio` skill): one `SCStream`,
   `capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`,
-  минимальный видео-конфиг; буферы `.audio`/`.microphone` → раздельные writer'ы.
-- **Крэш-безопасная запись** (см. скилл `crash-safe-recording`): писать **короткими сегментами**,
-  каждый финализируется как валидный файл; частый flush; никакой буферизации всей записи в памяти.
-  Гатча: незакрытый `AVAssetWriter`-файл после жёсткого краша обычно битый → отсюда сегментирование.
-- **Склейка/микс** через `ffmpeg`:
-  - конкатенация сегментов дорожки → `system.wav`, `mic.wav`;
-  - объединённый `combined.wav` (микс двух) `amix=inputs=2:duration=longest`.
-- **Разрешения (TCC):** Microphone (`NSMicrophoneUsageDescription`), Screen Recording
-  (рантайм; статус `CGPreflightScreenCaptureAccess()`, запрос `CGRequestScreenCaptureAccess()`).
+  minimal video config; `.audio`/`.microphone` buffers → separate writers.
+- **Crash-safe writing** (see the `crash-safe-recording` skill): write **short segments**, each
+  finalised into a valid file; flush often; never buffer the whole recording in memory.
+  Gotcha: an unfinalised `AVAssetWriter` file is usually corrupt after a hard crash — hence segments.
+- **Assembly/mix** via `ffmpeg`:
+  - concatenate a track's segments → `system.wav`, `mic.wav`;
+  - mix both → `combined.wav` (`amix=inputs=2:duration=longest`).
+- **Permissions (TCC):** Microphone (`NSMicrophoneUsageDescription`), Screen Recording
+  (runtime; status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`).
 
-## 5. Структура проекта
+## 5. Project layout
 
 ```
 acta/
-  Package.swift                     # executable Acta + testTarget ActaTests; БЕЗ внешних зависимостей
+  Package.swift                     # Acta executable + ActaKit + ActaTestRunner + ActaTests; no external deps
   Sources/Acta/
-    ActaApp.swift                   # @main, MenuBarExtra, состояние idle/recording/error/recovered
-    AudioRecorder.swift             # SCStream, раздельные дорожки, потоковая сегментная запись, flush
-    SegmentWriter.swift             # ротация сегментов (~10–15 с), финализация каждого
-    RecoveryManager.swift           # на старте: найти session.json status=recording → склеить сегменты
-    SelfCheck.swift                 # проверка «данные текут» на старте + watchdog + авто-лечение
+    ActaApp.swift                   # @main, MenuBarExtra, state idle/recording/error/recovered
+    AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush
+    SegmentWriter.swift             # segment rotation (~10-15 s), finalise each one
+    RecoveryManager.swift           # on launch: find session.json status=recording → assemble segments
+    SelfCheck.swift                 # verify data flow at start + watchdog + auto-heal
     Permissions.swift               # Screen Recording + Microphone
-    MeetingStore.swift              # папки, session.json, info.md (front-matter), список записей
-    Settings.swift                  # путь архива, дорожки, длина сегмента, удалять ли сегменты
-    SourceDetector.swift            # (nice-to-have) авто-заголовок по запущенным приложениям
+    MeetingStore.swift              # folders, session.json, info.md front-matter, recordings list
+    Settings.swift                  # archive path, tracks, segment length, segment cleanup
+    SourceDetector.swift            # (nice-to-have) title suggestion from running apps
+  Sources/ActaKit/                  # pure, unit-testable logic (no I/O)
   Resources/{Info.plist, Acta.entitlements}
-  Scripts/{bundle.sh, run.sh, lint.sh}
+  Scripts/{bundle.sh, run.sh, lint.sh, test.sh}
   CLAUDE.md, SPEC.md, .swiftlint.yml
 ```
 
-## 6. Формат хранилища
+## 6. Storage format
 
 `~/Acta/YYYY-MM-DD_HHMM__<slug>/`:
-- Во время записи: `system/NNNN.wav`, `mic/NNNN.wav` (сегменты) + `session.json`
-  (`status: recording|done|recovered`, `started_at`, конфиг, счётчик сегментов).
-- После чистого стопа/восстановления: `system.wav`, `mic.wav`, `combined.wav` (склейка/микс);
-  сегменты удаляются или сохраняются — по настройке.
+- While recording: `system/NNNN.wav`, `mic/NNNN.wav` (segments) + `session.json`
+  (`status: recording|done|recovered`, `started_at`, config, segment count).
+- After a clean stop or recovery: `system.wav`, `mic.wav`, `combined.wav`; segments are deleted or
+  kept, per settings.
 - `info.md` — YAML front-matter: `title, date, source, duration, status`.
-- В корне `~/Acta/CLAUDE.md` — описание архива как рабочего контекста (для Claude Code пользователя).
+- `~/Acta/CLAUDE.md` — describes the archive as working context for the user's Claude Code.
 
-## 7. Отказоустойчивость и самодиагностика (ядро v1)
+## 7. Fault tolerance and self-diagnosis (the core of v1)
 
-**Потоковая сегментная запись.** Данные каждой дорожки пишутся сегментами по ~10–15 с; сегмент
-закрывается (финализируется) и остаётся валидным независимо от дальнейшего. Частый flush на диск.
-Так жёсткий краш/рестарт теряет максимум последний незакрытый сегмент.
+**Streaming segment writes.** Each track is written in ~10–15 s segments; a segment is finalised and
+stays valid regardless of what happens next. Flush to disk often. A hard crash/restart therefore
+loses at most the last, unfinalised segment.
 
-**Маркер сессии.** `session.json` создаётся при старте (`status=recording`) и обновляется. Чистый
-стоп → `status=done` + склейка. Наличие `status=recording` на запуске = запись прервана нештатно.
+**Session marker.** `session.json` is created at start (`status=recording`) and kept up to date. A
+clean stop → `status=done` + assembly. Finding `status=recording` at launch means the recording was
+interrupted abnormally.
 
-**Восстановление на старте** (`RecoveryManager`). При запуске приложения просканировать архив; для
-каждой папки с `status=recording`: склеить уцелевшие валидные сегменты в `system/mic/combined.wav`,
-битый последний сегмент отбросить без падения, выставить `status=recovered`, уведомить.
+**Recovery on launch** (`RecoveryManager`). Scan the archive at startup; for every folder with
+`status=recording`: assemble the surviving valid segments into `system/mic/combined.wav`, discard a
+corrupt trailing segment without failing, set `status=recovered`, notify the user.
 
-**Самодиагностика старта** (`SelfCheck`). После старта в первые ~2 с убедиться, что данные реально
-идут (растёт размер текущего сегмента / приходят буферы). Если нет — определить причину:
-нет TCC-права → запрос/подсказка; `SCStream` не поднялся → рестарт (2–3 попытки); нет аудио-девайса
-→ понятная ошибка. Никогда не показывать «recording», если данные не пишутся.
+**Startup self-diagnosis** (`SelfCheck`). Within ~2 s of starting, confirm data is actually flowing
+(current segment growing / buffers arriving). If not, determine the cause: no TCC permission →
+request/guide; `SCStream` did not come up → restart (2–3 attempts); no audio device → clear error.
+Never display "recording" when nothing is being written.
 
-**Watchdog во время записи.** Если поток буферов встал на N секунд — пометить, попытаться
-перезапустить стрим, сохранив уже записанные сегменты; при неудаче — ошибка в UI.
+**Watchdog while recording.** If the buffer flow stalls for N seconds, flag it and try to restart the
+stream while keeping the already written segments; on failure — surface an error in the UI.
 
-## 8. Рецепт сборки без Xcode (`Scripts/bundle.sh`) — см. скилл `swiftpm-macos-app-bundle`
+## 8. Xcode-free build recipe (`Scripts/bundle.sh`) — see the `swiftpm-macos-app-bundle` skill
 1. `swift build -c release` → `.build/release/Acta`.
-2. Собрать `Acta.app/Contents/{MacOS,Resources}` + `Info.plist`
-   (`CFBundleIdentifier=dev.personal.acta` — фиксированный ради TCC; `LSUIElement=true`;
+2. Assemble `Acta.app/Contents/{MacOS,Resources}` + `Info.plist`
+   (`CFBundleIdentifier=dev.personal.acta` — fixed, for TCC stability; `LSUIElement=true`;
    `NSMicrophoneUsageDescription`; `LSMinimumSystemVersion=14.0`).
 3. `codesign --force --sign - --identifier dev.personal.acta --entitlements Resources/Acta.entitlements Acta.app`.
 
-## 9. Порядок реализации и критерии приёмки
+## 9. Implementation order and acceptance
 
-Идти по задачам `docs/plans/acta.md`; у каждой — проверяемый критерий. Ключевые:
-- Task 2: запись 60 с → несколько валидных сегментов (`ffprobe` длительность > 0 у каждого).
-- Task 3: `kill -9` во время записи → перезапуск → незавершённая запись авто-финализируется,
-  `combined.wav` валиден и содержит записанное до краша.
-- Task 4: старт без Screen Recording → сразу внятная ошибка + путь к исправлению, а не «немой» rec.
+Follow the tasks in `docs/plans/acta.md`; each has a verifiable criterion. The key ones:
+- Task 2: a 60 s recording → several valid segments (`ffprobe` duration > 0 for each).
+- Task 3: `kill -9` while recording → relaunch → the unfinished recording is finalised automatically,
+  `combined.wav` is valid and contains the audio recorded before the crash.
+- Task 4: starting without Screen Recording → an immediate, actionable error rather than a silent "rec".
 
-## 10. Риски и примечания
-- **ScreenCaptureKit audio-only** требует content-filter дисплея → минимальный видео-конфиг, игнор `.screen`.
-- **TCC + ad-hoc подпись:** держать `CFBundleIdentifier`/`--identifier` постоянными; иначе Screen
-  Recording придётся выдавать заново.
-- **Формат сегментов:** выбрать контейнер, дающий валидный файл на каждый сегмент (WAV/CAF); при
-  сомнении — писать raw PCM посегментно и собирать WAV на финализации/восстановлении.
-- **Приватность/этика:** запись созвонов с другими может требовать согласия — зона ответственности пользователя.
+## 10. Risks and notes
+- **Audio-only ScreenCaptureKit** still needs a display content filter → minimal video config, ignore `.screen`.
+- **TCC + ad-hoc signing:** keep `CFBundleIdentifier`/`--identifier` stable, otherwise Screen Recording
+  must be granted again after every rebuild.
+- **Segment format:** pick a container that yields a valid file per segment (WAV/CAF); if in doubt,
+  write raw PCM per segment and build the WAV on finalisation/recovery.
+- **Privacy/ethics:** recording calls with other people may require their consent — the user's responsibility.
 
-## 11. Ссылки
+## 11. References
 - ScreenCaptureKit / microphone: https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturemicrophone
-- Гайд audio+mic: https://creavit.studio/blog/screencapturekit-audio-recording-mac-guide
+- Audio+mic guide: https://creavit.studio/blog/screencapturekit-audio-recording-mac-guide
 - MenuBarExtra: https://developer.apple.com/documentation/swiftui/menubarextra

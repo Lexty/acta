@@ -1,121 +1,136 @@
-# Plan: Acta — отказоустойчивая запись онлайн-встреч (macOS)
+# Plan: Acta — fault-tolerant online meeting recorder (macOS)
 
 ## Overview
 
-Минималистичное macOS menu-bar приложение **Acta**, которое **только записывает** онлайн-встречи:
-системный звук (собеседники) + микрофон, одним `SCStream`. Универсально для любого источника
-(Slack, Teams, Google Meet и пр.). Транскрипция и саммари **НЕ входят в scope** — делаются
-отдельно (локально уже настроен `mlx_whisper`).
+A minimal macOS menu-bar app **Acta** that **only records** online meetings: system audio (the other
+participants) + microphone, through a single `SCStream`. Works for any source (Slack, Teams, Google
+Meet, etc.). Transcription and summarisation are **out of scope** — done separately (the user
+already has `mlx_whisper` set up locally).
 
-**Три обязательных свойства записи:**
-1. **Потоковая запись на диск** — данные пишутся инкрементально по ходу встречи, а не копятся в
-   памяти с финализацией в конце.
-2. **Отказоустойчивость** — при рестарте компьютера/краше то, что успело записаться, остаётся
-   валидным и восстанавливается.
-3. **Самодиагностика** — если запись не началась/встала из-за ошибки, это обнаруживается сразу и
-   лечится (перезапрос прав, рестарт стрима, понятная ошибка).
+**Three mandatory recording properties:**
+1. **Streaming writes to disk** — data is written incrementally as the meeting goes, not buffered in
+   memory and finalised at the end.
+2. **Fault tolerance** — after a machine restart/crash, whatever was recorded stays valid and is
+   recovered.
+3. **Self-diagnosis** — if recording fails to start or stalls, it is detected at once and healed
+   (re-request permissions, restart the stream, clear error).
 
-**Читать `SPEC.md` перед каждой задачей** (решения, координаты API, рецепт сборки без Xcode,
-подход к крэш-безопасности). Скилл `.claude/skills/crash-safe-recording` — обязательно для Task 2–4.
+**Read `SPEC.md` before every task** (decisions, API coordinates, Xcode-free build recipe,
+crash-safety approach). The `.claude/skills/crash-safe-recording` skill is mandatory for Tasks 2–4.
 
-Среда: Apple M3, macOS 26.2, Swift 6.3.3, только CLT (полного Xcode нет), SwiftPM. `ffmpeg` есть.
+**Language: English only** across UI, code, docs and git — see `CLAUDE.md`.
 
-**Definition of Done (v1):** из меню-бара стартуется/останавливается запись; звук собеседников и
-микрофон пишутся раздельно потоком; при принудительном завершении процесса/рестарте уже записанные
-сегменты сохраняются и на следующем запуске автоматически финализируются; при неудачном старте
-приложение диагностирует причину и лечит/сообщает; всё собирается без полного Xcode.
+Environment: Apple M3, macOS 26.2, Swift 6.3.3, CLT only (no full Xcode), SwiftPM. `ffmpeg` present.
+
+**Definition of Done (v1):** start/stop recording from the menu bar; participant audio and microphone
+written as separate streaming tracks; on a forced process kill/restart the already written segments
+survive and are finalised automatically on the next launch; a failed start is diagnosed and
+healed/reported; everything builds without full Xcode.
 
 ## Validation Commands
 - `swift build -c release`
-- `swift test` (при CLT-only только СОБИРАЕТ тесты — нет хост-утилиты `xctest`)
-- `bash Scripts/test.sh` (настоящий прогон юнит-тестов через executable-раннер; падает при ошибке)
+- `swift test` (under CLT-only this ONLY COMPILES the tests — there is no `xctest` host utility)
+- `bash Scripts/test.sh` (real unit-test run via the executable runner; fails on error)
 - `bash Scripts/lint.sh`
 - `bash Scripts/bundle.sh`
 
-### Task 1: Скелет пакета и сборка без Xcode
-- [x] `Package.swift`: executable target `Acta` + testTarget `ActaTests`, platform macOS 14+, **без внешних зависимостей** (добавлены `ActaKit` — библиотека для тестируемой логики — и `ActaTestRunner` — executable-раннер тестов, т.к. CLT-only не исполняет xctest-бандл)
-- [x] Пустой `Tests/ActaTests/` (заготовка), чтобы `swift test` проходил с самого начала
-- [x] `Sources/Acta/ActaApp.swift`: `@main`, пустой `MenuBarExtra` с иконкой
-- [x] `Resources/Info.plist` (`LSUIElement=true`, `CFBundleIdentifier=dev.personal.acta`, `NSMicrophoneUsageDescription`, `LSMinimumSystemVersion=14.0`) и `Resources/Acta.entitlements` (минимальные, без сэндбокса)
+### Task 1: Package skeleton and Xcode-free build
+- [x] `Package.swift`: executable target `Acta` + testTarget `ActaTests`, platform macOS 14+, **no external dependencies** (added `ActaKit` — a library for testable logic — and `ActaTestRunner` — an executable test runner, because CLT-only cannot execute an xctest bundle)
+- [x] Empty `Tests/ActaTests/` (stub) so `swift test` passes from the start
+- [x] `Sources/Acta/ActaApp.swift`: `@main`, empty `MenuBarExtra` with an icon
+- [x] `Resources/Info.plist` (`LSUIElement=true`, `CFBundleIdentifier=dev.personal.acta`, `NSMicrophoneUsageDescription`, `LSMinimumSystemVersion=14.0`) and `Resources/Acta.entitlements` (minimal, no sandbox)
 - [x] `Scripts/bundle.sh` (`swift build -c release` → `Acta.app` + Info.plist + `codesign --force --sign - --identifier dev.personal.acta --entitlements`), `Scripts/run.sh`
-- [x] Приёмка: `bash Scripts/bundle.sh` собирает `Acta.app` без ошибок (проверено); `open Acta.app` показывает иконку в меню-баре — manual test (skipped - not automatable, требует GUI-сессии)
+- [x] Acceptance: `bash Scripts/bundle.sh` builds `Acta.app` without errors (verified); `open Acta.app` shows the menu-bar icon — manual test (skipped - not automatable, requires a GUI session)
 
-### Task 2: Потоковая запись двух дорожек сегментами
-- [x] `Permissions.swift`: проверка/запрос Screen Recording (`CGPreflightScreenCaptureAccess`) и Microphone
-- [x] `AudioRecorder.swift`: один `SCStream` (`capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`, минимальный видео-конфиг), буферы `.audio`/`.microphone` в раздельные writer'ы
-- [x] **Сегментирование** (`SegmentWriter.swift`): писать короткими сегментами (~10–15 с), каждый финализируется как валидный файл (`system/NNNN.wav`, `mic/NNNN.wav`). Крэш теряет ≤ длину сегмента
-- [x] Частый flush данных на диск; никакой буферизации всей записи в памяти (каждый буфер сразу пишется во writer сегмента; в памяти не копится)
-- [x] Юнит-тест: чистая функция построения аргументов `ffmpeg` (склейка/микс) покрыта тестом (`FFmpeg.concatArgs`/`mixArgs`/`concatListContents` + раскладка сегментов `SegmentLayout`)
-- [x] Приёмка: запись 60 с создаёт несколько сегментов; каждый сегмент валиден (`ffprobe` длительность > 0) — manual test (skipped - not automatable, требует TCC Screen Recording + Microphone и живой аудио-сессии)
+### Task 2: Streaming two-track segment recording
+- [x] `Permissions.swift`: check/request Screen Recording (`CGPreflightScreenCaptureAccess`) and Microphone
+- [x] `AudioRecorder.swift`: a single `SCStream` (`capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`, minimal video config), `.audio`/`.microphone` buffers into separate writers
+- [x] **Segmentation** (`SegmentWriter.swift`): write short segments (~10–15 s), each finalised as a valid file (`system/NNNN.wav`, `mic/NNNN.wav`). A crash loses ≤ one segment
+- [x] Frequent flushes to disk; no buffering of the whole recording in memory (each buffer is written to the segment writer immediately; nothing accumulates in memory)
+- [x] Unit test: the pure function building `ffmpeg` arguments (concat/mix) is covered (`FFmpeg.concatArgs`/`mixArgs`/`concatListContents` + segment layout `SegmentLayout`)
+- [x] Acceptance: a 60 s recording creates several segments; each segment is valid (`ffprobe` duration > 0) — manual test (skipped - not automatable, requires TCC Screen Recording + Microphone and a live audio session)
 
-### Task 3: Отказоустойчивость и восстановление после рестарта
-- [x] `session.json` в папке записи: `status` (recording/done/recovered), `started_at`, конфиг, счётчик сегментов — обновляется по ходу (`SessionManifest` в ActaKit — чистая логика JSON, snake_case + ISO-8601; `SessionManifestStore` — атомарная запись/чтение из FS; пишется на старте/стопе через `RecordingSession`)
-- [x] Чистый стоп: `status=done`, склейка сегментов в `system.wav`/`mic.wav` + объединённый `combined.wav` через `ffmpeg`, удаление сегментов (или сохранение — по настройке) (`RecordingSession.stop(deleteSegments:)` → `SegmentAssembler.assemble`; при неудаче склейки маркер остаётся `recording`, чтобы восстановление повторило — данные не теряются)
-- [x] `RecoveryManager.swift`: на старте приложения искать папки с `session.json status=recording` (был краш/рестарт) → склеить уцелевшие сегменты, `status=recovered` (сканирует архив, `Recovery.needsRecovery`, ошибка одной папки изолирована, сегменты при восстановлении сохраняются как сырьё)
-- [x] Юнит-тесты: логика восстановления (по набору сегментов собрать корректный список для склейки; битый последний сегмент отбрасывается без падения) (`RecoveryTests`: `Recovery.recoveryPlan` — порядок/фильтр мусора/сброс битого последнего сегмента по размеру; round-trip и hand-written JSON для `SessionManifest`)
-- [x] Приёмка: убить процесс во время записи (`kill -9`), перезапустить `Acta.app` → незавершённая запись авто-финализируется, `combined.wav` валиден и содержит записанное до краша — manual test (skipped - not automatable, требует TCC Screen Recording + Microphone, живой аудио-сессии и `kill -9`)
+### Task 3: Fault tolerance and recovery after restart
+- [x] `session.json` in the recording folder: `status` (recording/done/recovered), `started_at`, config, segment count — kept up to date (`SessionManifest` in ActaKit — pure JSON logic, snake_case + ISO-8601; `SessionManifestStore` — atomic write/read from the FS; written on start/stop via `RecordingSession`)
+- [x] Clean stop: `status=done`, concatenate segments into `system.wav`/`mic.wav` + combined `combined.wav` via `ffmpeg`, delete segments (or keep them — per settings) (`RecordingSession.stop(deleteSegments:)` → `SegmentAssembler.assemble`; if assembly fails the marker stays `recording` so recovery retries — data is not lost)
+- [x] `RecoveryManager.swift`: on app launch find folders with `session.json status=recording` (crash/restart happened) → assemble surviving segments, `status=recovered` (scans the archive, `Recovery.needsRecovery`, a failure in one folder is isolated, segments are kept as raw material during recovery)
+- [x] Unit tests: recovery logic (build the correct assembly list from a set of segments; a corrupt trailing segment is dropped without failing) (`RecoveryTests`: `Recovery.recoveryPlan` — ordering/junk filtering/dropping a corrupt last segment by size; round-trip and hand-written JSON for `SessionManifest`)
+- [x] Acceptance: kill the process during recording (`kill -9`), relaunch `Acta.app` → the unfinished recording is finalised automatically, `combined.wav` is valid and contains the audio recorded before the crash — manual test (skipped - not automatable, requires TCC Screen Recording + Microphone, a live audio session and `kill -9`)
 
-### Task 4: Самодиагностика старта и watchdog
-- [x] `SelfCheck.swift`: после старта в первые ~2 с проверять, что данные реально идут (растёт размер сегмента / приходят буферы). Если нет — диагностировать причину (нет TCC-права, `SCStream` не стартовал, нет аудио-девайса) (`SelfCheck.verifyStartAndHeal` опрашивает `AudioRecorder.receivedBufferCount`; диагноз — чистая `SelfDiagnosis.diagnose` в ActaKit)
-- [x] Авто-лечение: нет права → запрос/подсказка; стрим не поднялся → рестарт (2–3 попытки); не помогло → **понятная ошибка в меню-баре**, не «немой» recording-статус (`SelfDiagnosis.action` выбирает действие; `RecordingSession.start` бросает `StartupFailure` с `userMessage` при неуспехе, предварительно остановив рекордер; `AudioRecorder.restart` перезапускает стрим, сохраняя сегменты)
-- [x] Watchdog во время записи: поток буферов встал на N секунд → пометить и перезапустить стрим, сохранив уже записанные сегменты (`SelfCheck.runWatchdog` на `FlowWatchdog`; `SegmentWriter.finishAndAdvance` двигает индекс, чтобы рестарт не перезаписал закрытый сегмент; задача запускается в `RecordingSession.start`, отменяется в `stop`)
-- [x] Дорожки диагностируются раздельно: живая дорожка не маскирует мёртвую (это половина встречи). Поломкой считается «буферы дорожки идут, а writer не принял ни одного» (`TrackFlow.isWriteBroken`) — на старте это `SelfDiagnosis.brokenTrack` → `.diskWriteFailed`, во время записи — `TrackWatchdog` на дорожку в дополнение к суммарному `FlowWatchdog`. Молчащий источник (буферов нет вовсе) поломкой **не** считается — тишину в переговорке от мёртвого устройства не отличить, пишем только в лог
-- [x] Юнит-тесты: детектор «данные не текут» на фейковом источнике; выбор действия по типу ошибки (`DiagnosticsTests`: `isDataFlowing`/`diagnose` по снимкам, `action` по типу и остатку попыток, `FlowWatchdog`/`TrackWatchdog` на синтетических последовательностях счётчиков, мёртвая дорожка при живой второй — 27 тестов)
-- [x] Приёмка: запуск записи без выданного Screen Recording → приложение сразу показывает внятную ошибку и путь к исправлению, а не «пишет» вхолостую — manual test (skipped - not automatable, требует TCC-сессии и GUI; логика покрыта юнит-тестами `diagnoseNoScreenRecordingFirst`/`failureMessagesAreNonEmptyAndActionable`)
+### Task 4: Startup self-diagnosis and watchdog
+- [x] `SelfCheck.swift`: within ~2 s of starting, verify data is actually flowing (segment growing / buffers arriving). If not — diagnose the cause (no TCC permission, `SCStream` did not start, no audio device) (`SelfCheck.verifyStartAndHeal` polls `AudioRecorder.receivedBufferCount`; the diagnosis is the pure `SelfDiagnosis.diagnose` in ActaKit)
+- [x] Auto-healing: no permission → request/guide; stream did not come up → restart (2–3 attempts); still failing → **a clear error in the menu bar**, never a "silent" recording status (`SelfDiagnosis.action` picks the action; `RecordingSession.start` throws `StartupFailure` with `userMessage` on failure, stopping the recorder first; `AudioRecorder.restart` restarts the stream while keeping segments)
+- [x] Watchdog while recording: the buffer flow stalls for N seconds → flag it and restart the stream, keeping the already written segments (`SelfCheck.runWatchdog` over `FlowWatchdog`; `SegmentWriter.finishAndAdvance` advances the index so a restart does not overwrite a closed segment; the task starts in `RecordingSession.start` and is cancelled in `stop`)
+- [x] Tracks are diagnosed separately: a live track must not mask a dead one (that is half the meeting). A breakage is "the track's buffers arrive but the writer accepted none" (`TrackFlow.isWriteBroken`) — at startup that is `SelfDiagnosis.brokenTrack` → `.diskWriteFailed`, during recording it is a per-track `TrackWatchdog` in addition to the aggregate `FlowWatchdog`. A silent source (no buffers at all) is **not** treated as a breakage — silence in a meeting room is indistinguishable from a dead device, so it is only logged
+- [x] Unit tests: the "data is not flowing" detector on a fake source; action selection by failure type (`DiagnosticsTests`: `isDataFlowing`/`diagnose` over snapshots, `action` by type and remaining attempts, `FlowWatchdog`/`TrackWatchdog` over synthetic counter sequences, a dead track alongside a live one — 27 tests)
+- [x] Acceptance: starting a recording without Screen Recording granted → the app immediately shows a clear error and how to fix it, instead of recording nothing — manual test (skipped - not automatable, requires a TCC session and GUI; the logic is covered by `diagnoseNoScreenRecordingFirst`/`failureMessagesAreNonEmptyAndActionable`)
 
-### Task 5: Хранилище записей и список
-- [x] `MeetingStore.swift`: папка `~/Acta/YYYY-MM-DD_HHMM__<slug>/` с аудио и `info.md` (YAML front-matter: `title,date,source,duration,status`) (FS-часть в таргете `Acta`: `createMeetingDirectory` с дедупликацией суффиксом, `writeInfo`, `listRecordings` по `session.json`, `~/Acta/CLAUDE.md`; чистая логика раскладки/сериализации — `MeetingArchive`/`MeetingInfo` в ActaKit: slug из заголовка, имя папки, YAML front-matter с double-quoted экранированием, `duration` как HH:MM:SS)
-- [x] Юнит-тесты: генерация slug и сериализация YAML front-matter (чистые функции) (`MeetingArchiveTests`: slug — регистр/сворачивание разделителей/кириллица/fallback/обрезка; имя папки; `formatDuration`; поля front-matter и экранирование спецсимволов — 12 тестов)
-- [x] Приёмка: папка создаётся; `info.md` парсится как YAML — manual test (skipped - not automatable без YAML-парсера в CLT-only; чистая генерация slug/имени папки/front-matter покрыта юнит-тестами, FS-раскладка — `MeetingStore`)
+### Task 5: Recording store and list
+- [x] `MeetingStore.swift`: folder `~/Acta/YYYY-MM-DD_HHMM__<slug>/` with audio and `info.md` (YAML front-matter: `title,date,source,duration,status`) (FS side in the `Acta` target: `createMeetingDirectory` with a de-duplicating suffix, `writeInfo`, `listRecordings` driven by `session.json`, `~/Acta/CLAUDE.md`; pure layout/serialisation logic — `MeetingArchive`/`MeetingInfo` in ActaKit: slug from title, folder name, YAML front-matter with double-quoted escaping, `duration` as HH:MM:SS)
+- [x] Unit tests: slug generation and YAML front-matter serialisation (pure functions) (`MeetingArchiveTests`: slug — case/separator folding/Cyrillic/fallback/truncation; folder name; `formatDuration`; front-matter fields and special-character escaping — 12 tests)
+- [x] Acceptance: the folder is created; `info.md` parses as YAML — manual test (skipped - not automatable without a YAML parser under CLT-only; pure slug/folder-name/front-matter generation is unit-tested, FS layout is `MeetingStore`)
 
 ### Task 6: Menu-bar UX
-- [x] Старт/стоп, таймер записи, индикатор состояния (idle/recording/error/recovered) (`RecordingController` — @MainActor view-модель: фаза idle/recording/error + баннер восстановления, посекундный таймер `elapsedString`; `MenuContent` в `ActaApp.swift` показывает иконку/цвет/текст состояния и монотаймер; старт/стоп дёргают `RecordingSession`)
-- [x] Поле заголовка (опц. авто-подсказка по запущенным приложениям через `NSWorkspace`) (`SourceDetector` собирает имена запущенных приложений через `NSWorkspace`, чистое сопоставление — `MeetingSource.detect`/`suggestedTitle` в ActaKit; поле `title` предзаполняется подсказкой, пустое → авто-заголовок при старте)
-- [x] Список последних записей, действие «открыть папку»; заметный показ ошибок самодиагностики (`MenuContent.recordingsList` через `MeetingStore.listRecordings`, кнопка папки → `openInFinder`/`activateFileViewerSelecting`; ошибка старта из `StartupFailure.userMessage` показывается красным баннером, а не «немым» recording)
-- [x] Локальная нотификация о сохранении/восстановлении записи (`Notifier` над `UNUserNotificationCenter`, безопасен вне `.app`; уведомления шлются на чистом стопе и при авто-восстановлении на старте)
-- [x] Приёмка: полный цикл проходится только из меню-бара мышью; ошибка старта и восстановление видны в UI — manual test (skipped - not automatable, требует GUI-сессии и TCC; логика UI-состояния/подсказки источника покрыта юнит-тестами `MeetingSourceTests`, сборка бандла — `bash Scripts/bundle.sh`)
+- [x] Start/stop, recording timer, state indicator (idle/recording/error/recovered) (`RecordingController` — a @MainActor view model: idle/recording/error phase + recovery banner, per-second `elapsedString` timer; `MenuContent` in `ActaApp.swift` shows the state icon/colour/text and a monospaced timer; start/stop drive `RecordingSession`)
+- [x] Title field (optional suggestion from running apps via `NSWorkspace`) (`SourceDetector` collects running app names via `NSWorkspace`, pure matching — `MeetingSource.detect`/`suggestedTitle` in ActaKit; the `title` field is pre-filled with the suggestion, empty → auto title on start)
+- [x] Recent recordings list, "open folder" action; self-diagnosis errors shown prominently (`MenuContent.recordingsList` via `MeetingStore.listRecordings`, folder button → `openInFinder`/`activateFileViewerSelecting`; a start failure from `StartupFailure.userMessage` is shown as a red banner rather than a silent recording)
+- [x] Local notification when a recording is saved/recovered (`Notifier` over `UNUserNotificationCenter`, safe outside an `.app`; notifications are sent on a clean stop and on auto-recovery at launch)
+- [x] Acceptance: the whole cycle is reachable from the menu bar with the mouse; start errors and recovery are visible in the UI — manual test (skipped - not automatable, requires a GUI session and TCC; UI state/source-suggestion logic is covered by `MeetingSourceTests`, bundling by `bash Scripts/bundle.sh`)
 
-### Task 7: Настройки
-- [x] `Settings.swift`: путь архива; какие дорожки сохранять (system/mic/combined); длина сегмента; удалять ли сегменты после склейки (чистая модель `RecordingSettings` в ActaKit — Codable + нормализация: зажим длины сегмента в `[5,120]`, форс `combined` при снятом выборе, разрешение `~`/абсолютного пути архива; персистентность в UserDefaults — `SettingsStore` в таргете `Acta`; применение — `RecordingSession(settings:)` прокидывает длину сегмента и `TrackSelection`/`deleteSegments` в `SegmentAssembler.assemble(tracks:)`, `combined` собирается через промежуточные wav даже при снятых `system`/`mic`; UI — секция «Настройки» в `MenuContent`; юнит-тесты — `RecordingSettingsTests`: дефолты, зажим/идемпотентность нормализации, разрешение пути, `TrackSelection`, Codable round-trip и частичный JSON — 14 тестов)
-- [x] Приёмка: смена пути архива и длины сегмента подхватывается новой записью (в коде: `RecordingController` читает настройки на старте каждой записи — `store`/`archiveRoot` вычисляются из текущих настроек, `performStart` берёт снимок `settings.normalized()` для папки и `RecordingSession`; логика разрешения пути/зажима длины покрыта юнит-тестами) — живой GUI-прогон manual (skipped - not automatable, требует меню-бара и TCC)
+### Task 7: Settings
+- [x] `Settings.swift`: archive path; which tracks to keep (system/mic/combined); segment length; whether to delete segments after assembly (pure `RecordingSettings` model in ActaKit — Codable + normalisation: clamp segment length to `[5,120]`, force `combined` when nothing is selected, resolve `~`/absolute archive paths; persistence in UserDefaults — `SettingsStore` in the `Acta` target; application — `RecordingSession(settings:)` passes segment length and `TrackSelection`/`deleteSegments` into `SegmentAssembler.assemble(tracks:)`, `combined` is built via intermediate wavs even when `system`/`mic` are deselected; UI — the Settings section in `MenuContent`; unit tests — `RecordingSettingsTests`: defaults, clamping/idempotent normalisation, path resolution, `TrackSelection`, Codable round-trip and partial JSON — 14 tests)
+- [x] Acceptance: changing the archive path and segment length takes effect for a new recording (in code: `RecordingController` reads settings at the start of every recording — `store`/`archiveRoot` are derived from current settings, `performStart` snapshots `settings.normalized()` for the folder and `RecordingSession`; path resolution/length clamping are unit-tested) — live GUI run manual (skipped - not automatable, requires the menu bar and TCC)
 
-### Task 8: Дефекты, найденные живым прогоном
+### Task 8: Defects found by the live run
 
-Контекст: 2026-07-15 проведён живой end-to-end прогон (сборка, 104 юнит-теста, реальная запись,
-`kill -9` во время записи, авто-восстановление). Базовый дизайн подтверждён и работает. Ниже —
-три реальных дефекта, найденных этим прогоном. Приоритет: 8.1 (потеря данных) → 8.2 → 8.3.
+Context: on 2026-07-15 an end-to-end live run was performed (build, 104 unit tests, a real recording,
+`kill -9` during recording, auto-recovery). The core design is confirmed and works. Below are three
+real defects found by that run. Priority: 8.1 (data loss) → 8.2 → 8.3.
 
-**Фактура прогона** (запись `~/Acta/2026-01-15_1621__slack-2026-01-15-16-21/`, `segment_seconds=15`):
-на момент `kill -9` на диске было 12 сегментов (`system/0000..0011.wav`, `mic/0000..0011.wav`);
-восстановление собрало 11 → `165.0 с`; `session.json` до краша содержал `"segment_count": 0`;
-у предыдущей записи `info.md duration: 00:00:29` при фактическом аудио `23.66 с`.
+**Run facts** (recording `~/Acta/2026-01-15_1621__slack-2026-01-15-16-21/`, `segment_seconds=15`):
+at the moment of `kill -9` there were 12 segments on disk (`system/0000..0011.wav`,
+`mic/0000..0011.wav`); recovery assembled 11 → `165.0 s`; before the crash `session.json` contained
+`"segment_count": 0`; a previous recording had `info.md duration: 00:00:29` with `23.66 s` of actual audio.
 
-#### 8.1 Отбрасывается валидный последний сегмент (потеря данных)
-Восстановление выкинуло `system/0011.wav`, хотя сегмент **не битый**: `ffprobe` читает его как
-валидные **2.92 с** реального аудио. Логика «последний сегмент подозрительный → в мусор» слишком
-груба и теряет данные, которые можно спасти. Это нарушает обещание «теряем ≤ длину сегмента».
-Правильное поведение: попытаться использовать последний сегмент — если он валиден, включить его;
-если заголовок недописан, **починить его по фактическому размеру файла** (обрезав до целого числа
-фреймов), и только если данных нет вовсе — отбросить.
-- [ ] В `Recovery.recoveryPlan` (ActaKit) заменить безусловную отбраковку последнего сегмента на: валиден → включить; заголовок недописан → починить по фактическому размеру; пусто/мусор → отбросить
-- [ ] Переиспользовать уже существующую логику проверки WAV-заголовка (тесты `finalizedHeaderAccepted`, `headerPromisingMoreThanFileHasRejected`, `headerWithoutChunksRejected`) — применять её как «починить», а не только «отбраковать»
-- [ ] Юнит-тесты: последний сегмент валиден → включён; заголовок недописан, данные есть → починен и включён (длительность = фактические данные); файл пустой/0 фреймов → отброшен без падения
-- [ ] Приёмка: `swift build -c release` + `bash Scripts/test.sh` зелёные; на наборе сегментов из фактуры выше план восстановления даёт **12** сегментов (≈167.9 с), а не 11
+#### 8.1 A valid last segment is discarded (data loss)
+Recovery threw away `system/0011.wav` even though the segment is **not corrupt**: `ffprobe` reads it
+as a valid **2.92 s** of real audio. The "last segment is suspicious → bin it" rule is too coarse and
+discards data that could be saved. This breaks the "we lose at most one segment" promise.
+Correct behaviour: try to use the last segment — if it is valid, include it; if the header is
+unfinished, **repair it from the actual file size** (truncating to a whole number of frames); only if
+there is no data at all, drop it.
+- [ ] In `Recovery.recoveryPlan` (ActaKit) replace the unconditional rejection of the last segment with: valid → include; header unfinished → repair from actual size; empty/junk → drop
+- [ ] Reuse the existing WAV-header validation logic (tests `finalizedHeaderAccepted`, `headerPromisingMoreThanFileHasRejected`, `headerWithoutChunksRejected`) — apply it as "repair", not only as "reject"
+- [ ] Unit tests: last segment valid → included; header unfinished but data present → repaired and included (duration = actual data); file empty/0 frames → dropped without failing
+- [ ] Acceptance: `swift build -c release` + `bash Scripts/test.sh` green; for the segment set in the run facts above the recovery plan yields **12** segments (≈167.9 s), not 11
 
-#### 8.2 `segment_count` в `session.json` не обновляется по ходу записи
-Перед крашем в манифесте лежал `"segment_count": 0` при 12 реальных сегментах на диске. Сейчас это
-не ломает восстановление (оно сканирует ФС), но поле бесполезно и вводит в заблуждение: если бы
-восстановление на него полагалось, оно решило бы, что сегментов нет, и потеряло бы всю запись.
-- [ ] Обновлять `segment_count` в `session.json` по мере закрытия каждого сегмента (атомарная запись, без гонок с записью аудио)
-- [ ] Восстановление **не должно доверять** счётчику как источнику истины — ФС остаётся первичной (счётчик только информационный/для диагностики)
-- [ ] Юнит-тесты: счётчик растёт при закрытии сегментов; при рассинхроне счётчика и ФС восстановление опирается на ФС
-- [ ] Приёмка: во время записи `session.json` показывает число, совпадающее с числом закрытых сегментов на диске
+#### 8.2 `segment_count` in `session.json` is never updated during recording
+Before the crash the manifest held `"segment_count": 0` while 12 real segments were on disk. Today
+this does not break recovery (which scans the FS), but the field is useless and misleading: had
+recovery trusted it, it would have concluded there were no segments and lost the whole recording.
+- [ ] Update `segment_count` in `session.json` as each segment is closed (atomic write, no races with audio writing)
+- [ ] Recovery **must not trust** the counter as the source of truth — the FS stays primary (the counter is informational/diagnostic only)
+- [ ] Unit tests: the counter grows as segments are closed; when the counter and the FS disagree, recovery follows the FS
+- [ ] Acceptance: while recording, `session.json` shows a number matching the count of closed segments on disk
 
-#### 8.3 `duration` завышается на старт-латентность SCStream
-У штатно остановленной записи `info.md` показал `00:00:29` при фактическом аудио `23.66 с` (~5.3 с
-расхождения). Причина не в потере данных, а в том, что длительность считается по wall-clock
-(старт→стоп), тогда как `SCStream` поднимается не мгновенно и первые секунды звук ещё не идёт.
-(Подтверждение: при восстановлении `duration` = 165 с = 11×15 — совпадает с аудио.)
-- [ ] Считать `duration` для `info.md` из **фактической длительности собранного аудио**, а не по часам
-- [ ] Юнит-тест: расчёт длительности из длин сегментов/аудио, а не из интервала времени
-- [ ] Приёмка: `duration` в `info.md` совпадает с `ffprobe` по `combined.wav` (допуск ≤ 0.5 с)
+#### 8.3 `duration` is overstated by SCStream startup latency
+A cleanly stopped recording reported `info.md duration: 00:00:29` with `23.66 s` of actual audio
+(~5.3 s off). The cause is not data loss: duration is computed from wall-clock (start→stop) while
+`SCStream` does not come up instantly and no audio flows for the first seconds.
+(Confirmation: on recovery `duration` = 165 s = 11×15 — it matches the audio.)
+- [ ] Compute `duration` for `info.md` from the **actual duration of the assembled audio**, not from the clock
+- [ ] Unit test: duration computed from segment/audio lengths rather than from a time interval
+- [ ] Acceptance: `duration` in `info.md` matches `ffprobe` on `combined.wav` (tolerance ≤ 0.5 s)
+
+### Task 9: Translate UI and code to English
+
+The project convention is **English only** (see `CLAUDE.md`): UI, code, comments, docs, git.
+Docs, skills, scripts and git history have already been converted. What remains is the app itself:
+user-facing strings and Russian comments left in the Swift sources.
+
+- [ ] Translate all user-facing UI strings to English (menu bar, buttons, statuses, banners, errors, notifications). Known Russian strings include: "Готов к записи", "Начать запись", "Заголовок", "Последние записи", "восстановлена"/"сохранена", "Настройки", "Открыть архив", "Выход", "Восстановлена 1 прерванная запись", "Запись сохранена"
+- [ ] Translate Russian comments in the Swift sources to English (e.g. the header comment in `Package.swift`); keep the technical detail, do not drop it
+- [ ] Translate the generated archive file `~/Acta/CLAUDE.md` written by `MeetingStore` to English
+- [ ] Error/log messages produced by the code (including `StartupFailure.userMessage`) must be English and actionable
+- [ ] Unit tests that assert on Russian strings must be updated accordingly
+- [ ] Acceptance: `grep -rP '[\x{0400}-\x{04FF}]' Sources/ Tests/ Package.swift` returns nothing; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green

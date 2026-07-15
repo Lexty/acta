@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Собрать и запустить Acta.app.
+# Build and launch Acta.app.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

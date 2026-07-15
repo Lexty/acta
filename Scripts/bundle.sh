@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Сборка Acta.app через SwiftPM без полного Xcode (только Command Line Tools).
-# Шаги: swift build -c release → упаковка в .app → ad-hoc codesign со стабильной идентичностью.
+# Build Acta.app with SwiftPM without full Xcode (Command Line Tools only).
+# Steps: swift build -c release -> assemble the .app -> ad-hoc codesign with a stable identity.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,11 +15,11 @@ echo "==> swift build -c release"
 swift build -c release
 
 if [[ ! -x "$BIN" ]]; then
-  echo "ошибка: не найден бинарь $BIN" >&2
+  echo "error: binary not found at $BIN" >&2
   exit 1
 fi
 
-echo "==> сборка бандла $APP_NAME.app"
+echo "==> assembling $APP_NAME.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
@@ -33,5 +33,5 @@ codesign --force --sign - \
   --entitlements "$ROOT/Resources/Acta.entitlements" \
   "$APP_DIR"
 
-echo "==> готово: $APP_DIR"
+echo "==> done: $APP_DIR"
 codesign --verify --verbose=2 "$APP_DIR" || true

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Настоящий прогон юнит-тестов в окружении ТОЛЬКО с Command Line Tools.
+# Real unit-test run in a Command Line Tools ONLY environment.
 #
-# `swift test` тут лишь СОБИРАЕТ тестовый бандл, но НЕ исполняет его (нет хост-утилиты `xctest`),
-# поэтому падающий тест даёт exit 0. Реальные тесты (swift-testing) прогоняем через
-# executable-раннер ActaTestRunner: он падает с ненулевым кодом при первой же ошибке.
+# Here `swift test` merely COMPILES the test bundle but does NOT execute it (there is no `xctest`
+# host utility), so a failing test still exits 0. Real tests (swift-testing) run through the
+# ActaTestRunner executable: it exits non-zero on the first failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# SwiftLint-обёртка для машины с ТОЛЬКО Command Line Tools (без полного Xcode).
-# Homebrew-бинарь SwiftLint не находит sourcekitdInProc.framework → указываем путь загрузчику.
-# Также трактуем «нет .swift файлов» как успех (важно на ранних стадиях, пока кода мало).
+# SwiftLint wrapper for a machine with Command Line Tools ONLY (no full Xcode).
+# The Homebrew SwiftLint binary cannot find sourcekitdInProc.framework, so we point the loader at it.
+# "No lintable files" is also treated as success (matters early on, while there is little code).
 set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 export DYLD_FRAMEWORK_PATH="$(xcode-select -p)/usr/lib:${DYLD_FRAMEWORK_PATH:-}"
@@ -9,7 +9,7 @@ export DYLD_FRAMEWORK_PATH="$(xcode-select -p)/usr/lib:${DYLD_FRAMEWORK_PATH:-}"
 out="$(swiftlint lint --quiet "$@" 2>&1)" && code=0 || code=$?
 
 if printf '%s' "$out" | grep -q "No lintable files found"; then
-  echo "swiftlint: .swift файлов пока нет — пропуск"
+  echo "swiftlint: no .swift files yet — skipping"
   exit 0
 fi
 
