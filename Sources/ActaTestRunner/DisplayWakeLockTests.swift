@@ -10,7 +10,11 @@ private func pmsetAssertions() -> String {
     proc.arguments = ["-g", "assertions"]
     let pipe = Pipe()
     proc.standardOutput = pipe
-    proc.standardError = Pipe()
+    // `nullDevice`, not a second `Pipe()`: nothing ever reads stderr, so a pipe there is a buffer
+    // that can only fill — and one that filled would deadlock `waitUntilExit()` for the exact reason
+    // stdout is drained early below. `pmset` writes nothing to stderr today; this makes that not
+    // matter.
+    proc.standardError = FileHandle.nullDevice
     // Read before waiting: `pmset` output is small, but a pipe that fills while we block in
     // `waitUntilExit()` deadlocks, and a test that hangs forever is worse than one that fails.
     guard (try? proc.run()) != nil else { return "" }
@@ -246,6 +250,11 @@ struct DisplayWakeLockTests {
 
         #expect(activity.endCount == 1, "stop() left the display assertion held — the machine would never sleep")
         #expect(!lock.isHeld)
+        // This session never started, so `stop()` must not leave a marker behind. Inventing one would
+        // be a `status=recording` folder with no segments, which `Recovery` reads as an interrupted
+        // recording and retries — failing — on every launch for the rest of the archive's life.
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(SessionManifest.fileName).path),
+                "stop() on a session that never started wrote a marker — recovery would retry this folder forever")
     }
 
     @Test

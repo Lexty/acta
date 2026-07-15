@@ -50,6 +50,9 @@ public final class RecordingSession: @unchecked Sendable {
     /// When the recording started — kept so that a `session.json` lost mid-recording can be rebuilt
     /// on stop with the real start time instead of an invented one.
     private var startedAt = Date()
+    /// Whether `start()` ever confirmed a capture. Gates `stop()`: without it, stopping a session
+    /// that never started would *write* a marker rather than find one — see `stop()`.
+    private var didStart = false
 
     public init(directory: URL,
                 settings: RecordingSettings = .default,
@@ -108,6 +111,7 @@ public final class RecordingSession: @unchecked Sendable {
         }
 
         confirmed = true
+        didStart = true
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
         }
@@ -142,6 +146,19 @@ public final class RecordingSession: @unchecked Sendable {
         // Wait for the counter updates already sitting in the queue: otherwise a late one would land
         // on top of the final marker, turning `done` back into `recording`.
         manifestQueue.sync {}
+
+        // A session that never started has no marker to finalize, and must not gain one. The
+        // `store.read` fallback below exists to rebuild a `session.json` lost *mid-recording*; on a
+        // session that never ran there is nothing to rebuild, so it would invent a `recording`
+        // marker instead, assembly would fail on the empty folder leaving that status untouched, and
+        // the write at the end would hand recovery a phantom interrupted recording to retry on every
+        // launch, forever (`Recovery` treats any `status=recording` folder as interrupted).
+        // `RecordingController` cannot reach this — both call sites gate on `phase == .recording`,
+        // which only a confirmed `start()` sets — but `stop()` is public, so the invariant is
+        // enforced here rather than left to the caller. Placed *below* the release above, not at the
+        // top of `stop()`: an early return would skip that release, and the test that proves `stop()`
+        // gives the assertion back drives exactly this path.
+        guard didStart else { return nil }
 
         var manifest = store.read(from: directory)
             ?? SessionManifest(status: .recording, startedAt: startedAt,

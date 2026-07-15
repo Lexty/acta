@@ -1,3 +1,4 @@
+import ActaKit
 import Foundation
 
 /// Holds the display (and the system) awake for exactly as long as a recording runs.
@@ -20,12 +21,12 @@ import Foundation
 /// corner or an explicit Sleep still tears the stream down, and for those the watchdog remains the
 /// only defence — it stops the recording and says so.
 ///
-/// Lives in `ActaKit` for the historical reason `SegmentRepair` does: when both were written, the
-/// test runner depended on `ActaKit` alone, so nothing else was reachable from a test. Since Task 11
-/// extracted `ActaRuntime` that constraint is gone — new I/O-touching code belongs there — but this
-/// type touches no file system, so it stays. The question worth testing is "was the assertion
-/// actually taken, and actually released again": a leaked assertion keeps the machine awake forever
-/// and nobody knows why. `DisplayWakeLockTests` asks `pmset -g assertions` rather than trust `isHeld`.
+/// Lives in `ActaRuntime`, not `ActaKit`: `beginActivity` is an XPC call into `powerd`, which is I/O
+/// by any honest reading of the rule, and the only consumer is `RecordingSession` next door. The
+/// question worth testing is "was the assertion actually taken, and actually released again" — a
+/// leaked assertion keeps the machine awake forever and nobody knows why — and `DisplayWakeLockTests`
+/// answers it by asking `pmset -g assertions` rather than trusting `isHeld`. That the answer can only
+/// come from the OS *is* the proof this is not pure logic.
 ///
 /// Thread-safe: `token` is guarded by a lock. The stated invariant used to be "`RecordingSession`
 /// calls acquire/release from the main actor", which is **false** — `RecordingSession.start`/`stop`
@@ -39,9 +40,12 @@ public final class DisplayWakeLock: @unchecked Sendable {
     /// that the answer to "what is keeping this Mac awake?" is one line long.
     public static let reason = "\(AppInfo.name) is recording audio"
 
-    /// The activity token, `nil` when nothing is held. Its presence *is* the state — which is what
-    /// makes `acquire`/`release` idempotent: a watchdog stream restart must neither stack a second
-    /// assertion nor drop the one already held.
+    /// The activity token, `nil` when nothing is held. Its presence *is* the state, which is what
+    /// makes `acquire`/`release` idempotent. Defensive rather than required: no caller acquires twice
+    /// today — `RecordingSession.start()` is the only `acquire()` call site, and the watchdog restarts
+    /// the stream inside `AudioRecorder` without ever touching the lock. The invariant is kept because
+    /// a second acquire that stacked an assertion would leave one held forever after `stop()`, and a
+    /// lock is cheaper than relying on that call site staying unique.
     private var token: NSObjectProtocol?
     private let lock = NSLock()
     private let begin: (String) -> NSObjectProtocol

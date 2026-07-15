@@ -53,15 +53,15 @@ The conversation with the user may be in Russian; the repository must not be.
 ## Project structure
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`. Anything worth testing goes here. Two deliberate exceptions, both **predating
-  `ActaRuntime`**, when a test could reach nothing else: `SegmentRepair` touches the FS, but it is the
-  code that rescues crashed audio; `DisplayWakeLock` touches `ProcessInfo`, and "was the assertion
-  really taken, and really released" is answerable only by asking the OS (`pmset -g assertions`).
-  That rationale has expired — since `ActaRuntime` exists, new I/O-touching code that needs a test
-  belongs there, not here. Do not cite these two as precedent for adding I/O to `ActaKit`.
+  `SessionManifest`. Anything worth testing goes here. One deliberate exception, **predating
+  `ActaRuntime`**, from when a test could reach nothing else: `SegmentRepair` touches the FS, but it
+  is the code that rescues crashed audio. That rationale has expired — since `ActaRuntime` exists,
+  I/O-touching code that needs a test belongs there, not here. Do not cite `SegmentRepair` as
+  precedent for adding I/O to `ActaKit`.
 - `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
   `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
-  `MeetingStore` — `SCStream`, FS and process I/O. Kept thin; decisions are delegated to ActaKit.
+  `MeetingStore`, `DisplayWakeLock` — `SCStream`, FS, `powerd` and process I/O. Kept thin; decisions
+  are delegated to ActaKit.
   It is a **library**, not part of the executable, because **SwiftPM cannot import an executable
   target**: while this code lived in `Sources/Acta`, nothing above pure logic could be reached from a
   test at all. A library target may import AppKit/SwiftUI, so the AppKit-touching types live here too.
