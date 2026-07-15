@@ -20,16 +20,24 @@ final class SegmentWriter {
 
     private let log: Logger
 
-    /// Called when each segment is closed — from the track's queue, synchronously. This way
-    /// `session.json` learns about a new segment exactly when it appears on disk (Task 8.2); the
-    /// subscriber must not block the queue (writing the marker goes to its own queue, see
-    /// `RecordingSession`), otherwise it would hang on the hot audio path.
+    /// Called once a segment has finished being written — from AVFoundation's completion handler, so
+    /// that `session.json` learns about a segment exactly when it becomes a valid file on disk
+    /// (Task 8.2), not when its write was merely started. The subscriber must be safe to call from an
+    /// arbitrary queue and must not block it.
     var onSegmentFinalized: (@Sendable () -> Void)?
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var segmentIndex = 0
     private var segmentStart: CMTime = .invalid
+
+    /// Set by `finish()` — the track is closed for good. A buffer that `SCStream` delivers after
+    /// `stopCapture()` has returned would otherwise find `writer == nil` and open a segment on the
+    /// **same** index, whose `removeItem(at:)` deletes the WAV that `finish()` just finalized: the
+    /// tail of the recording is silently replaced by an unfinalizable stub while the marker still
+    /// flips to `done`. Unlike `finishAndAdvance()` (a restart, where recording continues on the next
+    /// index) there is nothing left to record here, so the buffer is simply dropped.
+    private var isFinished = false
 
     /// Finalizations started by a rotation/restart that have not completed yet. A segment file is
     /// valid only after its completion handler has run, so `finish()` (before the assembly) waits
@@ -65,6 +73,7 @@ final class SegmentWriter {
 
     /// Write the next buffer. Opens the first segment on the first buffer, rotates by time.
     func append(_ sampleBuffer: CMSampleBuffer) {
+        guard !isFinished else { return }
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard pts.isNumeric else { return }
@@ -110,6 +119,7 @@ final class SegmentWriter {
     /// file is valid only once its completion handler has run. Otherwise `ffmpeg` would read a
     /// segment that is still being written — the tail of the recording would be lost.
     func finish() {
+        isFinished = true
         finalizeCurrent()
         // We wait with a cap: `finish()` is called synchronously from the track's queue inside
         // `stop()`, and a `finishWriting` hung inside AVFoundation would, without a timeout, jam the
@@ -208,8 +218,17 @@ final class SegmentWriter {
         // The completion handler arrives on AVFoundation's internal queue, not on our track's queue,
         // so waiting for the group in `finish()` does not deadlock.
         pendingWrites.enter()
-        writer.finishWriting { [pendingWrites] in pendingWrites.leave() }
-        onSegmentFinalized?()
+        // The subscriber is notified from inside the handler, before `leave()`: the segment only
+        // becomes a valid file once `finishWriting` has completed, so firing the callback here (as it
+        // used to be — right after kicking the write off) would let `session.json` name a segment
+        // that is still being written. Notifying before `leave()` also keeps the ordering `finish()`
+        // relies on: by the time it returns, the counter for the last segment has already been
+        // handed over.
+        let notify = onSegmentFinalized
+        writer.finishWriting { [pendingWrites] in
+            notify?()
+            pendingWrites.leave()
+        }
     }
 
     /// Unified WAV/PCM settings: 48 kHz, stereo, 16 bit. We bring both tracks to the same format so

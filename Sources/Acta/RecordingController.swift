@@ -63,7 +63,10 @@ final class RecordingController: ObservableObject {
     /// Without the flag a second click (or a watchdog firing at that moment) would kick off a second
     /// assembly of the same folder: two `ffmpeg` processes would write the same wav and list files,
     /// up to losing the recording.
-    private var isStopping = false
+    /// `@Published` because `isBusy` (and through it the buttons' disabled state) reads it: on the
+    /// fatal-stall path it is the only thing that changes when the assembly ends, so a plain
+    /// property would leave the button disabled until some other publisher happened to fire.
+    @Published private var isStopping = false
     /// The active start task — `stopAndWait()` awaits it when the app quits, because a start that is
     /// still in flight is already capturing into segments and there is nothing to stop until it has
     /// handed the session over.
@@ -91,15 +94,16 @@ final class RecordingController: ObservableObject {
 
     /// Whether the controller is busy recording or saving — for that time editing the settings and
     /// the title is blocked, and the start button is unavailable.
-    var isBusy: Bool { phase == .recording || phase == .saving }
+    /// `isStopping` counts too, and not only via `.saving`: `handleFatalStall` parks `phase` in
+    /// `.error` while capture stop and the `ffmpeg` assembly still run. Without it the UI would
+    /// offer "Start Recording" there, and the click would die on `start()`'s `!isStopping` guard.
+    var isBusy: Bool { phase == .recording || phase == .saving || isStopping }
 
-    /// Whether the app still has work that must not be cut short by quitting. Wider than `isBusy`:
-    /// the watchdog's fatal-stall path (`handleFatalStall`) parks `phase` in `.error` while capture
-    /// stop and the `ffmpeg` assembly are still running, and terminating then is `kill -9` by
-    /// another name. `isStarting` counts for the same reason: `phase` only reaches `.recording` at
-    /// the end of `performStart`, while `SCStream` is brought up and segments are written several
-    /// seconds earlier — quitting inside that window would abandon an unfinalized segment.
-    var hasWorkInFlight: Bool { isBusy || isStopping || isStarting }
+    /// Whether the app still has work that must not be cut short by quitting. Wider than `isBusy`
+    /// by `isStarting`: `phase` only reaches `.recording` at the end of `performStart`, while
+    /// `SCStream` is brought up and segments are written several seconds earlier — quitting inside
+    /// that window would abandon an unfinalized segment.
+    var hasWorkInFlight: Bool { isBusy || isStarting }
 
     /// The recordings store for the current archive path from the settings. Read on every access so
     /// that a path change in the settings is picked up without a restart (Task 7).
