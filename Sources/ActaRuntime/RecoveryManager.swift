@@ -12,20 +12,24 @@ import os
 public struct RecoveryManager {
     /// What a recovery pass changed in the archive.
     ///
-    /// Two lists rather than one, because the two outcomes need opposite things said about them: a
-    /// folder that assembled holds audio the user can play, whereas one that gave up with nothing
-    /// assembled holds a meeting that exists only as raw segments. Reporting the second as
+    /// Three lists rather than one, because the outcomes need different things said about them: a
+    /// folder that assembled whole holds audio the user can play, whereas one that gave up holds a
+    /// meeting that lives, in part or entirely, only as raw segments. Reporting either give-up as
     /// "recovered" would be false, and not reporting it at all would leave the audio undiscoverable
     /// outside `log show`.
     public struct Outcome: Sendable {
-        /// Folders that now hold at least one assembled track.
+        /// Folders whose every track assembled — nothing was left behind in the segments.
         public var recovered: [URL] = []
+        /// Folders closed over a track that assembled while audio the plan vouched for stayed in the
+        /// segments. Apart from `recovered` because this is the loss that hides: the folder holds a
+        /// wav that plays, so nothing about it looks wrong until the missing track is wanted.
+        public var partial: [URL] = []
         /// Folders closed with their audio still only in the segments: no track assembled, so there
         /// is no wav to play and the segments are the sole copy of the meeting.
         public var unassembled: [URL] = []
 
         /// Whether the pass left the archive as it found it.
-        public var isEmpty: Bool { recovered.isEmpty && unassembled.isEmpty }
+        public var isEmpty: Bool { recovered.isEmpty && partial.isEmpty && unassembled.isEmpty }
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
@@ -82,7 +86,7 @@ public struct RecoveryManager {
                 // on every launch, with every `start()` waiting on it, forever.
                 switch retryOrCloseIncomplete(directory: dir, manifest: manifest) {
                 case .retrying: break
-                case .closedWithTracks: outcome.recovered.append(dir)
+                case .closedWithTracks: outcome.partial.append(dir)
                 case .closedWithoutTracks: outcome.unassembled.append(dir)
                 }
             } catch {
@@ -128,7 +132,8 @@ public struct RecoveryManager {
     private enum IncompleteOutcome {
         /// An attempt was spent; the folder stays `recording` for the next launch.
         case retrying
-        /// The attempts ran out and the folder closed over at least one assembled track.
+        /// The attempts ran out and the folder closed over at least one assembled track, with the
+        /// audio that never assembled left in the segments.
         case closedWithTracks
         /// The attempts ran out and no track assembled: the meeting survives only as segments.
         case closedWithoutTracks
@@ -186,12 +191,13 @@ public struct RecoveryManager {
         // duration fallback in `recover` would then multiply by `segmentSeconds`.
         writeMarker(updated, to: directory)
 
-        // With no track at all the folder would otherwise be byte-for-byte `closeEmpty`'s shape —
-        // terminal, zero duration, no wav — while meaning the opposite: the audio exists, in the
-        // segments, and no launch will ever try to assemble it again. `info.md` is the archive's
-        // metadata and is read without the app (SPEC §6), so that is where the difference has to be
-        // visible; a `log.error` nobody runs `log show` for is not a diagnosis.
-        let note = tracks.isEmpty ? Self.unassembledNote : nil
+        // Every give-up leaves audio behind, so every give-up says so. Neither shape can state it in
+        // the front-matter alone: with no track the folder is byte-for-byte `closeEmpty`'s — terminal,
+        // zero duration, no wav — while meaning the opposite, and with a track it is
+        // indistinguishable from a clean recovery, only short. `info.md` is the archive's metadata
+        // and is read without the app (SPEC §6), so that is where the difference has to be visible;
+        // a `log.error` nobody runs `log show` for is not a diagnosis.
+        let note = tracks.isEmpty ? Self.unassembledNote : Self.partialNote
         updateInfo(in: directory, status: updated.status,
                    durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0,
                    note: note)
@@ -205,6 +211,16 @@ public struct RecoveryManager {
         > **The audio could not be assembled.** Recovery tried \(maxAssemblyAttempts) times and \
         `ffmpeg` never produced a track. The raw segments under `system/` and `mic/` were kept — \
         they are the only copy of this recording.
+        """
+
+    /// What `info.md` says about a meeting that closed over some of its audio. The track that did
+    /// assemble is what makes this worth spelling out: it plays, and the `duration` above is measured
+    /// off it, so nothing in the folder would otherwise hint that the rest is missing.
+    static let partialNote = """
+        > **Part of the audio could not be assembled.** Recovery tried \(maxAssemblyAttempts) times \
+        and `ffmpeg` never placed all of it into a track. What did assemble is in this folder; the \
+        rest exists only in the raw segments under `system/` and `mic/`, which were kept — the \
+        `duration` above is the length of the assembled audio, not of the meeting.
         """
 
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a

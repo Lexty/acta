@@ -153,10 +153,12 @@ public final class RecordingController: ObservableObject {
         let outcome = await Task.detached(priority: .utility) {
             RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
         }.value
-        let recovered = outcome.recovered.count, unassembled = outcome.unassembled.count
-        log.notice("Recovery pass: \(recovered, privacy: .public) recovered, \(unassembled, privacy: .public) unassembled")
-        guard let message = RecoveryReport.message(recovered: recovered,
-                                                   unassembled: unassembled) else { return }
+        let recovered = outcome.recovered.count, partial = outcome.partial.count, unassembled = outcome.unassembled.count
+        log.notice("""
+            Recovery pass: \(recovered, privacy: .public) recovered, \
+            \(partial, privacy: .public) partial, \(unassembled, privacy: .public) unassembled
+            """)
+        guard let message = RecoveryReport.message(recovered: recovered, partial: partial, unassembled: unassembled) else { return }
         recoveredBanner = message.body
         Notifier.notify(title: message.title, body: message.body)
         refresh()

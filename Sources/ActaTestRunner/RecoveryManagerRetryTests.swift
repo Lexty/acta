@@ -197,21 +197,30 @@ func recoveryAssemblesTheHealthyTrackWhenTheOtherCannotBeConcatenated() throws {
     }
 }
 
-/// A give-up that assembled a track reports it as recovered — the archive gained audio the user can
-/// play, and staying silent would leave them to notice by chance.
+/// A give-up that assembled one track is reported as *partial*, not as recovered, and says so in
+/// `info.md` too. This is the loss that hides: `mic.wav` sits there and plays, `status: recovered`
+/// and a duration measured off it read exactly like a clean recovery, and the system audio is left in
+/// the segments with no launch that will ever retry it. Calling that "Recovered 1 interrupted
+/// recording" and stopping there is how the user never learns half the meeting is missing.
 @Test
-func recoveryReportsAClosedFolderAsRecoveredWhenATrackActuallyAssembled() throws {
+func recoveryReportsAClosedFolderAsPartialWhenOnlyOneTrackAssembled() throws {
     try withConcatFailingMeeting { root, directory in
         let manager = RecoveryManager(archiveRoot: root)
         for _ in 1..<RecoveryManager.maxAssemblyAttempts {
             manager.recoverInterruptedSessions()
         }
-        // The closing launch: `mic.wav` assembles, so this folder is worth telling the user about.
+        // The closing launch: `mic.wav` assembles while `system` stays in its segments.
         // Compared by name: the scan walks the archive root, and `/var` resolving to `/private/var`
         // makes the two URLs unequal while naming the same folder.
         let outcome = manager.recoverInterruptedSessions()
-        #expect(outcome.recovered.map(\.lastPathComponent) == [directory.lastPathComponent])
+        #expect(outcome.partial.map(\.lastPathComponent) == [directory.lastPathComponent])
+        #expect(outcome.recovered.isEmpty)
         #expect(outcome.unassembled.isEmpty)
+
+        // And the folder itself carries the warning, for whoever opens it without the app.
+        let info = readInfo(in: directory)
+        #expect(info.contains("Part of the audio could not be assembled"))
+        #expect(info.contains("system/"))
 
         // Terminal by now: the next launch must walk past it rather than report it again.
         #expect(manager.recoverInterruptedSessions().isEmpty)
