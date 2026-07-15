@@ -85,7 +85,7 @@ struct MenuContent: View {
                 banner(controller.recoveredBanner, systemImage: "arrow.clockwise.circle.fill",
                        tint: .orange) { controller.dismissRecoveredBanner() }
             }
-            if controller.phase == .error, !controller.errorMessage.isEmpty {
+            if !controller.errorMessage.isEmpty {
                 banner(controller.errorMessage, systemImage: "exclamationmark.triangle.fill",
                        tint: .red, dismiss: nil)
             }
@@ -144,7 +144,15 @@ struct MenuContent: View {
 
     private var controls: some View {
         HStack {
-            if controller.phase == .saving {
+            if controller.isStarting {
+                // `SCStream` is already capturing into segments here, while `phase` is still `.idle`
+                // (it flips only at the end of `performStart`, after the ~2 s self-check). Showing an
+                // enabled "Start Recording" would be a dead click on a live recording.
+                Button {} label: {
+                    Label("Starting…", systemImage: "record.circle").frame(maxWidth: .infinity)
+                }
+                .disabled(true)
+            } else if controller.isSaving {
                 Button {} label: {
                     Label("Saving…", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)

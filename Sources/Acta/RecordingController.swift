@@ -29,9 +29,9 @@ final class RecordingController: ObservableObject {
     /// Current recording settings (edited in the "Settings" section, saved on change).
     @Published var settings: RecordingSettings
 
-    /// Current phase (idle/recording/error).
     @Published private(set) var phase: Phase = .idle
-    /// Human-readable startup self-diagnosis error (empty when there is no error).
+    /// Human-readable error for the banner (empty when there is none). Drives the banner on its own,
+    /// independently of `phase` — not every error is a recording-lifecycle error (see `openArchive`).
     @Published private(set) var errorMessage: String = ""
     /// Recovery banner shown after a failure (empty when there was nothing to recover).
     @Published private(set) var recoveredBanner: String = ""
@@ -53,19 +53,18 @@ final class RecordingController: ObservableObject {
     private var currentSource: String = ""
     private var startedAt: Date?
     private let timer = ElapsedTimer()
-    /// Whether an asynchronous start is in flight right now (before the transition to `.recording`).
-    /// Guards against a double click: `phase` only becomes `.recording` at the end of `performStart`
-    /// (after the ~2 s self-check), so without this flag a second click would bring up a second
-    /// session and the first one would leak.
-    private var isStarting = false
-    /// Whether an asynchronous stop is in flight right now. Symmetric to `isStarting`: `phase` only
-    /// becomes `.idle` at the end of `performStop` — after the assembly, which takes seconds.
-    /// Without the flag a second click (or a watchdog firing at that moment) would kick off a second
-    /// assembly of the same folder: two `ffmpeg` processes would write the same wav and list files,
-    /// up to losing the recording.
-    /// `@Published` because `isBusy` (and through it the buttons' disabled state) reads it: on the
-    /// fatal-stall path it is the only thing that changes when the assembly ends, so a plain
-    /// property would leave the button disabled until some other publisher happened to fire.
+    /// Whether an asynchronous start is in flight (before the transition to `.recording`). Guards
+    /// against a double click: `phase` only becomes `.recording` at the end of `performStart` (after
+    /// the ~2 s self-check), so without this flag a second click would bring up a second session and
+    /// leak the first. `@Published` because `isBusy` and the button read it: `SCStream` is already
+    /// writing segments seconds before `phase` reaches `.recording`.
+    @Published private(set) var isStarting = false
+    /// Whether an asynchronous stop is in flight. Symmetric to `isStarting`: `phase` only becomes
+    /// `.idle` at the end of `performStop` — after the assembly, which takes seconds. Without the flag
+    /// a second click (or a watchdog firing then) would kick off a second assembly of the same folder:
+    /// two `ffmpeg` processes writing the same wav and list files, up to losing the recording.
+    /// `@Published` because `isBusy` reads it: on the fatal-stall path it is the only thing that
+    /// changes when the assembly ends, so a plain property would leave the button stuck disabled.
     @Published private var isStopping = false
     /// The active start task — `stopAndWait()` awaits it when the app quits, because a start that is
     /// still in flight is already capturing into segments and there is nothing to stop until it has
@@ -92,18 +91,17 @@ final class RecordingController: ObservableObject {
     /// Whether a recording is in progress right now.
     var isRecording: Bool { phase == .recording }
 
-    /// Whether the controller is busy recording or saving — for that time editing the settings and
-    /// the title is blocked, and the start button is unavailable.
-    /// `isStopping` counts too, and not only via `.saving`: `handleFatalStall` parks `phase` in
-    /// `.error` while capture stop and the `ffmpeg` assembly still run. Without it the UI would
-    /// offer "Start Recording" there, and the click would die on `start()`'s `!isStopping` guard.
-    var isBusy: Bool { phase == .recording || phase == .saving || isStopping }
+    /// Whether the recording is being finalized. `isStopping` and not just `phase`: `handleFatalStall`
+    /// parks `phase` in `.error` while the stop and the `ffmpeg` assembly still run.
+    var isSaving: Bool { phase == .saving || isStopping }
 
-    /// Whether the app still has work that must not be cut short by quitting. Wider than `isBusy`
-    /// by `isStarting`: `phase` only reaches `.recording` at the end of `performStart`, while
-    /// `SCStream` is brought up and segments are written several seconds earlier — quitting inside
-    /// that window would abandon an unfinalized segment.
-    var hasWorkInFlight: Bool { isBusy || isStarting }
+    /// Whether the controller is busy starting, recording or saving — for that time editing the
+    /// settings and the title is blocked, and the start button is unavailable. The two flags count
+    /// too: each brackets a window where `phase` does not say "busy" while a session is live.
+    var isBusy: Bool { phase == .recording || phase == .saving || isStopping || isStarting }
+
+    /// Work that must not be cut short by quitting. Identical to `isBusy`; only `isBusy` is UI.
+    var hasWorkInFlight: Bool { isBusy }
 
     /// The recordings store for the current archive path from the settings. Read on every access so
     /// that a path change in the settings is picked up without a restart (Task 7).
@@ -363,6 +361,7 @@ final class RecordingController: ObservableObject {
         log.info("Recording stopped and saved")
 
         phase = .idle
+        errorMessage = ""
         title = ""
         refresh()
     }
@@ -374,13 +373,14 @@ final class RecordingController: ObservableObject {
         ArchiveOpener.reveal(url)
     }
 
-    /// Open the archive root in Finder ("Open Archive").
+    /// Open the archive root in Finder ("Open Archive"). Sets `errorMessage` but never `phase`:
+    /// parking `phase` in `.error` mid-recording would no-op `stop()`'s `phase == .recording` guard
+    /// and drop `hasWorkInFlight`, so Quit would kill the process without finalizing the segments.
     func openArchive() {
         do {
             try ArchiveOpener.openArchive(store: store)
         } catch {
             errorMessage = "Could not open the archive: \(error.localizedDescription)"
-            phase = .error
             log.error("Could not open the archive: \(error.localizedDescription, privacy: .public)")
         }
     }
