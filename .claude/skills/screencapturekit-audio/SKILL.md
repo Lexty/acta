@@ -40,17 +40,22 @@ config.width = 2; config.height = 2
 In `SCStreamOutput.stream(_:didOutputSampleBuffer:of:)`, route by `of type`:
 `.audio` → system writer, `.microphone` → mic writer, `.screen` → ignore.
 
-## Combined file
+## Two tracks, always — no mix in the pipeline
 
-Besides the separate tracks, build a combined `combined.wav` (a mix of the two) via `ffmpeg`:
+`system.wav` and `mic.wav` are **both always produced** and are the source of truth: separate tracks
+give "me vs. them" attribution for free, and for transcription two files beat one mixed file.
+
+A mix (`combined.wav`) is **derived data** and is deliberately **not** part of the recording
+pipeline — it costs a full extra copy, collapses the attribution, and was historically the most
+fragile branch of assembly. It is produced only on demand ("Export mix"), for the single case where
+it helps — listening back to a whole meeting:
 ```
 ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest combined.wav
 ```
-Keep the raw `system.wav`/`mic.wav` — separate tracks enable future "me vs. them" attribution.
 
 **Important:** do not record into a single file — write **segments** instead; see the
-`crash-safe-recording` skill (streaming writes, recovery after a crash). The final
-`system/mic/combined.wav` are assembled from segments on a clean stop or during recovery.
+`crash-safe-recording` skill (streaming writes, recovery after a crash). The final `system.wav` and
+`mic.wav` are assembled from segments on a clean stop or during recovery.
 
 ## References
 - captureMicrophone: https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturemicrophone

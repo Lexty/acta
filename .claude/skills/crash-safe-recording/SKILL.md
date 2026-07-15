@@ -31,7 +31,7 @@ launch means the recording was interrupted abnormally.
 At app startup scan the archive; for every folder with `status=recording`:
 1. Take the valid segments in order (a corrupt/unfinished last one — **repair it from the actual file
    size if it holds data; drop it only if it does not**. Never fail the whole recovery over it).
-2. Assemble via `ffmpeg` concat → `system.wav`/`mic.wav`, mix → `combined.wav`.
+2. Assemble via `ffmpeg` concat → `system.wav` and `mic.wav` (both, always — no mix on this path).
 3. Set `status=recovered`, notify the user.
 Keep the segment-selection logic a **pure function** and cover it with unit tests.
 
@@ -50,5 +50,6 @@ Keep the segment-selection logic a **pure function** and cover it with unit test
 
 ## ffmpeg
 - Concatenate segments: `ffmpeg -f concat -safe 0 -i list.txt -c copy system.wav`
-- Mix two tracks: `ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest combined.wav`
+- Mixing is **not** part of the pipeline (see `screencapturekit-audio`): both tracks are always kept
+  separate, and a mix is only produced on demand by the "Export mix" action.
 - Keep command-argument construction in pure functions and cover it with unit tests.

@@ -222,3 +222,34 @@ Design:
 
 Synergy with Task 10: once this lands, the mic-activity notification can name the meeting
 ("Record 'Weekly sync'?") instead of just the app. Wire it up if both tasks are done.
+
+### Task 12: Always two tracks — drop combined from the pipeline, mix on demand
+
+This task **removes** code. `combined.wav` is derived data and it costs three ways:
+
+1. **A full extra copy on disk** — a 100 s recording is ~19 MB per track; the mix adds ~19 MB more
+   for something `ffmpeg` reproduces in seconds.
+2. **It is the most fragile path in assembly.** Nearly every bug from the review history clusters
+   around the mix: "mix impossible was indistinguishable from mix failed", "combined is built via
+   intermediate wavs even when system/mic are deselected", "do not delete the only copies of audio
+   when the mix failed". Removing the mix deletes that whole class of failures.
+3. **It destroys the attribution the two tracks exist for.** Separate `system`/`mic` give
+   "me vs. them" for free; the mix collapses it back into a single blur. For transcription two files
+   are strictly better — run each one and you know who said what.
+
+The only honest use for a mix is *listening back* to a meeting, where two files are awkward. That is
+an on-demand need, not a reason to write a third file on every recording.
+
+Decided (agreed with the user): **always write both tracks**; no mix in the recording pipeline;
+provide an on-demand "Export mix" action. The track-selection setting disappears with it.
+
+- [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`. Remove the mix from the pipeline and with it the special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
+- [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `segmentSeconds`, `archivePath`, `deleteSegmentsAfterAssembly`
+- [ ] **Settings migration:** existing `UserDefaults` hold JSON with the removed keys (verified: `{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,...}`). Decoding must ignore unknown keys and keep the surviving ones — no crash, no reset to defaults. Cover with a unit test using that exact legacy JSON
+- [ ] `MenuContent`: drop the "Save tracks" section from Settings; add a per-recording **"Export mix"** action to the recordings list (next to "Open folder")
+- [ ] `ExportMix` in `Acta`: run `ffmpeg` `amix=inputs=2:duration=longest` over `system.wav`/`mic.wav` → `combined.wav` in the same folder. Reuse `FFmpeg.mixArgs` and `SegmentAssembler.locateFFmpeg()`. Handle honestly: `ffmpeg` missing → the existing actionable error; a track file missing → clear message; `combined.wav` already present → overwrite. Run off the main actor; never block the UI
+- [ ] Recovery path: assemble both tracks the same way, no mix (`RecoveryManager` must not gain a mix branch)
+- [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` + `mic.wav`; `combined.wav` appears only if exported on demand
+- [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (it is still used by Export mix)
+- [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces exactly `system.wav` + `mic.wav` and no `combined.wav`; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): record → only two files appear; press "Export mix" → a valid `combined.wav` is produced (`ffprobe` duration > 0, non-silent); existing recordings that already contain `combined.wav` are left untouched

@@ -40,6 +40,7 @@ everything builds without full Xcode.
 | Disk writes | **streaming, ~10–15 s segments** (each a valid file) | a crash loses ≤ one segment |
 | Fault tolerance | `session.json` + recovery on launch (segment assembly) | survives restart/crash |
 | Self-diagnosis | verify data flow at start + watchdog + auto-heal | never a "silent" recording |
+| Tracks | **always two**: `system.wav` + `mic.wav`; no mix in the pipeline | separate tracks give "me vs. them" attribution; a mix is derived data and the most fragile assembly path |
 | Storage | one folder per recording: audio + `session.json` + `info.md` | returnable, agent-friendly |
 
 ## 4. Technical coordinates
@@ -50,9 +51,10 @@ everything builds without full Xcode.
 - **Crash-safe writing** (see the `crash-safe-recording` skill): write **short segments**, each
   finalised into a valid file; flush often; never buffer the whole recording in memory.
   Gotcha: an unfinalised `AVAssetWriter` file is usually corrupt after a hard crash — hence segments.
-- **Assembly/mix** via `ffmpeg`:
-  - concatenate a track's segments → `system.wav`, `mic.wav`;
-  - mix both → `combined.wav` (`amix=inputs=2:duration=longest`).
+- **Assembly** via `ffmpeg`: concatenate each track's segments → `system.wav`, `mic.wav`.
+  Both tracks are always produced; there is **no mix in the pipeline**. A mix (`combined.wav`,
+  `amix=inputs=2:duration=longest`) is produced only on demand via the "Export mix" action, for the
+  one case where it helps — listening back to a meeting as a whole.
 - **Permissions (TCC):** Microphone (`NSMicrophoneUsageDescription`), Screen Recording
   (runtime; status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`).
 
@@ -82,8 +84,9 @@ acta/
 `~/Acta/YYYY-MM-DD_HHMM__<slug>/`:
 - While recording: `system/NNNN.wav`, `mic/NNNN.wav` (segments) + `session.json`
   (`status: recording|done|recovered`, `started_at`, config, segment count).
-- After a clean stop or recovery: `system.wav`, `mic.wav`, `combined.wav`; segments are deleted or
-  kept, per settings.
+- After a clean stop or recovery: **`system.wav` and `mic.wav`, always both**; segments are deleted
+  or kept, per settings. `combined.wav` is **not** produced automatically — only by the on-demand
+  "Export mix" action, when you want to listen to the meeting as a whole.
 - `info.md` — YAML front-matter: `title, date, source, duration, status`.
 - `~/Acta/CLAUDE.md` — describes the archive as working context for the user's Claude Code.
 
