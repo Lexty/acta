@@ -67,5 +67,7 @@ not survive it.
 ## ffmpeg
 - Concatenate segments: `ffmpeg -f concat -safe 0 -i list.txt -c copy system.wav`
 - Mixing is **not** part of the pipeline (see `screencapturekit-audio`): both tracks are always kept
-  separate, and a mix is only produced on demand by the "Export mix" action.
+  separate, and no mix is produced at all — an on-demand "Export mix" action is backlog, not code.
+- `-xerror` on the concat: without it `ffmpeg` writes a short file and **exits 0** when a segment
+  fails to demux, and the caller then deletes the segments that held the missing audio.
 - Keep command-argument construction in pure functions and cover it with unit tests.

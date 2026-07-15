@@ -22,8 +22,14 @@ public enum FFmpeg {
     ///
     /// `-f concat -safe 0 -i list.txt -c copy output` — a fast assembly of segments that share the
     /// same format. `-y` overwrites an existing output (which matters during recovery).
+    ///
+    /// `-xerror` is the load-bearing flag: on a segment it fails to demux, `ffmpeg` logs the error,
+    /// writes the audio it did manage to read and **exits 0** (measured). Without `-xerror` that
+    /// reads as a clean assembly — the caller marks the meeting `done` and deletes the segments,
+    /// which were the only copy of the part that never made it into the track. Failing loudly keeps
+    /// the segments and lets recovery retry.
     public static func concatArgs(listPath: String, outputPath: String) -> [String] {
-        ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
+        ["-y", "-xerror", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
     }
 
     /// Arguments that mix the two tracks (system + microphone) into a combined file.

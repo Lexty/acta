@@ -10,11 +10,6 @@ import os
 /// `system.wav`/`mic.wav` (the unfinalized last segment is dropped) and moves the marker to
 /// `status=recovered`.
 public struct RecoveryManager {
-    /// The outcome of recovering one folder — for notifying the user (Task 6).
-    public struct Recovered: Sendable {
-        public var directory: URL
-    }
-
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
     private let fileManager = FileManager.default
     private let store = SessionManifestStore()
@@ -28,24 +23,24 @@ public struct RecoveryManager {
     }
 
     /// Scan the archive and recover every interrupted recording. An error in one folder does not
-    /// affect the others (isolated in a `do/catch`). Returns the list of what was recovered.
+    /// affect the others (isolated in a `do/catch`). Returns the folders that were recovered.
     @discardableResult
-    public func recoverInterruptedSessions() -> [Recovered] {
+    public func recoverInterruptedSessions() -> [URL] {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ) else {
             return []
         }
 
-        var recovered: [Recovered] = []
+        var recovered: [URL] = []
         for dir in dirs {
             let isDir = (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             guard isDir, let manifest = store.read(from: dir), Recovery.needsRecovery(manifest) else {
                 continue
             }
             do {
-                let result = try recover(directory: dir, manifest: manifest)
-                recovered.append(result)
+                try recover(directory: dir, manifest: manifest)
+                recovered.append(dir)
             } catch SegmentAssembler.AssembleError.noSegments {
                 // There is nothing to salvage and never will be: the crash managed to create the
                 // marker, but not a single valid segment was left. Leaving `recording` would doom
@@ -65,7 +60,7 @@ public struct RecoveryManager {
     }
 
     /// Recover a single folder: assemble the surviving segments, mark it `recovered`.
-    private func recover(directory: URL, manifest: SessionManifest) throws -> Recovered {
+    private func recover(directory: URL, manifest: SessionManifest) throws {
         log.info("Recovering an interrupted recording: \(directory.lastPathComponent, privacy: .public)")
         // During recovery we do not delete the segments: we keep the raw material in case the
         // assembly turns out to have problems.
@@ -81,8 +76,6 @@ public struct RecoveryManager {
         let duration = result.durationSeconds.map { max(0, Int($0.rounded())) }
             ?? (result.segmentCount * manifest.segmentSeconds)
         updateInfo(in: directory, status: updated.status, durationSeconds: duration)
-
-        return Recovered(directory: directory)
     }
 
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a

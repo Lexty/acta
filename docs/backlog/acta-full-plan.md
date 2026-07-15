@@ -229,17 +229,26 @@ This task **removes** code. `combined.wav` is derived data and it costs three wa
 The only honest use for a mix is *listening back* to a meeting. That is an on-demand need, not a
 reason to write a third file on every recording.
 
-- [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`. Remove the mix from the pipeline and with it the special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
-- [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `segmentSeconds`, `archivePath`, `deleteSegmentsAfterAssembly`. No migration needed for the removed keys beyond ignoring unknown ones
+> ⚠️ **The removal half of this task already landed** as Task 12 of `docs/plans/acta.md` (commit
+> `2f1a816`), which was carved out of here for an unattended run. What is left below is the
+> **Export mix** feature — the "mix on demand" half. Do **not** re-derive the deletion checkboxes
+> from this list: the mix is already gone from the pipeline, and a literal reading of the struck
+> items would re-add it. `FFmpeg.mixArgs` and its tests were deliberately kept for this task.
+>
+> Landed as Task 12: ~~the `SegmentAssembler` mix removal and its deletion guards~~;
+> ~~`RecordingSettings`/`TrackSelection` removal~~; ~~the "Save tracks" Settings section~~;
+> ~~the recovery path~~; ~~the generated `~/Acta/CLAUDE.md`~~ (new archives only — an existing
+> `CLAUDE.md` is never rewritten, by design); ~~the test updates~~; ~~the identifier grep~~ — which
+> must be scoped to `Sources/Acta Sources/ActaRuntime Sources/ActaKit`, since the decode-only
+> migration test legitimately carries the old keys as literal JSON.
+
 - [ ] **Define the shared `ProcessRunner` seam here** (protocol + real implementation); Task 11 adopts it for fakes — do **not** introduce a second runner abstraction later. Contract must cover: an **explicitly resolved executable path** (resolution stays in `locateFFmpeg()` and is injectable), arguments, working directory, **bounded** stdout/stderr capture, **exit status vs termination by signal**, a **timeout driven by the injected scheduler** (not wall time), terminate → grace interval → force kill, cancellation, and **guaranteed child reaping**
-- [ ] `MenuContent`: drop the "Save tracks" section from Settings; add a per-recording **"Export mix"** action to the recordings list (next to "Open folder")
+- [ ] `MenuContent`: add a per-recording **"Export mix"** action to the recordings list (next to "Open folder"). The "Save tracks" section is already gone (Task 12)
 - [ ] `ExportMix` in `Acta`: `ffmpeg` `amix=inputs=2:duration=longest` over `system.wav`/`mic.wav` → `combined.wav`. Reuse `FFmpeg.mixArgs`. Write to a **temp file and rename atomically** — a failed or killed `ffmpeg` must never leave a plausible-looking `combined.wav`. `ffmpeg` missing → the existing actionable error; a track missing → clear message; an existing `combined.wav` → replaced only on success. Off the main actor via the `ProcessRunner` seam
 - [ ] Export guards: refuse to run against a folder whose session is not `done`/`recovered`; snapshot and re-validate input identity (size + mtime) before commit; serialise per folder. ⚠️ **This serialisation is in-process and provisional**: size+mtime revalidation narrows but does not close the TOCTOU window before rename. Task 13 brings export under the archive lock, and Task 15 under the commit discipline. Do **not** treat Task 10's export as permanently race-safe
-- [ ] Recovery path: assemble both tracks the same way, no mix (`RecoveryManager` must not gain a mix branch)
-- [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` + `mic.wav`; `combined.wav` appears only if exported on demand
-- [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (still used by Export mix)
-- [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces **exactly two final audio files** (`system.wav`, `mic.wav`; the folder of course also holds `session.json`/`info.md`, and segments if retained) and no `combined.wav`; both decode fully with plausible durations; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): record → only the two final audio files; press "Export mix" → a valid `combined.wav` (`ffprobe` duration > 0, non-silent)
+- [ ] Tests for the export itself: the temp-file/rename commit, the guards, and a failed `ffmpeg` leaving no `combined.wav`. `FFmpeg.mixArgs` is already covered (kept by Task 12 for exactly this)
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): press "Export mix" → a valid `combined.wav` (`ffprobe` duration > 0, non-silent); the recording itself still produces only the two final audio files
 
 ### Task 11: Extract `ActaRuntime`, then build a process-based E2E harness
 

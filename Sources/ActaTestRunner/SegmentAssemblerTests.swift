@@ -59,6 +59,13 @@ private func exists(_ url: URL) -> Bool {
     FileManager.default.fileExists(atPath: url.path)
 }
 
+/// Seconds of audio an assembled track really holds, read off its header (`WAV.durationSeconds` is
+/// the same pure function `SegmentAssembler` measures with).
+private func durationOfWAV(at url: URL) -> Double? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return WAV.durationSeconds(header: data.prefix(Recovery.headerProbeBytes), fileSize: data.count)
+}
+
 /// The names of the final files sitting in the recording folder (the track directories and the
 /// concat lists are not final files).
 private func finalFileNames(in directory: URL) -> Set<String> {
@@ -102,12 +109,17 @@ func assembleSucceedsWhenOneTrackHasNoSegments() throws {
     }
 }
 
+/// `noSegments` specifically, not "some error": `RecoveryManager` catches this case *by name* to
+/// close a folder that will never assemble, and lets every other error keep the marker at
+/// `recording`. A regression to `concatFailed` here would doom such a folder to an eternal "not
+/// finished" — which `#expect(throws: AssembleError.self)` would happily wave through, along with
+/// the `ffmpegNotFound` thrown on the first line of `assemble`.
 @Test
 func assembleThrowsNoSegmentsWhenBothTracksAreEmpty() throws {
     try withRecordingDirectory { directory in
         try makeRecording(in: directory, systemSegments: nil, micSegments: nil)
 
-        #expect(throws: SegmentAssembler.AssembleError.self) {
+        #expect(throws: SegmentAssembler.AssembleError.noSegments) {
             try SegmentAssembler().assemble(in: directory, deleteSegments: false)
         }
     }
@@ -130,7 +142,11 @@ func assembleKeepsSegmentsWhenConcatFails() throws {
         try FileManager.default.createDirectory(at: directory.appendingPathComponent("system.wav"),
                                                 withIntermediateDirectories: true)
 
-        #expect(throws: SegmentAssembler.AssembleError.self) {
+        // `concatFailed` for the system track, named: `AssembleError.self` would match just as well
+        // if `assemble` had bailed out at its first line with `ffmpegNotFound` — and then the
+        // "segments survive" assertions below would hold for the trivial reason that nothing ran.
+        #expect(throws: SegmentAssembler.AssembleError
+            .concatFailed(track: SegmentLayout.systemDirName)) {
             try SegmentAssembler().assemble(in: directory, deleteSegments: true)
         }
 
@@ -148,17 +164,26 @@ func assembleKeepsSegmentsWhenConcatFails() throws {
 @Test
 func assembleDropsASegmentWhoseFormatIsNotPlayablePCM() throws {
     try withRecordingDirectory { directory in
-        try makeRecording(in: directory, systemSegments: 2, micSegments: 2)
+        // The counts are deliberately lopsided. `segmentCount` is `max(system, mic)`, so with two
+        // segments per track it reads 2 whether or not the bad one drops — the assertion would pass
+        // against a build that had stopped dropping anything. One mic segment makes the number
+        // answer for the system track alone.
+        try makeRecording(in: directory, systemSegments: 1, micSegments: 1)
         let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
-        try writeWAV(to: systemDir.appendingPathComponent("0001.wav"),
+        try writeWAV(to: systemDir.appendingPathComponent("0000.wav"), frames: 24_000) // 0.5 s
+        try writeWAV(to: systemDir.appendingPathComponent("0001.wav"), frames: 24_000,
                      format: 0, channels: 0, sampleRate: 0, bitsPerSample: 0)
 
         let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
 
         // The good segment still assembles; only the unusable one is left out.
         #expect(result.systemWAV != nil)
-        #expect(result.segmentCount == 2) // the mic track's two, the system track's one
+        #expect(result.segmentCount == 1) // the good system segment; the bad one never entered the plan
         #expect(finalFileNames(in: directory) == ["system.wav", "mic.wav"])
+        // And the audio proves it: one segment's worth reached the track, not two.
+        let systemWAV = try #require(result.systemWAV)
+        let duration = try #require(durationOfWAV(at: systemWAV))
+        #expect(abs(duration - 0.5) < 0.05)
     }
 }
 
@@ -229,6 +254,30 @@ func assembleMeasuresDurationFromTheAssembledFile() throws {
                              frames: 24_000)
             }
         }
+
+        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+
+        let duration = try #require(result.durationSeconds)
+        #expect(abs(duration - 2.0) < 0.05)
+    }
+}
+
+/// The tracks are only nominally the same length: a segment dropped from one of them shortens that
+/// track alone. The meeting lasted as long as its longest track, so an uneven pair must report the
+/// longer number — `combined.wav` used to supply it (mixed `duration=longest`), and taking whichever
+/// track happens to come first instead would silently under-report the meeting in `info.md`.
+@Test
+func assembleReportsTheLongerTrackWhenTheTracksAreUneven() throws {
+    try withRecordingDirectory { directory in
+        let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
+        let micDir = directory.appendingPathComponent(SegmentLayout.micDirName)
+        for dir in [systemDir, micDir] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        // system: 0.5 s — the shorter track, and the one listed first.
+        try writeWAV(to: systemDir.appendingPathComponent("0000.wav"), frames: 24_000)
+        // mic: 2 s.
+        try writeWAV(to: micDir.appendingPathComponent("0000.wav"), frames: 96_000)
 
         let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
 

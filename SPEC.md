@@ -26,7 +26,7 @@ everything builds without full Xcode.
 
 - Apple M3, 16 GB, **macOS 26.2** (target `arm64-apple-macosx26`).
 - **Swift 6.3.3**, **Command Line Tools only**, no full Xcode → build via SwiftPM.
-- Installed: `ffmpeg` (concat/mix), `swiftlint` (via the `Scripts/lint.sh` wrapper).
+- Installed: `ffmpeg` (concat), `swiftlint` (via the `Scripts/lint.sh` wrapper).
 - Project home: `/Users/<user>/dev/personal/acta`.
 
 ## 3. Fixed decisions
@@ -53,8 +53,10 @@ everything builds without full Xcode.
   Gotcha: an unfinalised `AVAssetWriter` file is usually corrupt after a hard crash — hence segments.
 - **Assembly** via `ffmpeg`: concatenate each track's segments → `system.wav`, `mic.wav`.
   Both tracks are always produced; there is **no mix in the pipeline**. A mix (`combined.wav`,
-  `amix=inputs=2:duration=longest`) is produced only on demand via the "Export mix" action, for the
-  one case where it helps — listening back to a meeting as a whole.
+  `amix=inputs=2:duration=longest`) is **not produced at all** for now: an on-demand "Export mix"
+  action is backlog, not shipped code, so until it lands the one case where a mix helps — listening
+  back to a meeting as a whole — is served by running `ffmpeg` by hand. `FFmpeg.mixArgs` is kept
+  covered by tests for it.
 - **Permissions (TCC):** Microphone (`NSMicrophoneUsageDescription`), Screen Recording
   (runtime; status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`).
 
@@ -70,12 +72,12 @@ acta/
     RecordingSession.swift          # one recording's lifecycle: marker, capture, assembly, wake lock
     AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush
     SegmentWriter.swift             # segment rotation (~10-15 s), finalise each one
-    SegmentAssembler.swift          # ffmpeg concat/mix
+    SegmentAssembler.swift          # ffmpeg concat (two tracks, no mix)
     RecoveryManager.swift           # on launch: find session.json status=recording → assemble segments
     SelfCheck.swift                 # verify data flow at start + watchdog + auto-heal
     Permissions.swift               # Screen Recording + Microphone
     MeetingStore.swift              # folders, session.json, info.md front-matter, recordings list
-    Settings.swift                  # archive path, tracks, segment length, segment cleanup
+    Settings.swift                  # archive path, segment length, segment cleanup
     BuildFlavor.swift               # stable/dev flavor, log subsystem, build revision
     SourceDetector.swift            # (nice-to-have) title suggestion from running apps
   Sources/ActaKit/                  # pure, unit-testable logic (no I/O); exceptions: SegmentRepair, DisplayWakeLock
@@ -91,8 +93,8 @@ acta/
 - While recording: `system/NNNN.wav`, `mic/NNNN.wav` (segments) + `session.json`
   (`status: recording|done|recovered`, `started_at`, config, segment count).
 - After a clean stop or recovery: **`system.wav` and `mic.wav`, always both**; segments are deleted
-  or kept, per settings. `combined.wav` is **not** produced automatically — only by the on-demand
-  "Export mix" action, when you want to listen to the meeting as a whole.
+  or kept, per settings. `combined.wav` is **not** produced — an on-demand "Export mix" action is
+  backlog; a `combined.wav` in an older folder is left where it is rather than scrubbed.
 - `info.md` — YAML front-matter: `title, date, source, duration, status`.
 - `~/Acta/CLAUDE.md` — describes the archive as working context for the user's Claude Code.
 

@@ -47,8 +47,9 @@ give "me vs. them" attribution for free, and for transcription two files beat on
 
 A mix (`combined.wav`) is **derived data** and is deliberately **not** part of the recording
 pipeline — it costs a full extra copy, collapses the attribution, and was historically the most
-fragile branch of assembly. It is produced only on demand ("Export mix"), for the single case where
-it helps — listening back to a whole meeting:
+fragile branch of assembly. It is not produced at all — an on-demand "Export mix" action is backlog,
+not shipped code. Until it lands, the single case where a mix helps — listening back to a whole
+meeting — is served by running `ffmpeg` by hand:
 ```
 ffmpeg -i system.wav -i mic.wav -filter_complex amix=inputs=2:duration=longest combined.wav
 ```

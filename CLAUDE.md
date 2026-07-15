@@ -38,6 +38,8 @@ The conversation with the user may be in Russian; the repository must not be.
 - Build: `bash Scripts/bundle.sh` (SwiftPM → `.app` + ad-hoc codesign; there is NO full Xcode)
 - Compile: `swift build -c release`
 - Tests: `bash Scripts/test.sh` (real run via `ActaTestRunner`; exits non-zero on the first failure).
+  **Needs `ffmpeg`** — `SegmentAssemblerTests` shells out to it for real; without it the assembly
+  tests fail rather than skip, which is deliberate (a passing suite must not mean "assembly untested").
   ⚠️ Under CLT-only, `swift test` ONLY COMPILES the bundle (no `xctest` host utility) — a failing
   test still exits 0, so it is useless as a gate.
 - Lint: `bash Scripts/lint.sh` (SwiftLint wrapper; sets `DYLD_FRAMEWORK_PATH` for CLT-only —
@@ -78,7 +80,7 @@ ActaRuntime, and its test in ActaTestRunner.
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).
 - **No external SwiftPM dependencies** (no transcription → no WhisperKit). But `ffmpeg` is a
-  **required runtime tool** (`brew install ffmpeg`): every concat/mix goes through it.
+  **required runtime tool** (`brew install ffmpeg`): every concat goes through it.
   `SegmentAssembler.locateFFmpeg()` searches `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, then
   `PATH`. Without it nothing assembles — the segments survive and the marker stays `recording`, so
   recovery retries on the next launch.
@@ -95,8 +97,12 @@ ActaRuntime, and its test in ActaTestRunner.
 - Tests: cover **pure logic** (slug/front-matter, `ffmpeg` arguments, segment-selection logic for
   recovery, the "data is not flowing" detector). Live audio capture and UI are still tested manually,
   but "only `ActaKit` is reachable" is no longer true: since Task 11 the runner imports `ActaRuntime`
-  and constructs `RecordingController`/`RecordingSession`/`AudioRecorder`/`RecoveryManager` for real
-  (construction only — nothing starts capture; the fakes and seams are backlog work).
+  and constructs `RecordingController`/`RecordingSession`/`AudioRecorder`/`RecoveryManager` for real.
+  Nothing starts **capture** — but the I/O below capture is tested for real: `SegmentAssemblerTests`
+  writes fixture PCM WAV segments into a temp directory and drives `SegmentAssembler.assemble`
+  end-to-end through the segment plan, the header repair, a real `ffmpeg` and the segment deletion.
+  Anything that takes a *directory* rather than an `SCStream` is automatable that way — prefer
+  fixture bytes to a fake. (The fakes and seams for capture itself are still backlog work.)
 - A test may shell out to a system tool (`/usr/bin/pmset`) when only the OS can answer the question.
   Two rules learned the hard way: **scope the query to the runner's own pid** — `pmset -g assertions`
   is machine-wide, so a real recording would otherwise fail the suite — and mark such a suite

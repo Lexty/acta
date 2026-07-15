@@ -32,7 +32,7 @@ public struct SegmentAssembler {
         public var durationSeconds: Double?
     }
 
-    public enum AssembleError: Error {
+    public enum AssembleError: Error, Equatable {
         case ffmpegNotFound
         case noSegments
         /// `ffmpeg` failed to assemble a track. Kept separate from `noSegments`: an empty track is
@@ -76,13 +76,15 @@ public struct SegmentAssembler {
             }
         }
 
-        // We measure the very file the user will get; the tracks of one recording are equal in
-        // length, so the choice between them does not affect the number.
+        // We measure the very file the user will get. The longest track, not the first one: the two
+        // are nominally the same length, but only nominally — a dropped or unrepairable segment
+        // shortens one track alone, and the meeting lasted as long as its longest track. `combined`
+        // used to answer this (it was mixed `duration=longest`); with it gone, `max` is what keeps
+        // `info.md` from under-reporting.
         result.durationSeconds = [result.systemWAV, result.micWAV]
             .compactMap { $0 }
-            .lazy
             .compactMap { Self.measuredDuration(of: $0) }
-            .first
+            .max()
 
         return result
     }

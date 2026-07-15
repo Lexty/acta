@@ -6,7 +6,8 @@ import ActaKit
 @Test
 func concatArgsAreCopyMuxWithSafeZero() {
     let args = FFmpeg.concatArgs(listPath: "/tmp/list.txt", outputPath: "/tmp/system.wav")
-    #expect(args == ["-y", "-f", "concat", "-safe", "0", "-i", "/tmp/list.txt", "-c", "copy", "/tmp/system.wav"])
+    #expect(args == ["-y", "-xerror", "-f", "concat", "-safe", "0",
+                     "-i", "/tmp/list.txt", "-c", "copy", "/tmp/system.wav"])
 }
 
 @Test
