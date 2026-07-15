@@ -49,9 +49,12 @@ public struct RecoveryManager {
                 // nothing to recover, and there is no reason to lie in the notification.
                 //
                 // `segmentsUnrepairable` deliberately does not come here: there the segments *do*
-                // hold audio, so the folder falls to the generic `catch` below and keeps its
-                // `recording` marker for a later launch to retry.
+                // hold audio, so it gets its own bounded retry below.
                 closeEmpty(directory: dir, manifest: manifest)
+            } catch SegmentAssembler.AssembleError.segmentsUnrepairable {
+                // The segments hold audio that the repair could not get into a final file. Retry on
+                // a later launch — but not forever; see `retryOrCloseIncomplete`.
+                retryOrCloseIncomplete(directory: dir, manifest: manifest)
             } catch {
                 let name = dir.lastPathComponent
                 log.error("""
@@ -80,6 +83,58 @@ public struct RecoveryManager {
         let duration = result.durationSeconds.map { max(0, Int($0.rounded())) }
             ?? (result.segmentCount * manifest.segmentSeconds)
         updateInfo(in: directory, status: updated.status, durationSeconds: duration)
+    }
+
+    /// How many times a folder may come back `segmentsUnrepairable` before recovery stops retrying
+    /// it. Three, because the two outcomes it arbitrates are asymmetric: a retry costs one more
+    /// `ffmpeg` concat at launch, whereas giving up too early costs the audio its last chance of
+    /// reaching a file.
+    public static let maxAssemblyAttempts = 3
+
+    /// A folder whose segments still hold audio the repair could not place. Spend an attempt and
+    /// leave it `recording` so the next launch tries again — until the attempts run out, at which
+    /// point keep the tracks that did assemble and close the folder.
+    ///
+    /// Bounded rather than eternal because the causes of a failed repair are mostly *not* transient:
+    /// `SegmentRepair.apply` overwrites eight bytes of an existing file, so it does not need a free
+    /// block, and what actually stops it — a read-only volume, a wrong permission, an immutable
+    /// flag, failing hardware — will still be there on the next launch and the one after it.
+    ///
+    /// Giving up loses nothing: `assemble` throws before any deletion and recovery never deletes
+    /// anyway, so the segments outlive us and stay the audio's copy of record.
+    private func retryOrCloseIncomplete(directory: URL, manifest: SessionManifest) {
+        let name = directory.lastPathComponent
+        var updated = manifest
+        updated.assemblyAttempts += 1
+
+        guard updated.assemblyAttempts >= Self.maxAssemblyAttempts else {
+            // Status stays `recording`: that marker *is* the retry request.
+            log.error("""
+                \(name, privacy: .public): segments hold audio that could not be repaired into the \
+                assembly (attempt \(updated.assemblyAttempts, privacy: .public) of \
+                \(Self.maxAssemblyAttempts, privacy: .public)) — will retry on the next launch
+                """)
+            try? store.write(updated, to: directory)
+            return
+        }
+
+        log.error("""
+            \(name, privacy: .public): segments still hold audio that could not be repaired after \
+            \(Self.maxAssemblyAttempts, privacy: .public) attempts — closing the recording with the \
+            tracks that did assemble; the segments are kept and remain the only copy of the rest
+            """)
+        updated.status = .recovered
+        try? store.write(updated, to: directory)
+        // Measured off the tracks that made it, exactly as a clean assembly would — they are on disk
+        // already (`concatTrack` renames each into place before the throw). Short by the audio that
+        // never got repaired, but it is the length of the files the user actually has, and `info.md`
+        // must match them.
+        let duration = [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName]
+            .map { directory.appendingPathComponent($0) }
+            .compactMap { SegmentAssembler.measuredDuration(of: $0) }
+            .max()
+        updateInfo(in: directory, status: updated.status,
+                   durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0)
     }
 
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a

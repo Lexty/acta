@@ -35,12 +35,23 @@ public struct SegmentAssembler {
     public enum AssembleError: Error, Equatable {
         case ffmpegNotFound
         case noSegments
-        /// Every track came back empty, but the plan had vouched for audio that failed its repair.
+        /// The plan vouched for audio that then failed its repair, so those bytes reached no final
+        /// file and the segment is their only copy.
+        ///
         /// Kept separate from `noSegments`: that one means the crash left nothing behind and never
-        /// will, which is why the caller closes the folder for good. Here the audio exists — it is
-        /// sitting in the segments, which are its only copy — and the repair failed for reasons that
-        /// commonly clear (a read-only volume, a full disk, a permission). Closing the folder would
-        /// strand it: the marker would go terminal and no later launch would ever retry.
+        /// will, which is why the caller closes the folder for good. Here the audio exists, and the
+        /// repair failed for reasons that may clear (a read-only volume, a permission, a transient
+        /// I/O error). Closing the folder would strand it: the marker would go terminal and no later
+        /// launch would ever retry.
+        ///
+        /// This fires whether or not the rest of the track assembled around the hole. A partial
+        /// track is the *likelier* shape — a crash leaves at most one unfinalized segment per track,
+        /// so the usual failure is one bad segment among many good ones — and it is the one that
+        /// must not pass as success: `system.wav` would be sitting there, playable and short, with
+        /// `info.md` reporting `done` and a duration measured off the truncated audio.
+        ///
+        /// The tracks that did assemble are left on disk: they are a strict improvement over
+        /// nothing, and a later retry overwrites them.
         case segmentsUnrepairable
         /// `ffmpeg` failed to assemble a track. Kept separate from `noSegments`: an empty track is
         /// not an error, whereas a failed assembly means the segments are the only copy of the
@@ -63,33 +74,33 @@ public struct SegmentAssembler {
         guard let ffmpeg = Self.locateFFmpeg() else { throw AssembleError.ffmpegNotFound }
 
         let system = try concatTrack(dirName: SegmentLayout.systemDirName,
-                                     outputName: "system.wav", in: directory, ffmpeg: ffmpeg)
+                                     outputName: SegmentLayout.systemTrackFileName,
+                                     in: directory, ffmpeg: ffmpeg)
         let mic = try concatTrack(dirName: SegmentLayout.micDirName,
-                                  outputName: "mic.wav", in: directory, ffmpeg: ffmpeg)
+                                  outputName: SegmentLayout.micTrackFileName,
+                                  in: directory, ffmpeg: ffmpeg)
+
+        // A planned segment that failed its repair means audio the plan saw and vouched for reached
+        // no final file, and the segment is its only copy. That is the same statement whether the
+        // track around it came out empty or assembled happily, so it takes the same exit: returning
+        // success on the partial case would hand the caller a `Result` indistinguishable from a
+        // clean one, and the caller's next move is to close the folder for good.
+        //
+        // Throwing here is what keeps the segments, too: every deletion below sits past this point.
+        if system.retainedSegments || mic.retainedSegments {
+            throw AssembleError.segmentsUnrepairable
+        }
 
         let systemWAV = system.url
         let micWAV = mic.url
-        guard systemWAV != nil || micWAV != nil else {
-            // "No track came out" has two causes that must not share an exit. Nothing was ever
-            // recorded — or everything was, and every last segment failed its repair. The second is
-            // recoverable and the segments still hold the audio, so it must not reach the caller as
-            // `noSegments`, which is its cue to close the folder permanently.
-            if system.retainedSegments || mic.retainedSegments {
-                throw AssembleError.segmentsUnrepairable
-            }
-            throw AssembleError.noSegments
-        }
+        guard systemWAV != nil || micWAV != nil else { throw AssembleError.noSegments }
 
         var result = Result(systemWAV: systemWAV, micWAV: micWAV,
                             segmentCount: max(system.count, mic.count))
 
-        // The segments are redundant raw material only once every track that there was anything to
-        // assemble from sits next to us as its own wav. Two things break that, and only one of them
-        // throws above. A failed concat does. A planned segment that could not be repaired does not:
-        // the track around it assembles happily, while that segment's audio — which the plan saw and
-        // vouched for — reached no final file at all. The segment file is its only copy, so deleting
-        // here would destroy precisely the audio the repair path exists to rescue.
-        if deleteSegments && !system.retainedSegments && !mic.retainedSegments {
+        // The segments are redundant raw material only now: every track there was anything to
+        // assemble from sits next to us as its own whole wav.
+        if deleteSegments {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }

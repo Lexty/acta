@@ -227,11 +227,16 @@ func assembleRepairsAnUnfinalizedSegmentAndKeepsItsAudio() throws {
 
 /// The failure the plan cannot absorb: a segment holding audio that `SegmentRepair` cannot write
 /// back. It drops out of the assembly to save the rest of the track — a deliberate trade — and that
-/// makes its segment file the only copy of those seconds. Deleting the track directory then would
-/// destroy exactly the audio the repair path exists to rescue, and `status=done` means recovery
-/// never comes back for it.
+/// makes its segment file the only copy of those seconds.
+///
+/// The trade is only survivable if the caller is told. This is the *likely* shape of the failure,
+/// not the exotic one — a crash leaves one unfinalized segment per track, so one bad segment among
+/// good ones is the normal case, and the whole-track loss below is the rare one. Returning success
+/// here would hand back a `Result` indistinguishable from a clean assembly, and the caller's answer
+/// to that is `status=done` plus a duration measured off the truncated track: the audio would sit in
+/// the segments with every automatic path that could rescue it permanently closed.
 @Test
-func assembleKeepsSegmentsWhenAPlannedSegmentCouldNotBeRepaired() throws {
+func assembleThrowsSegmentsUnrepairableWhenOneTrackLostAPlannedSegment() throws {
     try withRecordingDirectory { directory in
         try makeRecording(in: directory, systemSegments: 2, micSegments: nil)
         // Mic: a single unfinalized segment with real audio, read-only so the repair's write fails.
@@ -241,16 +246,20 @@ func assembleKeepsSegmentsWhenAPlannedSegmentCouldNotBeRepaired() throws {
         try writeUnfinalizedWAV(to: micSegment, frames: 24_000)
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: micSegment.path)
 
-        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: true)
+        // `deleteSegments: true` is the dangerous setting on purpose: the throw is what has to reach
+        // the caller *before* anything is deleted.
+        #expect(throws: SegmentAssembler.AssembleError.segmentsUnrepairable) {
+            try SegmentAssembler().assemble(in: directory, deleteSegments: true)
+        }
 
-        // The healthy track is unaffected — the point is not to sink the assembly, only to keep the
-        // raw material of what did not make it.
-        #expect(result.systemWAV != nil)
-        #expect(result.micWAV == nil)
         // The mic audio survives as the segment it still is.
         #expect(exists(micSegment))
-        // And the system segments stay too: deletion is all-or-nothing per folder.
+        // And the system segments stay too — nothing is deleted on this path.
         #expect(exists(directory.appendingPathComponent(SegmentLayout.systemDirName)))
+        // The healthy track was still assembled and left on disk: it is strictly better than
+        // nothing, a later retry overwrites it, and the give-up path measures `info.md`'s duration
+        // from it.
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.systemTrackFileName)))
     }
 }
 

@@ -16,6 +16,12 @@ public enum SegmentLayout {
     /// File extension of a segment.
     public static let segmentExtension = "wav"
 
+    /// The assembled system-audio track, sitting in the recording folder next to `info.md`.
+    public static let systemTrackFileName = "system.wav"
+
+    /// The assembled microphone track.
+    public static let micTrackFileName = "mic.wav"
+
     /// Width of the sequence number in a name (zero-padded) — `%04d`.
     public static let indexDigits = 4
 

@@ -387,4 +387,10 @@ func sessionManifestDecodesFromHandWrittenJSON() throws {
     #expect(manifest.segmentSeconds == 15)
     #expect(manifest.segmentCount == 4)
     #expect(manifest.startedAt == Date(timeIntervalSince1970: 1_700_000_000))
+    // This payload predates `assembly_attempts`, and markers like it are sitting in real archives
+    // right now. A missing key must read as "no attempt spent yet", not throw: the synthesized
+    // `Codable` would have thrown, and an unreadable marker is an unrecoverable recording.
+    // The round-trip of a non-zero counter lives next to the retry it bounds, in
+    // `RecoveryManagerRetryTests`.
+    #expect(manifest.assemblyAttempts == 0)
 }
