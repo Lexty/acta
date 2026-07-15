@@ -138,7 +138,9 @@ user-facing strings and Russian comments left in the Swift sources.
 
 ## Scope of this plan
 
-**One open task.** Tasks 1–9 are done and verified by a live run. Task 10 is the only work in flight.
+**Two open tasks.** Tasks 1–9 are done and verified by a live run. Task 10 (display sleep) jumped the
+queue because a live run on 2026-07-15 proved the app unusable for real meetings without it. Task 11
+is the extraction everything else waits on.
 
 Everything else lives in `docs/backlog/acta-full-plan.md` — outside `docs/plans/` so it cannot be
 selected — and is **not** to be implemented from this plan.
@@ -153,7 +155,50 @@ easier to design from real code than from a document.
 places aspirational or now stale. Never close a checkbox because a document says so — close it
 because the code and the validation commands say so.
 
-### Task 10: Extract `ActaRuntime` (mechanical move, no behaviour change)
+### Task 10: Keep the display awake while recording
+
+**Proven live, not theorised.** On 2026-07-15 a recording stopped on its own after 2:20. The app's own
+log says exactly why, quoting macOS:
+
+```
+21:12:09.818  AudioRecorder  Stream stopped with an error:
+                             "Failed to find any displays or windows to capture"
+21:12:16.546  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 2)
+21:12:22.825  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 1)
+21:12:29.199  SelfCheck      Watchdog: recording stalled, restarting stream (attempts left: 0)
+21:12:35.501  SelfCheck      Watchdog: recording stalled, giving up
+21:12:35.508  RecordingController  Watchdog: data stream is gone — recording stopped, error shown
+```
+
+`pmset -g log` confirms `Display is turned off` at 21:12:09 — the same second. The display went idle,
+ScreenCaptureKit (a *screen* capture API) lost its display, three restarts failed, the watchdog gave
+up and stopped the recording with an error.
+
+**The app behaved exactly as Task 4 designed it to.** The design is what is wrong: the display goes
+dark after a few minutes of inactivity, and sitting in a meeting *listening* is precisely inactivity.
+This is a failure on every other meeting — it makes the app unusable for its actual purpose, which is
+why it comes before the extraction.
+
+**Decision (agreed with the user): hold the display awake while recording.** The alternative —
+letting it sleep and reconnecting on wake — would leave a hole in the audio for the whole sleep, which
+is the worst possible trade for a recorder. While we are recording, we do not let the screen go dark.
+
+- [ ] Hold an activity assertion **only for the duration of a recording** via `ProcessInfo.processInfo.beginActivity(options:reason:)` with `[.idleDisplaySleepDisabled, .idleSystemSleepDisabled]` — the modern wrapper over `IOPMAssertion`, released automatically if the process dies. System idle sleep is included because it kills a recording just as dead. Use a human-readable `reason` — it is what shows up in `pmset -g assertions`
+- [ ] **Release it on every exit path**: clean stop, the watchdog's give-up path, a failed start, and any error. A recorder that keeps the display on after it stopped recording is a bug of the worst kind — the machine never sleeps and nobody knows why
+- [ ] **Never hold it while idle.** The assertion exists only between start and stop
+- [ ] **Idempotent across watchdog restarts** — a restart must not stack a second assertion, and must not drop the one already held
+- [ ] ⚠️ **Document the honest limit** in `SPEC.md`: an activity assertion only prevents **idle** sleep. Closing the lid, a hot corner, or an explicit sleep will still tear the stream down, and for those the watchdog remains the only defence — it will stop the recording and say so. This task fixes the everyday failure, not every failure
+- [ ] Acceptance (automatable): while a recording runs, `pmset -g assertions` lists the assertion held by Acta with the expected reason; after stop it is gone; after a failed start it is gone
+- [ ] Acceptance (manual, needs a human — this is the test that failed on 2026-07-15): start a recording, leave the machine untouched past the display-sleep timeout → the display stays on, the recording keeps running, segments keep appearing, and stopping assembles audio with no gap
+
+**Two two-line logging fixes, included here** because they both serve the same goal — making the next
+display-related failure legible. Nothing else may be "improved while we are here".
+
+- [ ] `AppInfo.bundleID` is a hardcoded `"dev.personal.acta"` used as the `Logger` subsystem, so both build flavors log under the same subsystem and cannot be told apart. Derive the subsystem from `Bundle.main.bundleIdentifier` (falling back to `AppInfo.bundleID`). ⚠️ Do this **in the `Acta` target**, not in `ActaKit` — `ActaKit` is pure logic and must not read `Bundle.main`. The existing smoke test asserting `AppInfo.bundleID == "dev.personal.acta"` stays valid and must not be weakened
+- [ ] Lifecycle events (`"Recording session started"`, `"Recording session stopped"`) use `log.info`, which `os_log` **does not persist** — they are gone before anyone investigates. Move lifecycle events to a persisted level (`.notice`). Do not touch the 42 `log.error` sites; they already persist and proved their worth
+- [ ] Add to `CLAUDE.md`: read the logs with **`/usr/bin/log show --info --debug --predicate 'subsystem == "dev.personal.acta"'`** — the absolute path matters, because in a zsh shell `log` is a **builtin** and every query silently returns nothing. This cost an hour and produced a false "the app has no logs" conclusion
+
+### Task 11: Extract `ActaRuntime` (mechanical move, no behaviour change)
 
 **Why this is the only task.** `ActaTestRunner` depends only on `ActaKit`, while the entire pipeline —
 `RecordingController`, `RecordingSession`, `RecoveryManager`, `SegmentWriter`, `SegmentAssembler`,
