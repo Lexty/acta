@@ -13,6 +13,7 @@
 - Сборка: `bash Scripts/bundle.sh` (SwiftPM → `.app` + ad-hoc codesign; полного Xcode НЕТ).
 - Компиляция: `swift build -c release`
 - Тесты: `swift test`
+- Линтер: `bash Scripts/lint.sh` (обёртка над SwiftLint; ставит `DYLD_FRAMEWORK_PATH` для CLT-only — **raw `swiftlint` без Xcode падает** с `sourcekitdInProc failed`; конфиг — `.swiftlint.yml`, лёгкий)
 - Запуск: `open Acta.app` (или `bash Scripts/run.sh`)
 
 ## Конвенции и правила

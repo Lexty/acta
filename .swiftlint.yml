@@ -1,0 +1,24 @@
+# Лёгкая конфигурация SwiftLint — ловить значимое, не мешать автономному циклу ralphex.
+# Не strict: падает только на нарушениях уровня error (см. severity ниже).
+
+excluded:
+  - .build
+  - Acta.app
+
+disabled_rules:
+  - todo              # TODO/FIXME не должны валить сборку
+
+line_length:
+  warning: 140
+  error: 200
+
+identifier_name:
+  min_length: 1       # разрешить короткие имена (x, y, id, i, j)
+
+type_name:
+  min_length: 2
+
+# Потенциально опасное держим предупреждением, а не error, чтобы не было лишних итераций;
+# ревью-агенты ralphex всё равно это увидят.
+force_cast: warning
+force_try: warning

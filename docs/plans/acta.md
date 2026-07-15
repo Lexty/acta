@@ -17,6 +17,7 @@ API/пакетов, рецепт сборки без Xcode и критерии �
 ## Validation Commands
 - `swift build -c release`
 - `swift test`
+- `bash Scripts/lint.sh`
 - `bash Scripts/bundle.sh`
 
 ### Task 1: Скелет пакета и сборка без Xcode
