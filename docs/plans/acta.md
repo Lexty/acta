@@ -138,188 +138,54 @@ user-facing strings and Russian comments left in the Swift sources.
 
 ## Scope of this plan
 
-This plan is deliberately **the core only**: simplify what exists, make it testable, make it correct
-under concurrency, and make the outputs trustworthy. Tasks 1–9 are done and verified by a live run.
-Tasks 10–16 are open.
+**One open task.** Tasks 1–9 are done and verified by a live run. Task 10 is the only work in flight.
 
-Everything else — sleep/lid close, device changes, menu-bar timer, auto-stop on silence, calendar
-metadata, the mic-activity prompt, silence trimming — is parked in `docs/backlog/acta-full-plan.md`
-and is **not** to be implemented from this plan. It gets promoted back one item at a time, after the
-core lands and is verified live. The backlog file lists the known defects each parked item still has.
+Everything else lives in `docs/backlog/acta-full-plan.md` — outside `docs/plans/` so it cannot be
+selected — and is **not** to be implemented from this plan.
 
-Why the cut: three rounds of external review found ≈6, then ≈15, then one structural blocker plus
-refinements — several of the second round's defects had been introduced while fixing the first
-round's. The app already records reliably; the remaining value is in protecting that.
+Why one task: four rounds of external review of a large plan found ≈6, then ≈15, then 1 blocker, then
+2 blockers, with several of each round's defects introduced while fixing the previous round's. Almost
+all of them were **between** tasks — one task's contract contradicting another's. A one-task plan
+cannot have that class of defect. The app already records reliably; the seams for everything else are
+easier to design from real code than from a document.
 
-**No backward compatibility.** The existing `~/Acta` folders are **test recordings only** — there is
-no real data to preserve. Tasks 13–16 change the manifest, add timeline metadata and change final
-output identity: do **not** write migration code, and do **not** teach the scanners to interpret
-pre-Task-13 layouts. Old folders may be ignored or deleted. A `version` field is still recorded (one
-field, no migration code) so that a *future* format change is detectable rather than silent.
+**This document is the target, not evidence.** `SPEC.md` and `CLAUDE.md` describe design that is in
+places aspirational or now stale. Never close a checkbox because a document says so — close it
+because the code and the validation commands say so.
 
-**This document is the target, not evidence.** `SPEC.md` already describes some of Tasks 10–16 as
-settled design. That is a specification of where we are going — it is **not** proof that the code
-already does it. Never close a checkbox because the spec says so; close it because the code and the
-validation commands say so.
+### Task 10: Extract `ActaRuntime` (mechanical move, no behaviour change)
 
-### Task 10: Always two tracks — drop combined from the pipeline, mix on demand
+**Why this is the only task.** `ActaTestRunner` depends only on `ActaKit`, while the entire pipeline —
+`RecordingController`, `RecordingSession`, `RecoveryManager`, `SegmentWriter`, `SegmentAssembler`,
+`MeetingStore`, `SelfCheck`, `AudioRecorder` — lives in the **`Acta` executable target**. SwiftPM
+**cannot import an executable target** (verified in `Package.swift`). So nothing above pure logic can
+ever be tested end-to-end, which is why every criterion that matters is currently marked
+`manual test (skipped - not automatable)`. Until this move happens, no test infrastructure is
+buildable at all. Everything parked in the backlog depends on it.
 
-This task **removes** code. `combined.wav` is derived data and it costs three ways:
+🪤 **The trap in this task is "while I'm here, let me improve X".** Do not. This is a **mechanical
+move**. Every seam, fake, façade, clock, filesystem abstraction and harness is **explicitly out of
+scope** and lives in the backlog. They are easier to design once the code is importable and the real
+boundaries are visible — that is precisely why they are not here.
 
-1. **A full extra copy on disk** — a 100 s recording is ~19 MB per track; the mix adds ~19 MB more
-   for something `ffmpeg` reproduces in seconds.
-2. **It is the most fragile path in assembly.** Nearly every bug from the review history clusters
-   around the mix: "mix impossible was indistinguishable from mix failed", "combined is built via
-   intermediate wavs even when system/mic are deselected", "do not delete the only copies of audio
-   when the mix failed". Removing the mix deletes that whole class of failures.
-3. **It destroys the attribution the two tracks exist for.** Separate `system`/`mic` give
-   "me vs. them" for free; the mix collapses it back into a single blur. For transcription two files
-   are strictly better — run each one and you know who said what.
+- [ ] Add an `ActaRuntime` library target depending on `ActaKit`. Add it to `Package.swift` products if needed for the executables to import it
+- [ ] **Move, do not rewrite.** `Sources/Acta` keeps **only `ActaApp.swift`** (`@main`, the SwiftUI scene and views). All 16 other files move to `Sources/ActaRuntime` unchanged: `ArchiveOpener`, `AudioRecorder`, `ElapsedTimer`, `FailedStartCleanup`, `MeetingStore`, `Notifier`, `Permissions`, `RecordingController`, `RecordingSession`, `RecoveryManager`, `SegmentAssembler`, `SegmentWriter`, `SelfCheck`, `SessionManifestStore`, `Settings`, `SourceDetector`. (`ArchiveOpener`, `SourceDetector` and `RecordingController` import AppKit/SwiftUI — that is fine, a library target may import them; do not restructure them to avoid it)
+- [ ] `Acta` executable depends on `ActaRuntime`; `ActaTestRunner` depends on `ActaRuntime` **and** `ActaKit`
+- [ ] Access control: whatever must cross the target boundary becomes `public` — **mechanically**. Do not take the opportunity to redesign, narrow or "clean up" the API surface. A `public` keyword is the whole change
+- [ ] **No production source may be copied or duplicated into the test runner**
+- [ ] Existing tests in `ActaTestRunner` keep passing **unchanged**, except for `import` lines. Assertions may **not** be deleted, broadened, skipped, or converted into "does not throw"
+- [ ] Link proof (this is what makes the blocker gone): a smoke test in `ActaTestRunner` that does `import ActaRuntime` and constructs the pipeline types it previously could not reach. It only has to compile, link and run — it is not an E2E test and must not pretend to be one
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh` (all existing tests green, plus the link smoke test), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` (codesign valid) all pass
+- [ ] Acceptance: `ls Sources/Acta` lists exactly `ActaApp.swift`; `ls Sources/ActaRuntime` lists the 16 moved files; `grep -rn "import ActaRuntime" Sources/Acta Sources/ActaTestRunner` shows both importing it
+- [ ] Acceptance (manual, needs a human): `Acta.app` launches, records, stops and recovers exactly as before — this move must be invisible in behaviour
 
-The only honest use for a mix is *listening back* to a meeting. That is an on-demand need, not a
-reason to write a third file on every recording.
-
-- [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`. Remove the mix from the pipeline and with it the special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
-- [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `segmentSeconds`, `archivePath`, `deleteSegmentsAfterAssembly`. No migration needed for the removed keys beyond ignoring unknown ones
-- [ ] **Define the shared `ProcessRunner` seam here** (protocol + real implementation); Task 11 adopts it for fakes — do **not** introduce a second runner abstraction later. Contract must cover: an **explicitly resolved executable path** (resolution stays in `locateFFmpeg()` and is injectable), arguments, working directory, **bounded** stdout/stderr capture, **exit status vs termination by signal**, a **timeout driven by the injected scheduler** (not wall time), terminate → grace interval → force kill, cancellation, and **guaranteed child reaping**
-- [ ] `MenuContent`: drop the "Save tracks" section from Settings; add a per-recording **"Export mix"** action to the recordings list (next to "Open folder")
-- [ ] `ExportMix` in `Acta`: `ffmpeg` `amix=inputs=2:duration=longest` over `system.wav`/`mic.wav` → `combined.wav`. Reuse `FFmpeg.mixArgs`. Write to a **temp file and rename atomically** — a failed or killed `ffmpeg` must never leave a plausible-looking `combined.wav`. `ffmpeg` missing → the existing actionable error; a track missing → clear message; an existing `combined.wav` → replaced only on success. Off the main actor via the `ProcessRunner` seam
-- [ ] Export guards: refuse to run against a folder whose session is not `done`/`recovered`; snapshot and re-validate input identity (size + mtime) before commit; serialise per folder. ⚠️ **This serialisation is in-process and provisional**: size+mtime revalidation narrows but does not close the TOCTOU window before rename. Task 13 brings export under the archive lock, and Task 15 under the commit discipline. Do **not** treat Task 10's export as permanently race-safe
-- [ ] Recovery path: assemble both tracks the same way, no mix (`RecoveryManager` must not gain a mix branch)
-- [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` + `mic.wav`; `combined.wav` appears only if exported on demand
-- [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (still used by Export mix)
-- [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces **exactly two final audio files** (`system.wav`, `mic.wav`; the folder of course also holds `session.json`/`info.md`, and segments if retained) and no `combined.wav`; both decode fully with plausible durations; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): record → only the two final audio files; press "Export mix" → a valid `combined.wav` (`ffprobe` duration > 0, non-silent)
-
-### Task 11: Extract `ActaRuntime`, then build a process-based E2E harness
-
-**This is the highest-leverage task in the plan, and the easiest to get wrong.** Today every
-criterion that actually matters — audio was really recorded, a crash recovered, a stall was caught —
-is marked `manual test (skipped - not automatable)`. So the autonomous loop verifies pure functions
-and that the thing compiles, and nothing about the job the app exists to do. Three external review
-rounds all named this the number one risk.
-
-🪤 **Blocker, verified in the source.** `ActaTestRunner` depends only on `ActaKit`, while
-`RecordingController`, `RecordingSession`, `RecoveryManager`, `SegmentWriter`, `SegmentAssembler` and
-`MeetingStore` all live in the **`Acta` executable target** — and SwiftPM **cannot import an
-executable target**. As written, a real harness is unbuildable. Faced with that, an agent will do one
-of three things, and all three defeat the task: test only `ActaKit`, duplicate the orchestration in a
-test-only harness, or build a parallel "test coordinator" the UI never calls. So the extraction comes
-first and is not optional.
-
-- [ ] **Extract `ActaRuntime`** — an importable library target depending on `ActaKit`. It owns the non-UI production pipeline: lifecycle coordinator, recorder adapter, segment writers, manifest store, assembler, recovery scanner, filesystem/process implementations, and the UI-facing observable state. **Both** `Acta` and `ActaTestRunner` depend on it. The `Acta` executable keeps only SwiftUI/AppKit wiring and the real ScreenCaptureKit adapter. **No production source may be copied or reimplemented in the test runner**
-- [ ] `CaptureSource` protocol seam under the recorder yielding (track, buffer, timestamp). Real implementation = ScreenCaptureKit, living in `Acta`; **nothing in `ActaRuntime` may know about `SCStream`**
-- [ ] `FakeCaptureSource`: **deterministic** synthetic PCM **per track independently**, with control over level (silence / tone / speech-like), **format** (interleaved and non-interleaved, integer and float, differing channel counts), **stalls**, **errors**, and pacing driven by the injected scheduler
-- [ ] **One injected time service, two concepts**: a **monotonic** clock for scheduling, deadlines and `advance(by:)`; and **wall time** for `started_at`, titles and metadata. Do not pretend wall time does not exist — ban raw `Date()` for *scheduling* above the seam, not for metadata. File mtimes remain filesystem observations, not scheduler time
-- [ ] **`advance(by:)` must drain to quiescence**: after an advance, run everything made runnable — *including work transitively scheduled by that work* — until nothing is immediately runnable. Otherwise actor hops keep the tests racy
-- [ ] **Injectable filesystem seam** — create, write, flush/sync, rename, free-space query, directory sync. ⚠️ **The whole production pipeline must go through it**: a seam around manifest writes while `SegmentWriter`, `SegmentRepair`, assembly or export still call `FileManager` directly gives false confidence. Filling a real volume is not an acceptable test
-- [ ] **Permissions/TCC seam**, including a **capture-authorization-lost** event the coordinator can act on (Task 12 consumes it; Task 16 adds the policy)
-- [ ] Adopt the **`ProcessRunner` seam from Task 10**. 🪤 **A stub earlier on `PATH` will not intercept `ffmpeg`** — `locateFFmpeg()` checks `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` **before** `PATH` (verified in source), and ffmpeg lives in `/opt/homebrew/bin` here. Inject the resolved executable/runner instead
-- [ ] **Name the "real pipeline" boundary.** Every scenario **starts through the same canonical operation the UI calls** and asserts on **the same observable state the UI renders**. Tests that reach directly into `SegmentWriter`/`RecoveryManager`/a pure state machine can pass over broken wiring and do not count as E2E
-
-**The canonical operation is an in-process `ControlAPI`.** This is not scope creep: the command
-envelope and the event stream **replace test scaffolding that would otherwise be written anyway**, so
-they are cheaper to build than to avoid. The out-of-process transport is a different matter and stays
-parked (see the end of this task).
-
-- [ ] **One façade, one entry point.** Every operation the app performs goes through `ControlAPI` in `ActaRuntime`: `start(title:)`, `stop()`, `status()`, `list()`, `exportMix(id:)`, `getSettings()`, `setSettings(...)`, `recoverNow()`. The SwiftUI menu bar calls **only** this; no UI path may reach into the coordinator, recorder or store directly. The harness is a second client. (This *is* the "one canonical operation" the E2E boundary requires)
-- [ ] **Structured, `Codable` requests and results.** Rationale: the harness needs `ActaHarness record --scenario <file>` regardless — with a command envelope, a scenario file is simply a **list of commands**, and no bespoke scenario format has to be invented and maintained alongside the façade
-- [ ] **An event/trace stream**: state changed, recording started/stopped, error, recovered. Rationale: the characterization contract below demands *externally visible state traces* — this stream **is** that trace. Without it, an ad-hoc "what happened" recorder gets written for the tests only; with it, the same mechanism serves the product and the tests
-- [ ] **No UI types across the boundary.** Parameters, results and events are plain data — no SwiftUI/AppKit types in the signatures. Observable state is plain values the UI adapts, not UI-bound state the runtime owns
-- [ ] **Typed error categories** with stable identifiers, not display strings. A display string may be *derived* from a category; the category is what crosses the boundary and what tests assert on
-- [ ] An **API version** field in the envelope — one field, no compatibility code (there is nothing to be compatible with yet)
-- [ ] ⚠️ **Privacy invariant, applies from the moment the envelope exists:** anything able to invoke `start` can record the user. An API-initiated recording obeys the **same** invariant as a UI-initiated one — visible state, never a silent recording. There is no "quiet mode" and there will not be one
-- [ ] **Still out of scope here**, parked in the backlog: the Unix-socket transport, the `actactl` CLI, launch-if-not-running semantics, the trust boundary and compatibility rules. Those are new surface with no testing payoff; the façade above is what makes them cheap to add later without a rewrite
-
-**Process-based crash testing** — `kill -9` **cannot be simulated in-process**: throwing, cancelling a
-task or dropping an object all run cleanup, which is exactly what `SIGKILL` does not.
-
-- [ ] Harness executable modes, e.g. `ActaHarness record --root <temp> --scenario <file>`, `ActaHarness recover --root <temp>`, `ActaHarness run --root <temp>`
-- [ ] The **recording child** must: enter through the same lifecycle command the UI uses; write to a unique temporary archive; **signal readiness only after** the manifest says `recording`, at least one **closed** segment exists per expected track, **and a later segment is open with non-zero audio data**; then stay alive until killed. Readiness goes over a pipe or an **atomically written** readiness file — ⚠️ **polling for segment files is not enough**: the parent could kill between rotations when no open tail exists, silently weakening the test
-- [ ] The **parent** must: wait for readiness with a bounded timeout; verify the child is alive; `SIGKILL` the exact PID; `waitpid` and **assert termination was by `SIGKILL`**; launch recovery as a **new process** on the same archive root; assert through controller-visible state and durable outputs — **not** by calling `RecoveryManager` directly; inspect the final WAVs and manifest only after the recovery process exits successfully
-- [ ] **A deterministic audio oracle.** ⚠️ A dropped buffer still yields two perfectly decodable WAVs — "it decodes" proves nothing. With deterministic synthetic input, assert exact or bounded **frame counts**, durations, discontinuities, and a simple **per-track sample fingerprint**
-- [ ] **A permanent negative control, not a one-off.** "Prove the harness can fail" must not mean hand-editing production code. Add an **injectable fault** (a writer decorator that acknowledges a buffer and drops the Nth) and a **permanent test** that runs the harness against it and asserts the harness **reports failure**. The outer test passes only because it observed the expected inner failure
-
-**Characterization contract (consumed by Task 12).** Record the *current* externally visible behaviour
-before anything is refactored:
-
-- [ ] Freeze scenarios covering: start; confirmed recording; stop → saving → done; failed start; fatal stall; recovery. Assert on **externally visible state traces**, manifest status transitions, segment and final-output artifacts, error messages or typed error categories, start/stop **idempotence**, and **recovery occurring once at launch**
-- [ ] Other harness scenarios: start → segments appear → stop → both tracks assembled and valid; **child SIGKILLed mid-recording → recovery in a fresh process assembles what survived**; a stalled track → the watchdog reacts; a failing and a **hanging** `ffmpeg` → error surfaced, segments intact
-- [ ] **Keep it honest.** This is *approximate* E2E: it does **not** prove ScreenCaptureKit works, TCC prompts appear, or real audio is captured. Those stay manual. Say so here and **update `CLAUDE.md`**, whose claims — that runtime audio and crash recovery are manual only, that validation only checks compilation/build/unit logic, and that `ActaKit` is the only place for testable code — all become false or misleading once `ActaRuntime` and the harness exist
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh` (E2E scenarios, characterization scenarios **and** the negative control inside it), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-
-### Task 12: One serialized recording lifecycle
-
-**Why this exists.** Several actors can already mutate a live recording — manual stop, watchdog
-restart, stream error, app termination, capture-authorization loss — and every parked backlog item
-adds more. Without a single owner they race.
-
-This is not speculative: the shipped bug history is *entirely* this class — "isStopping symmetric to
-isStarting", "await watchdogTask.value before stopping the recorder, otherwise the watchdog's rest()
-could bring up a new SCStream after assembly", "run recovery once per launch, not on every menu
-open", "the restart budget was a quota for the whole recording rather than per incident". Those were
-found by review, one at a time, after the fact. The coordinator is how we stop finding them that way.
-
-- [ ] A single serialized lifecycle in `ActaRuntime` owning every transition of a recording (one actor/queue). All mutations go through it; nothing touches the recorder/writers/manifest directly
-- [ ] **Generation IDs and operation tokens.** "A stale completion must not resurrect a stopped session" is solved by a session generation + per-operation token, not ad-hoc state checks. Reject any completion whose token is no longer current — start, restart, segment closure, manifest write, assembly. The generation is persisted in the Task 13 timeline, so design the ID now
-- [ ] ⚠️ **Do not force export into the recording state machine.** Export is not a transition of a live recording; forcing it in turns the coordinator into a god object. Export gets a **separate per-folder lock/token tied to the committed generation** (Task 15)
-- [ ] Explicit precedence, encoded and tested: **stop beats restart**; duplicate/burst events coalesce; **capture-authorization-lost** is terminal
-- [ ] Every operation **idempotent**: a second stop or a repeated event is a no-op, not a second path
-- [ ] Pure state machine in `ActaKit` (events → transitions + emitted effects); the I/O and wiring live in `ActaRuntime`
-- [ ] Two test layers, kept distinct: **fake effects** for exhaustive state-machine ordering (cheap, combinatorial), and the **Task 11 harness with real writers** for integration. Do not conflate them
-- [ ] Race scenarios: stop racing a restart; restart completing after stop; restart completing after an error; two stops; error during assembly; termination mid-recording; authorization lost mid-recording
-- [ ] ⚠️ **"No observable behaviour change" is not an acceptance contract by itself** — the existing tests mostly protect pure logic, not the orchestration being replaced. Instead: **the Task 11 characterization scenarios must stay green and unchanged** while the race scenarios are added. Existing assertions may be updated **only for API relocation** — they may **not** be deleted, broadened, skipped, or converted from exact assertions into "does not throw"
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green, characterization scenarios unchanged
-- [ ] Acceptance (manual, needs a human): a live record → stop → `kill -9` → recover cycle behaves as before the refactor on real hardware
-
-### Task 13: Archive locking and the persisted timeline
-
-Locking first: it is a precondition for everything that scans the archive.
-
-- [ ] **Single-instance archive locking.** Two Acta processes must not record into or recover the same archive. This must land **before** any orphan scanning (Task 16): a scan looking for segment layouts without a valid manifest would otherwise mistake **another live process's in-progress recording** for an orphan
-- [ ] **Persisted timeline — this is what makes alignment crash-safe.** In-memory segment timestamps do not survive a crash, and orphan recovery cannot reconstruct alignment without them on disk. Persist, per segment: recording time origin, track, segment index, segment start/end timestamps, format and frame count, discontinuity/gap reason, and the lifecycle generation (Task 12)
-- [ ] **Specify the timeline exactly** — leaving this to the implementer invites incompatible guesses. Define: which timestamp domain is persisted; how system and microphone timestamps map onto **one recording origin**; whether intervals are **half-open**; how **overlaps, duplicate buffers, backward timestamps and mid-recording format changes** are handled; when a timeline entry is considered **committed relative to WAV segment finalisation**; and how the **repaired open tail** (Task 8.1 `SegmentRepair`) gets an end time after a crash
-- [ ] **Durable format: one atomic sidecar per finalised segment**, plus recording-level origin metadata. Do **not** use a single repeatedly rewritten timeline JSON (a contention and loss point). An append-only journal is acceptable only with explicit torn-tail parsing rules
-- [ ] Record a `version` field in the manifest and timeline metadata — **one field, no migration code**. There is no backward compatibility to maintain (existing folders are test data); this exists so a *future* format change is detectable
-- [ ] Unit tests for the pure parts (timeline computation, origin mapping, half-open interval maths, torn/duplicate/backward-timestamp handling); harness scenarios for locking (a second instance must not proceed) and for the timeline surviving a SIGKILL
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-
-### Task 14: Track alignment and asymmetric capture
-
-- [ ] **Track alignment (the dangerous one).** The two tracks are concatenated independently. Any difference in segment count or restart timing — watchdog restarts cause this today — silently drifts "me" against "them" and destroys the attribution the two-track design exists for. Policy: **preserve a shared media timeline** (Task 13); pad only the asymmetric per-track gaps needed to keep both tracks on it; **both outputs get identical timeline treatment**
-- [ ] **Asymmetric capture — decided, not optional.** When one track produced **no buffers at all** (dead or OS-muted mic): produce a **zero-filled track spanning the shared recorded timeline**, mark that track **absent** in `info.md` metadata, and commit both outputs as **one generation**. Rationale: it preserves the "always two tracks" shape and the downstream/export contract, and makes the absence honest. A single-track finalisation would contradict Task 10 and complicate every consumer. A perfectly good system-only meeting must **never** become unfinalisable
-- [ ] Unit tests (pure): alignment with differing segment counts; a mid-recording restart; a track absent entirely; padding computed identically for both tracks
-- [ ] Harness scenarios: differing segment counts and a mid-recording restart stay aligned (verified via the deterministic audio oracle, not just "it decodes"); a silent/absent mic track yields a zero-filled aligned track marked absent
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-
-### Task 15: Paired atomic commit, assembly failures and segment deletion
-
-- [ ] **Paired atomic commit.** Renaming `system.wav.tmp` and `mic.wav.tmp` independently lets a crash between the two renames leave files from **different assembly generations**. Use **generation-tagged outputs plus a single atomic commit marker/index**. ⚠️ **Readers must resolve outputs through the marker** — if the UI and export keep opening fixed names independently, generation tagging buys nothing. Validate (header + duration > 0 + expected frame count) **before** commit
-- [ ] Recovery must **detect a partial pair** and either finish or roll it back
-- [ ] **Never delete segments until both final tracks are validated and committed.** `deleteSegmentsAfterAssembly` defaults to true; deleting on an unvalidated assembly destroys the only copy
-- [ ] **Partial assembly.** If `system` succeeds and `mic` fails: do not destroy the successful track or the segments, do not mark `done`, leave it recoverable, and say so in the UI
-- [ ] **`ffmpeg` hang/failure.** A stuck child leaves the app in "Saving…" forever. Use the `ProcessRunner` timeout (scheduler-driven), capture exit status and stderr, surface an actionable error, preserve segments on every failure path. **This is automatable through the injected runner — it is not a manual test**
-- [ ] Bring **export** under this discipline: the per-folder token/lock from Task 12, tied to the committed generation, closing the provisional TOCTOU window left by Task 10
-- [ ] Unit tests (pure): commit-point decisions; partial-pair detection. Harness: crash between renames → recovery finishes or rolls back, never a mixed pair; hanging `ffmpeg` → error, segments intact, not stuck in "Saving…"
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-
-### Task 16: Disk and archive failures, orphan recovery, durability honesty
-
-- [ ] **Disk space — a hard refusal threshold, separate from a warning.** Two PCM tracks cost ~1.38 GB/hour (measured). Warn below a comfort margin; **refuse to start** below a hard margin. "Warn and record anyway" contradicts the core invariant — never claim a healthy recording when writes are unsafe. During recording, fail **visibly** below the hard margin
-- [ ] Handle `ENOSPC` on segment writes, manifest updates, assembly and export, tested through the injectable filesystem seam (Task 11)
-- [ ] **Archive becomes unavailable mid-recording** (volume unmounted, directory deleted, path read-only). Be honest about what is possible: Acta **cannot** preserve data that lived only on a vanished volume, and must not invent a failover. Required behaviour: **stop claiming a healthy recording immediately**, preserve whatever is still accessible, and never delete or overwrite anything on reconnection
-- [ ] **Capture authorization revoked mid-recording** → the terminal event from Task 11/12: visible error state, segments preserved, never keep showing "recording"
-- [ ] **Orphaned segments.** Recovery keys on `session.json status=recording`; a manifest truncated by power loss orphans a whole segment directory **forever**. With locking (Task 13) in place, scan for a recognisable segment layout whose manifest is missing or corrupt, reconstruct what the persisted timeline allows, mark it `recovered`, and **never silently delete**. Pre-Task-13 layouts without timeline metadata are **out of scope** — no backward compatibility; ignore them
-- [ ] **Durability honesty.** Atomic rename prevents a torn manifest but does **not** by itself survive sudden power loss without syncing the file and its parent directory. Decide what to implement, then **state plainly in `SPEC.md`** what is guaranteed against **process death** versus **sudden power loss** — do not imply both. Also fix the stale SPEC claim that a crash loses "at most the last segment": the live run showed `SegmentRepair` recovering a 9.4 s open tail, so the honest claim is "at most the unrepairable remainder of the open segment"
-- [ ] Harness scenarios: `ENOSPC` at each injection point; archive vanishing mid-recording; authorization lost mid-recording; an orphan folder with a corrupt manifest recovered
-- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
-- [ ] Acceptance (manual, needs a human): delete `session.json` from an interrupted recording → segments still recovered on next launch. (Real TCC revocation and physically removing a volume stay manual; everything else here is automated)
+**Explicitly NOT in this task** (all parked): the `ControlAPI` façade; `CaptureSource`; fake capture;
+the clock/scheduler abstraction; the filesystem or `SegmentSink` seam; `ProcessRunner`; the
+permissions seam; characterization scenarios; the process harness; the negative control; dropping
+`combined` from the pipeline; any change to the lifecycle, storage format or behaviour.
 
 ## Backlog
 
-Parked, **not** in scope: sleep/lid close, audio device changes, menu-bar timer, auto-stop on
-silence, calendar metadata, mic-activity prompt, silence trimming.
-
-They live in `docs/backlog/acta-full-plan.md`, together with the defects each still carries. Promote
-one at a time, only after the core above has landed and been verified on real hardware — and re-fix
-the listed defects as part of promoting it.
+`docs/backlog/acta-full-plan.md` holds everything else, in the order it should be promoted, plus the
+recorded review findings that each parked item still needs fixed **before** it is promoted. Promote
+one at a time, after this task has landed and been verified live.
