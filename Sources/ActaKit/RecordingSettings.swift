@@ -97,13 +97,19 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
 
     /// The resolved URL of the archive root, relative to the home folder.
     ///
-    /// An empty path → `<home>/Acta`; a leading `~` expands to `homeDirectory`; an absolute path is
-    /// taken as is; a relative one is resolved against the home folder. `homeDirectory` is injected
-    /// for testability.
-    public func resolvedArchiveURL(homeDirectory: URL) -> URL {
+    /// An empty path → `<home>/<defaultFolderName>`; a leading `~` expands to `homeDirectory`; an
+    /// absolute path is taken as is; a relative one is resolved against the home folder.
+    /// `homeDirectory` is injected for testability.
+    ///
+    /// `defaultFolderName` exists so the two build flavors cannot share an archive: the stable app
+    /// defaults to `~/Acta`, the dev app to `~/Acta-dev`. An experimental build writing into real
+    /// recordings is the one failure this app must never have, so the separation is in the default
+    /// rather than left to a setting the user might forget. An explicit `archivePath` still wins —
+    /// if you deliberately point both flavors at one folder, that is your call.
+    public func resolvedArchiveURL(homeDirectory: URL, defaultFolderName: String = "Acta") -> URL {
         let trimmed = archivePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return homeDirectory.appendingPathComponent("Acta", isDirectory: true)
+            return homeDirectory.appendingPathComponent(defaultFolderName, isDirectory: true)
         }
         if trimmed == "~" {
             return homeDirectory

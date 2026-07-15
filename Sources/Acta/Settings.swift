@@ -42,7 +42,13 @@ struct SettingsStore {
     }
 
     /// The resolved archive root from the current settings.
+    ///
+    /// The default folder depends on the build flavor (`~/Acta` vs `~/Acta-dev`) so the experimental
+    /// build cannot write into real recordings. An explicit `archivePath` still overrides it.
     func archiveRoot(for settings: RecordingSettings) -> URL {
-        settings.resolvedArchiveURL(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+        settings.resolvedArchiveURL(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            defaultFolderName: BuildFlavor.current.defaultArchiveFolderName
+        )
     }
 }

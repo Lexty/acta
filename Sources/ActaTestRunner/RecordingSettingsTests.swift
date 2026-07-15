@@ -95,6 +95,31 @@ func resolvedArchiveURLDefaultsToActaUnderHome() {
     #expect(url.path == "/Users/test/Acta")
 }
 
+/// The stable and dev builds must never share an archive: an experimental build writing into real
+/// recordings is the one failure this app must not have.
+@Test
+func resolvedArchiveURLDefaultFolderSeparatesBuildFlavors() {
+    let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+    let settings = RecordingSettings(archivePath: "")
+
+    let stable = settings.resolvedArchiveURL(homeDirectory: home, defaultFolderName: "Acta")
+    let dev = settings.resolvedArchiveURL(homeDirectory: home, defaultFolderName: "Acta-dev")
+
+    #expect(stable.path == "/Users/test/Acta")
+    #expect(dev.path == "/Users/test/Acta-dev")
+    #expect(stable.path != dev.path)
+}
+
+/// An explicit path is a deliberate choice and still wins over the flavor default — pointing both
+/// builds at one folder must remain possible, just never accidental.
+@Test
+func resolvedArchiveURLExplicitPathOverridesFlavorDefault() {
+    let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+    let settings = RecordingSettings(archivePath: "~/Shared")
+    #expect(settings.resolvedArchiveURL(homeDirectory: home, defaultFolderName: "Acta-dev").path
+        == "/Users/test/Shared")
+}
+
 @Test
 func resolvedArchiveURLExpandsTilde() {
     let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
