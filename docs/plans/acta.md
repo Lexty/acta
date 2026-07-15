@@ -135,3 +135,33 @@ user-facing strings and Russian comments left in the Swift sources.
 - [x] Unit tests that assert on Russian strings must be updated accordingly (`MeetingSourceTests` → "Meeting 2023-11-14 22:13"; `DiagnosticsTests` → `.contains("Screen Recording")`; `WAVTests.Issue.record` → English. `MeetingArchiveTests.slugKeepsUnicodeLetters` is **kept** — `MeetingArchive.slug` deliberately supports Cyrillic titles (valid in macOS file names), so the test retains its exact behaviour with both strings written as `\u{…}` escapes to keep the sources ASCII-only)
 - [x] Translate `Resources/`: `NSMicrophoneUsageDescription` in `Info.plist` (macOS shows it verbatim in the TCC microphone dialog — the most visible string the app has) and the comments in `Acta.entitlements`. Missed on the first pass because the acceptance grep below was scoped to `Sources/ Tests/ Package.swift` and never looked at `Resources/`
 - [x] Acceptance: `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .` returns nothing — repo-wide, **not** scoped to `Sources/`: the narrow grep is exactly what let a Russian TCC prompt through. Plus `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh` (exit 0) and `bash Scripts/bundle.sh` (codesign valid) all green. Note: `os.Logger` takes an `OSLogMessage`, not a `String`, so long log lines are wrapped with `"""` + `\` continuations rather than `+` concatenation
+
+### Task 10: Offer to record when another app starts using the microphone
+
+Problem this solves: the recording is easy to forget. When a call starts, some app (Slack, Teams,
+Meet in a browser, …) opens the microphone — that is a reliable "a meeting is probably starting"
+signal. Acta should notice it and offer to record **once**, with a button, without stealing focus.
+
+Read the `.claude/skills/mic-activity-detection` skill before starting — it holds the verified API
+facts and the gotchas (unreliable `IsRunningInput` listeners, Bluetooth mics, the Swift listener
+removal bug). **Do not invent CoreAudio API — check the docs.**
+
+Decided behaviour (agreed with the user):
+- Trigger on **any** app, not an allow-list — a new meeting tool must not be missed.
+- **Dwell filter ≥ 5 s**: only treat sustained input as a real session; this drops Siri and short
+  device probes.
+- The notification names the app ("Slack is using the microphone. Record this meeting?").
+- **Once per activation**: fire on the idle → active transition only; do not repeat while the mic
+  stays busy, and do not re-prompt if the user ignored/dismissed that activation. Re-arm only after
+  the mic goes idle again.
+- Never prompt while Acta is already recording.
+- Ignore list in Settings (by bundle identifier) + a master toggle to disable the whole feature.
+
+- [ ] `MicActivityMonitor.swift` (in `Acta`): enumerate `kAudioHardwarePropertyProcessObjectList`, read `kAudioProcessPropertyPID` + `kAudioProcessPropertyIsRunningInput`, map PID → `NSRunningApplication`. Use a listener **plus** a light poll (1–2 s) — per the skill, `IsRunningInput` listeners are unreliable on their own
+- [ ] **Exclude Acta's own PID**, otherwise recording triggers the monitor on itself
+- [ ] Pure logic in `ActaKit` (`MicActivity`): given snapshots of (pid, bundleID, isRunningInput, timestamp) decide `shouldPrompt` — dwell threshold, idle→active edge, one-shot per activation, re-arm on idle, ignore list, self-exclusion. No I/O here so it is unit-testable
+- [ ] Actionable notification: `UNNotificationCategory` + `UNNotificationAction` "Start Recording"; handle the response in `UNUserNotificationCenterDelegate` and start recording with the detected app as the title source (reuse `MeetingSource`/`suggestedTitle`). Extend the existing `Notifier`
+- [ ] Settings: master toggle (default on) + ignore list by bundle identifier; extend `RecordingSettings` (Codable + normalisation) and the Settings section in `MenuContent`
+- [ ] Unit tests for `MicActivity` (pure): blip < 5 s → no prompt; sustained ≥ 5 s → exactly one prompt; still active → no second prompt; idle then active again → prompts again; ignored bundle → no prompt; Acta's own PID → no prompt
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): start a Slack/Meet call → within ~5 s a notification with a "Start Recording" button appears naming the app; pressing it starts a recording; no second notification for the same call; Siri or a 1–2 s mic blip produces no notification; starting a recording from the menu bar does not trigger a self-prompt
