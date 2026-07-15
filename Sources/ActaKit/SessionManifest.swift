@@ -37,8 +37,10 @@ public struct SessionManifest: Codable, Equatable, Sendable {
     /// Number of finalised segments as of the last update of the marker.
     public var segmentCount: Int
 
-    /// How many times recovery has assembled this folder and been left with audio it could not
-    /// repair out of the segments (`segmentsUnrepairable`).
+    /// How many times recovery has assembled this folder and been left with audio that reached no
+    /// final file — a segment it could not repair (`segmentsUnrepairable`) or a track `ffmpeg`
+    /// refused to concat (`concatFailed`). Both increment it: the bound is about the audio not
+    /// landing, not about which step failed to land it.
     ///
     /// This is what bounds the retry. A failed repair may come from something that clears — but it
     /// may just as easily come from something that never will: the segment sits on a read-only
@@ -46,6 +48,11 @@ public struct SessionManifest: Codable, Equatable, Sendable {
     /// full `ffmpeg` concat on every single launch (and every `start()` waits on recovery first),
     /// while reading "not finished" forever with no way for the user to clear it — the exact fate
     /// the `noSegments` branch already refuses to inflict.
+    ///
+    /// The bound holds only as far as the folder is writable: the counter lives in the very file a
+    /// read-only volume would refuse. `RecoveryManager.writeMarker` logs that failure rather than
+    /// hiding it, because the folder then does loop — and nothing short of the volume becoming
+    /// writable can stop it.
     ///
     /// Absent from markers written before this field existed; it decodes to 0, which is the correct
     /// reading — those folders have not yet spent an attempt.

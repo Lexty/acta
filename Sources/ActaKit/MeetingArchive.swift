@@ -129,6 +129,18 @@ public struct MeetingInfo: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// Append a note to the body of an `info.md`, below the front-matter.
+    ///
+    /// Recovery needs it for the outcome the front-matter cannot express: a folder whose audio never
+    /// reached a track has the `status` and `duration` of an empty recording, and only prose can say
+    /// that the segments next to it are the meeting. Idempotent — a note already present is not
+    /// repeated, so a re-run cannot stack copies.
+    public static func appendingNote(_ contents: String, note: String) -> String {
+        guard !contents.contains(note) else { return contents }
+        let body = contents.hasSuffix("\n") ? contents : contents + "\n"
+        return body + "\n" + note + "\n"
+    }
+
     /// The duration to record in `info.md`, s: the assembled audio's own length, falling back to the
     /// clock only when there is nothing to measure (the assembly failed).
     ///

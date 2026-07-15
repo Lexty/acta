@@ -194,16 +194,13 @@ func recoveryAssemblesTheHealthyTrackWhenTheOtherCannotBeConcatenated() throws {
         }
 
         #expect(exists(directory.appendingPathComponent(SegmentLayout.micTrackFileName)))
-        // And the folder is reported, so the user hears about the recording it just closed.
-        let reported = manager.recoverInterruptedSessions()
-        #expect(reported.isEmpty) // terminal by now — the report happened on the closing launch
     }
 }
 
-/// A give-up that reports the folder must only do so when a track actually landed. With no audio at
-/// all the folder is `closeEmpty`'s shape, and a "recovered" notification over nothing is a lie.
+/// A give-up that assembled a track reports it as recovered — the archive gained audio the user can
+/// play, and staying silent would leave them to notice by chance.
 @Test
-func recoveryReportsAClosedFolderOnlyWhenATrackActuallyAssembled() throws {
+func recoveryReportsAClosedFolderAsRecoveredWhenATrackActuallyAssembled() throws {
     try withConcatFailingMeeting { root, directory in
         let manager = RecoveryManager(archiveRoot: root)
         for _ in 1..<RecoveryManager.maxAssemblyAttempts {
@@ -212,8 +209,61 @@ func recoveryReportsAClosedFolderOnlyWhenATrackActuallyAssembled() throws {
         // The closing launch: `mic.wav` assembles, so this folder is worth telling the user about.
         // Compared by name: the scan walks the archive root, and `/var` resolving to `/private/var`
         // makes the two URLs unequal while naming the same folder.
-        let reported = manager.recoverInterruptedSessions()
-        #expect(reported.map(\.lastPathComponent) == [directory.lastPathComponent])
+        let outcome = manager.recoverInterruptedSessions()
+        #expect(outcome.recovered.map(\.lastPathComponent) == [directory.lastPathComponent])
+        #expect(outcome.unassembled.isEmpty)
+
+        // Terminal by now: the next launch must walk past it rather than report it again.
+        #expect(manager.recoverInterruptedSessions().isEmpty)
+    }
+}
+
+/// The worst case, and the one that must not be silent: every track failed, so the meeting exists
+/// only as segments and no launch will ever retry it. `closeEmpty`'s shape (terminal, zero duration,
+/// no wav) with the opposite meaning — so it is reported separately, and `info.md` says in the file
+/// itself where the audio actually is.
+@Test
+func recoveryReportsAFolderWhoseAudioNeverReachedATrackAndSaysSoInInfo() throws {
+    try withRecordingDirectory { root in
+        let directory = root.appendingPathComponent("2026-07-15-1400-retro", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Both tracks fail their concat, so nothing lands: `system` holds segments `-c copy` cannot
+        // splice and `mic` holds none at all.
+        try makeRecording(in: directory, systemSegments: 0, micSegments: nil)
+        try makeConcatFailingSystemTrack(in: directory)
+        try writeInterruptedMarker(in: directory, title: "Retro", segmentCount: 2)
+
+        let manager = RecoveryManager(archiveRoot: root)
+        for _ in 1..<RecoveryManager.maxAssemblyAttempts {
+            manager.recoverInterruptedSessions()
+        }
+        let outcome = manager.recoverInterruptedSessions() // the closing launch
+
+        // Not reported as recovered: there is no track to play.
+        #expect(outcome.recovered.isEmpty)
+        #expect(outcome.unassembled.map(\.lastPathComponent) == [directory.lastPathComponent])
+        // The segments are the only copy and must survive the give-up.
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.systemDirName)))
+        #expect(!exists(directory.appendingPathComponent(SegmentLayout.systemTrackFileName)))
+        // And the folder says what happened without the app and without `log show`.
+        #expect(readInfo(in: directory).contains("could not be assembled"))
+    }
+}
+
+/// The crash-time segment count is the last true one anybody wrote, and a terminal marker must not
+/// seal a number in the wrong unit over it: `tracks.count` would close a 2-segment meeting as
+/// `segment_count: 0`, and a 240-segment one as `2`.
+@Test
+func recoveryKeepsTheSegmentCountWhenItGivesUp() throws {
+    try withConcatFailingMeeting { root, directory in
+        let manager = RecoveryManager(archiveRoot: root)
+        for _ in 0..<RecoveryManager.maxAssemblyAttempts {
+            manager.recoverInterruptedSessions()
+        }
+
+        let manifest = try readManifest(in: directory)
+        #expect(manifest.status == .recovered)
+        #expect(manifest.segmentCount == 2) // as written at crash time, not the number of tracks
     }
 }
 

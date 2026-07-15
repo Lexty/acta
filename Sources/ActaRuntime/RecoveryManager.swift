@@ -10,6 +10,24 @@ import os
 /// `system.wav`/`mic.wav` (the unfinalized last segment is repaired from its actual size, not
 /// dropped) and moves the marker to `status=recovered`.
 public struct RecoveryManager {
+    /// What a recovery pass changed in the archive.
+    ///
+    /// Two lists rather than one, because the two outcomes need opposite things said about them: a
+    /// folder that assembled holds audio the user can play, whereas one that gave up with nothing
+    /// assembled holds a meeting that exists only as raw segments. Reporting the second as
+    /// "recovered" would be false, and not reporting it at all would leave the audio undiscoverable
+    /// outside `log show`.
+    public struct Outcome: Sendable {
+        /// Folders that now hold at least one assembled track.
+        public var recovered: [URL] = []
+        /// Folders closed with their audio still only in the segments: no track assembled, so there
+        /// is no wav to play and the segments are the sole copy of the meeting.
+        public var unassembled: [URL] = []
+
+        /// Whether the pass left the archive as it found it.
+        public var isEmpty: Bool { recovered.isEmpty && unassembled.isEmpty }
+    }
+
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
     private let fileManager = FileManager.default
     private let store = SessionManifestStore()
@@ -23,16 +41,16 @@ public struct RecoveryManager {
     }
 
     /// Scan the archive and recover every interrupted recording. An error in one folder does not
-    /// affect the others (isolated in a `do/catch`). Returns the folders that were recovered.
+    /// affect the others (isolated in a `do/catch`). Returns what the pass changed.
     @discardableResult
-    public func recoverInterruptedSessions() -> [URL] {
+    public func recoverInterruptedSessions() -> Outcome {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ) else {
-            return []
+            return Outcome()
         }
 
-        var recovered: [URL] = []
+        var outcome = Outcome()
         for dir in dirs {
             let isDir = (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             guard isDir, let manifest = store.read(from: dir), Recovery.needsRecovery(manifest) else {
@@ -40,7 +58,7 @@ public struct RecoveryManager {
             }
             do {
                 try recover(directory: dir, manifest: manifest)
-                recovered.append(dir)
+                outcome.recovered.append(dir)
             } catch SegmentAssembler.AssembleError.noSegments {
                 // There is nothing to salvage and never will be: the crash managed to create the
                 // marker, but not a single valid segment was left. Leaving `recording` would doom
@@ -62,8 +80,10 @@ public struct RecoveryManager {
                 // live one, and its usual causes — segments `-c copy` cannot splice, a torn file —
                 // are as permanent as a failed repair. Left unbounded it would re-run a full concat
                 // on every launch, with every `start()` waiting on it, forever.
-                if retryOrCloseIncomplete(directory: dir, manifest: manifest) {
-                    recovered.append(dir)
+                switch retryOrCloseIncomplete(directory: dir, manifest: manifest) {
+                case .retrying: break
+                case .closedWithTracks: outcome.recovered.append(dir)
+                case .closedWithoutTracks: outcome.unassembled.append(dir)
                 }
             } catch {
                 // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the
@@ -76,7 +96,7 @@ public struct RecoveryManager {
                     """)
             }
         }
-        return recovered
+        return outcome
     }
 
     /// Recover a single folder: assemble the surviving segments, mark it `recovered`.
@@ -104,10 +124,20 @@ public struct RecoveryManager {
     /// chance of reaching a file.
     public static let maxAssemblyAttempts = 3
 
+    /// What a pass over an incomplete folder decided.
+    private enum IncompleteOutcome {
+        /// An attempt was spent; the folder stays `recording` for the next launch.
+        case retrying
+        /// The attempts ran out and the folder closed over at least one assembled track.
+        case closedWithTracks
+        /// The attempts ran out and no track assembled: the meeting survives only as segments.
+        case closedWithoutTracks
+    }
+
     /// A folder whose segments still hold audio the assembly could not place — a failed repair, or a
     /// concat `ffmpeg` refused. Spend an attempt and leave it `recording` so the next launch tries
     /// again — until the attempts run out, at which point keep the tracks that did assemble and close
-    /// the folder. Returns whether the folder is worth reporting to the user.
+    /// the folder.
     ///
     /// Bounded rather than eternal because neither cause is reliably transient. A failed concat is a
     /// property of the segments themselves — a stream `-c copy` cannot splice, a torn file — and they
@@ -117,7 +147,7 @@ public struct RecoveryManager {
     ///
     /// Giving up loses nothing: `assemble` throws before any deletion and recovery never deletes
     /// anyway, so the segments outlive us and stay the audio's copy of record.
-    private func retryOrCloseIncomplete(directory: URL, manifest: SessionManifest) -> Bool {
+    private func retryOrCloseIncomplete(directory: URL, manifest: SessionManifest) -> IncompleteOutcome {
         let name = directory.lastPathComponent
         var updated = manifest
         updated.assemblyAttempts += 1
@@ -129,8 +159,8 @@ public struct RecoveryManager {
                 (attempt \(updated.assemblyAttempts, privacy: .public) of \
                 \(Self.maxAssemblyAttempts, privacy: .public)) — will retry on the next launch
                 """)
-            try? store.write(updated, to: directory)
-            return false
+            writeMarker(updated, to: directory)
+            return .retrying
         }
 
         log.error("""
@@ -149,20 +179,33 @@ public struct RecoveryManager {
         let duration = tracks.compactMap { SegmentAssembler.measuredDuration(of: $0) }.max()
 
         updated.status = .recovered
-        // The count the crash left behind describes segments, not the assembly that just closed over
-        // them; sealing a terminal marker around a number this path never corrected would leave it
-        // permanently wrong in a file the user is told to read by eye.
-        updated.segmentCount = tracks.count
-        try? store.write(updated, to: directory)
-        updateInfo(in: directory, status: updated.status,
-                   durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0)
+        // `segmentCount` is deliberately left as the crash found it. It counts segments, and the
+        // crash-time count is the last true one anybody wrote: overwriting it with `tracks.count`
+        // would seal a terminal marker around a number in the wrong unit — a 240-segment meeting
+        // closing as `segment_count: 2` — which reads plausible and is exactly the kind of wrong the
+        // duration fallback in `recover` would then multiply by `segmentSeconds`.
+        writeMarker(updated, to: directory)
 
-        // Report it only if a track actually landed. With one on disk the folder genuinely holds
-        // recovered audio and the archive just changed, so staying silent would leave the user to
-        // notice by chance. With none, the folder is `closeEmpty`'s shape and takes its reasoning:
-        // there is no reason to lie in a notification.
-        return !tracks.isEmpty
+        // With no track at all the folder would otherwise be byte-for-byte `closeEmpty`'s shape —
+        // terminal, zero duration, no wav — while meaning the opposite: the audio exists, in the
+        // segments, and no launch will ever try to assemble it again. `info.md` is the archive's
+        // metadata and is read without the app (SPEC §6), so that is where the difference has to be
+        // visible; a `log.error` nobody runs `log show` for is not a diagnosis.
+        let note = tracks.isEmpty ? Self.unassembledNote : nil
+        updateInfo(in: directory, status: updated.status,
+                   durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0,
+                   note: note)
+
+        return tracks.isEmpty ? .closedWithoutTracks : .closedWithTracks
     }
+
+    /// What `info.md` says about a meeting whose audio never reached a track. Spelled out in the file
+    /// itself so the segments are discoverable by whoever opens the folder.
+    static let unassembledNote = """
+        > **The audio could not be assembled.** Recovery tried \(maxAssemblyAttempts) times and \
+        `ffmpeg` never produced a track. The raw segments under `system/` and `mic/` were kept — \
+        they are the only copy of this recording.
+        """
 
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a
     /// terminal status, so the next launch will not touch it again. We do not delete the folder
@@ -176,19 +219,43 @@ public struct RecoveryManager {
         var updated = manifest
         updated.status = .recovered
         updated.segmentCount = 0
-        try? store.write(updated, to: directory)
+        writeMarker(updated, to: directory)
         updateInfo(in: directory, status: updated.status, durationSeconds: 0)
+    }
+
+    /// Persist the marker, logging a failure instead of swallowing it.
+    ///
+    /// The write is the one step the retry bound cannot do without: if it fails, `assemblyAttempts`
+    /// never rises and the folder re-runs a full concat on every launch — the very loop the bound
+    /// exists to stop. That case is also unfixable from here (an unwritable folder cannot be sealed
+    /// terminal either, because sealing it *is* a write), so the honest thing this code can do is
+    /// leave a trace of why the bound stopped working.
+    private func writeMarker(_ manifest: SessionManifest, to directory: URL) {
+        do {
+            try store.write(manifest, to: directory)
+        } catch {
+            log.error("""
+                \(directory.lastPathComponent, privacy: .public): could not write \
+                \(SessionManifest.fileName, privacy: .public) — the folder will be retried on every \
+                launch: \(error.localizedDescription, privacy: .public)
+                """)
+        }
     }
 
     /// Bring `info.md` in line with the marker: at start it is written as `recording` with a zero
     /// duration, and without this a recovered meeting would stay "recording" forever — `info.md`
     /// *is* the archive metadata (SPEC §6), and it is read without the app.
+    ///
+    /// `note` is appended to the body for the cases the front-matter has no vocabulary for — a
+    /// give-up that assembled nothing looks identical to an empty recording in `status`+`duration`
+    /// alone.
     private func updateInfo(in directory: URL, status: SessionManifest.Status,
-                            durationSeconds: Int) {
+                            durationSeconds: Int, note: String? = nil) {
         let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return }
-        let patched = MeetingInfo.patchedFrontMatter(contents, status: status,
+        var patched = MeetingInfo.patchedFrontMatter(contents, status: status,
                                                      durationSeconds: durationSeconds)
+        if let note { patched = MeetingInfo.appendingNote(patched, note: note) }
         try? patched.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 }
