@@ -61,6 +61,15 @@ final class SegmentWriter {
         finalizeCurrent()
     }
 
+    /// Финализировать текущий сегмент и перейти к следующему индексу — для рестарта стрима
+    /// watchdog'ом (Task 4). В отличие от `finish()`, двигает счётчик вперёд, чтобы после
+    /// перезапуска новый стрим писал в новый файл, а уже закрытый сегмент **не перезаписывался**.
+    func finishAndAdvance() {
+        guard writer != nil else { return }
+        finalizeCurrent()
+        segmentIndex += 1
+    }
+
     // MARK: - Приватное
 
     private func startSegment(at pts: CMTime, formatHint: CMFormatDescription?) {

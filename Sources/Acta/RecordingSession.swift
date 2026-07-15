@@ -16,22 +16,38 @@ final class RecordingSession {
     private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingSession")
     private let segmentSeconds: Int
     private let recorder: AudioRecorder
+    private let selfCheck: SelfCheck
     private let store = SessionManifestStore()
     private let assembler = SegmentAssembler()
+    private var watchdogTask: Task<Void, Never>?
 
     init(directory: URL, segmentSeconds: Int = SegmentLayout.defaultSegmentSeconds) {
         self.directory = directory
         self.segmentSeconds = segmentSeconds
-        self.recorder = AudioRecorder(directory: directory, segmentSeconds: Double(segmentSeconds))
+        let recorder = AudioRecorder(directory: directory, segmentSeconds: Double(segmentSeconds))
+        self.recorder = recorder
+        self.selfCheck = SelfCheck(recorder: recorder)
     }
 
-    /// Старт: создать папку, записать `session.json` (`recording`), запустить захват.
+    /// Старт: создать папку, записать `session.json` (`recording`), запустить захват и
+    /// самодиагностику. Если данные реально не пошли — стоп и бросок понятной ошибки: «немого»
+    /// recording-статуса не показываем (Task 4).
     func start(startedAt: Date = Date()) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
         try store.write(manifest, to: directory)
         try await recorder.start()
+
+        if let failure = await selfCheck.verifyStartAndHeal() {
+            log.error("Старт не подтверждён самодиагностикой: \(failure.userMessage, privacy: .public)")
+            await recorder.stop()
+            throw failure
+        }
+
+        watchdogTask = Task { [selfCheck] in
+            await selfCheck.runWatchdog()
+        }
         log.info("Сессия записи начата: \(self.directory.lastPathComponent, privacy: .public)")
     }
 
@@ -40,6 +56,8 @@ final class RecordingSession {
     /// - Parameter deleteSegments: удалять ли каталоги сегментов после успешной склейки.
     @discardableResult
     func stop(deleteSegments: Bool = true) async -> SegmentAssembler.Result? {
+        watchdogTask?.cancel()
+        watchdogTask = nil
         await recorder.stop()
 
         let counts = recorder.finalizedSegmentCounts()

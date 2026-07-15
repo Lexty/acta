@@ -12,7 +12,7 @@ import os
 ///
 /// `captureMicrophone` доступен с macOS 15, поэтому весь рекордер помечен соответственно.
 @available(macOS 15.0, *)
-final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
+final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
     /// Ошибки старта записи для самодиагностики (Task 4).
     enum RecorderError: Error {
         case noDisplay
@@ -31,6 +31,22 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     private let screenQueue = DispatchQueue(label: "dev.personal.acta.audio.screen")
 
     private var stream: SCStream?
+
+    // Счётчик пришедших буферов (обе дорожки) под замком: делегат дёргают разные очереди
+    // (`systemQueue`/`micQueue`), а читает самодиагностика/watchdog с ещё одной. Основной сигнал
+    // «данные реально идут» (Task 4).
+    private let bufferCountLock = NSLock()
+    private var receivedBuffers = 0
+
+    /// Сколько аудио-буферов пришло с момента старта (для `SelfCheck`/watchdog).
+    var receivedBufferCount: Int {
+        bufferCountLock.lock()
+        defer { bufferCountLock.unlock() }
+        return receivedBuffers
+    }
+
+    /// Поднят ли сейчас `SCStream` (для снимка самодиагностики).
+    var isStreaming: Bool { stream != nil }
 
     /// - Parameter directory: папка записи; сегменты пишутся в её подкаталоги `system/` и `mic/`.
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
@@ -77,6 +93,20 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         log.info("Захват запущен")
     }
 
+    /// Перезапустить стрим, **сохранив уже записанные сегменты** — для самолечения (`SelfCheck`)
+    /// и watchdog'а. Текущие сегменты финализируются и остаются валидными, счётчики дорожек
+    /// сдвигаются вперёд, поднимается новый `SCStream`.
+    func restart() async throws {
+        if let stream {
+            try? await stream.stopCapture()
+        }
+        stream = nil
+        systemQueue.sync { systemWriter.finishAndAdvance() }
+        micQueue.sync { micWriter.finishAndAdvance() }
+        log.info("Перезапуск стрима")
+        try await start()
+    }
+
     /// Остановить захват и финализировать текущие сегменты обеих дорожек.
     func stop() async {
         if let stream {
@@ -102,12 +132,20 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
                 of type: SCStreamOutputType) {
         switch type {
         case .audio:
+            countBuffer()
             systemWriter.append(sampleBuffer)
         case .microphone:
+            countBuffer()
             micWriter.append(sampleBuffer)
         default:
             break // .screen и прочее — игнор
         }
+    }
+
+    private func countBuffer() {
+        bufferCountLock.lock()
+        receivedBuffers += 1
+        bufferCountLock.unlock()
     }
 
     // MARK: - SCStreamDelegate
