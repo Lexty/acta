@@ -10,7 +10,7 @@ import os
 /// (недописанный последний сегмент отбрасывается) и переводит маркер в `status=recovered`.
 struct RecoveryManager {
     /// Итог восстановления одной папки — для уведомления пользователя (Task 6).
-    struct Recovered {
+    struct Recovered: Sendable {
         var directory: URL
         var combinedWAV: URL?
     }
@@ -62,8 +62,24 @@ struct RecoveryManager {
 
         var updated = manifest
         updated.status = .recovered
+        updated.segmentCount = result.segmentCount
         try store.write(updated, to: directory)
+        updateInfo(in: directory, manifest: updated)
 
         return Recovered(directory: directory, combinedWAV: result.combinedWAV)
+    }
+
+    /// Привести `info.md` в соответствие с маркером: на старте он записан как `recording` с нулевой
+    /// длительностью, и без этого восстановленная встреча навсегда осталась бы «идёт запись» —
+    /// `info.md` и есть архивные метаданные (SPEC §6), их читают уже без приложения.
+    ///
+    /// Длительность оцениваем по числу уцелевших сегментов: чистого стопа с таймером не было.
+    private func updateInfo(in directory: URL, manifest: SessionManifest) {
+        let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let duration = manifest.segmentCount * manifest.segmentSeconds
+        let patched = MeetingInfo.patchedFrontMatter(contents, status: manifest.status,
+                                                     durationSeconds: duration)
+        try? patched.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 }

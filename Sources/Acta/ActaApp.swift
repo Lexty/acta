@@ -6,6 +6,8 @@ import ActaKit
 /// старых системах показываем понятную заглушку вместо «немого» меню.
 @main
 struct ActaApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         MenuBarExtra(AppInfo.name, systemImage: "waveform") {
             if #available(macOS 15.0, *) {
@@ -15,6 +17,17 @@ struct ActaApp: App {
             }
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// Нужен ровно ради одного: дать точку входа «приложение запустилось». Восстановление прерванных
+/// записей обязано идти на старте (SPEC §7), а меню-бар с `menuBarExtraStyle(.window)` создаёт свой
+/// контент только по клику пользователя — до первого открытия меню никакой SwiftUI-хук не сработает.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if #available(macOS 15.0, *) {
+            RecordingController.shared.onLaunch()
+        }
     }
 }
 
@@ -38,7 +51,9 @@ struct UnsupportedContent: View {
 /// и заметный показ ошибок самодиагностики (Task 6).
 @available(macOS 15.0, *)
 struct MenuContent: View {
-    @StateObject private var controller = RecordingController()
+    // Общий с `AppDelegate` экземпляр (он запускает восстановление на старте), поэтому `Observed`,
+    // а не `StateObject`: временем жизни владеет не вью.
+    @ObservedObject private var controller = RecordingController.shared
     @State private var settingsExpanded = false
 
     var body: some View {

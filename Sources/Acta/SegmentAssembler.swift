@@ -16,11 +16,17 @@ struct SegmentAssembler {
         var systemWAV: URL?
         var micWAV: URL?
         var combinedWAV: URL?
+        /// Сколько валидных сегментов вошло в склейку (максимум по дорожкам). Восстановление
+        /// оценивает по нему длительность прерванной записи: чистого стопа с таймером не было.
+        var segmentCount: Int = 0
     }
 
     enum AssembleError: Error {
         case ffmpegNotFound
         case noSegments
+        /// `ffmpeg` не смог склеить дорожку. Отдельно от `noSegments`: пустая дорожка — не ошибка,
+        /// а провал склейки означает, что сегменты — единственная копия аудио и трогать их нельзя.
+        case concatFailed(track: String)
     }
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "SegmentAssembler")
@@ -44,18 +50,21 @@ struct SegmentAssembler {
         let needSystem = tracks.system || tracks.combined
         let needMic = tracks.mic || tracks.combined
 
-        let systemWAV = needSystem
+        let system = needSystem
             ? try concatTrack(dirName: SegmentLayout.systemDirName,
                               outputName: "system.wav", in: directory, ffmpeg: ffmpeg)
-            : nil
-        let micWAV = needMic
+            : (url: nil, count: 0)
+        let mic = needMic
             ? try concatTrack(dirName: SegmentLayout.micDirName,
                               outputName: "mic.wav", in: directory, ffmpeg: ffmpeg)
-            : nil
+            : (url: nil, count: 0)
 
+        let systemWAV = system.url
+        let micWAV = mic.url
         guard systemWAV != nil || micWAV != nil else { throw AssembleError.noSegments }
 
-        var result = Result(systemWAV: systemWAV, micWAV: micWAV, combinedWAV: nil)
+        var result = Result(systemWAV: systemWAV, micWAV: micWAV, combinedWAV: nil,
+                            segmentCount: max(system.count, mic.count))
 
         if tracks.combined, let systemWAV, let micWAV {
             let combined = directory.appendingPathComponent("combined.wav")
@@ -94,8 +103,10 @@ struct SegmentAssembler {
 
     /// Склеить валидные сегменты одной дорожки в `outputName`. Возвращает URL итога либо `nil`,
     /// если валидных сегментов нет (пустая дорожка — не ошибка, просто нечего склеивать).
+    /// Бросает `concatFailed`, если сегменты есть, но `ffmpeg` их не склеил: молча вернуть `nil`
+    /// нельзя — вызывающий счёл бы дорожку пустой и удалил бы её сегменты.
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
-                             ffmpeg: String) throws -> URL? {
+                             ffmpeg: String) throws -> (url: URL?, count: Int) {
         let trackDir = directory.appendingPathComponent(dirName)
         let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
 
@@ -112,7 +123,7 @@ struct SegmentAssembler {
                                          headerByFileName: headers)
         guard !plan.isEmpty else {
             log.info("Дорожка \(dirName, privacy: .public): валидных сегментов нет")
-            return nil
+            return (nil, 0)
         }
 
         let paths = plan.map { trackDir.appendingPathComponent($0).path }
@@ -122,8 +133,8 @@ struct SegmentAssembler {
 
         let output = directory.appendingPathComponent(outputName)
         let args = FFmpeg.concatArgs(listPath: listURL.path, outputPath: output.path)
-        guard runFFmpeg(ffmpeg, args: args) else { return nil }
-        return output
+        guard runFFmpeg(ffmpeg, args: args) else { throw AssembleError.concatFailed(track: dirName) }
+        return (output, plan.count)
     }
 
     /// Прочитать начало файла для проверки WAV-заголовка (`Recovery.isValidSegment`). Пустой

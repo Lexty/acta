@@ -172,17 +172,27 @@ final class SelfCheck: @unchecked Sendable {
         var trackers = makeWatchdogs(from: counters())
         var receivedAtWindowStart = trackers.received
         var restartsLeft = Self.maxRestartAttempts
+        /// Сколько было записано сразу после последнего рестарта: рост сверх этого = рестарт помог.
+        var writtenAfterRestart = 0
         // Причина последнего неудавшегося рестарта: по счётчикам её потом не восстановить, а
         // сообщить пользователю надо именно её, а не догадку «нет данных / не пишется диск».
         var restartFailure: StartupFailure?
         let tickNanos = UInt64(Self.watchdogTickSeconds * 1_000_000_000)
 
-        while !Task.isCancelled {
+        watch: while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: tickNanos)
             if Task.isCancelled { break }
 
             let now = counters()
             let time = Self.monotonicSeconds()
+            // Рестарт вылечил поток — возвращаем бюджет попыток. Иначе три попытки были бы квотой
+            // на всю запись: часовая встреча с редкими, каждый раз успешно вылеченными провалами
+            // оборвалась бы на четвёртом. Лимит должен ловить безнадёжный стрим (подряд идущие
+            // неудачные рестарты), а не сумму давно устранённых сбоев.
+            if restartsLeft < Self.maxRestartAttempts, now.written > writtenAfterRestart {
+                restartsLeft = Self.maxRestartAttempts
+                restartFailure = nil
+            }
             let stalled = trackers.flow.observe(bufferCount: now.written, at: time)
             // Оба наблюдения обязательны: короткое замыкание оставило бы вторую дорожку без апдейта.
             let systemStalled = trackers.system.observe(now.system, at: time)
@@ -197,25 +207,20 @@ final class SelfCheck: @unchecked Sendable {
             if restartsLeft > 0 {
                 restartsLeft -= 1
                 log.error("Watchdog: запись встала, рестарт стрима (осталось: \(restartsLeft))")
-                do {
-                    try await recorder.restart()
+                switch await attemptRestart() {
+                case .succeeded:
                     restartFailure = nil
-                } catch let failure as StartupFailure {
-                    log.error("Watchdog: рестарт не удался — \(failure.userMessage, privacy: .public)")
-                    // Отозванное на ходу право рестартом не вернуть: тратить на него оставшиеся
-                    // попытки незачем — сообщаем сразу, с конкретной подсказкой.
-                    guard failure == .streamNotStarted else {
-                        onStall(failure)
-                        break
-                    }
+                case .retriable(let failure):
                     restartFailure = failure
-                } catch {
-                    log.error("Watchdog: рестарт не удался: \(error.localizedDescription, privacy: .public)")
-                    restartFailure = .streamNotStarted
+                case .fatal(let failure):
+                    onStall(failure)
+                    break watch
                 }
                 // После рестарта сбрасываем окна наблюдения на новые счётчики.
-                trackers = makeWatchdogs(from: counters())
+                let fresh = counters()
+                trackers = makeWatchdogs(from: fresh)
                 receivedAtWindowStart = trackers.received
+                writtenAfterRestart = fresh.written
             } else {
                 // Рестарт падал с конкретной причиной — она точнее догадки по счётчикам. Иначе:
                 // дорожка получает буферы, но не пишет их (или буферы шли всё окно, а записи нет)
@@ -227,6 +232,28 @@ final class SelfCheck: @unchecked Sendable {
                 onStall(failure)
                 break
             }
+        }
+    }
+
+    /// Чем кончилась попытка рестарта стрима.
+    private enum RestartOutcome {
+        case succeeded
+        /// Стрим не поднялся — ровно то, ради чего попытки и заведены: пробуем ещё.
+        case retriable(StartupFailure)
+        /// Рестартом не лечится (право отозвали на ходу) — тратить на это попытки незачем.
+        case fatal(StartupFailure)
+    }
+
+    private func attemptRestart() async -> RestartOutcome {
+        do {
+            try await recorder.restart()
+            return .succeeded
+        } catch let failure as StartupFailure {
+            log.error("Watchdog: рестарт не удался — \(failure.userMessage, privacy: .public)")
+            return failure == .streamNotStarted ? .retriable(failure) : .fatal(failure)
+        } catch {
+            log.error("Watchdog: рестарт не удался: \(error.localizedDescription, privacy: .public)")
+            return .retriable(.streamNotStarted)
         }
     }
 

@@ -108,6 +108,30 @@ public struct MeetingInfo: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// Обновить в готовом `info.md` только `status` и `duration`, сохранив остальное как есть.
+    ///
+    /// Нужно восстановлению: `info.md` пишется на старте (`recording`, `00:00:00`), а после краха
+    /// заголовок/дата/источник известны только из него самого. Полный YAML-парсер ради двух полей
+    /// избыточен, поэтому правим строки внутри front-matter (блок между первой парой `---`).
+    /// Если front-matter не распознан, возвращаем исходный текст: лучше устаревшие метаданные,
+    /// чем испорченный файл.
+    public static func patchedFrontMatter(_ contents: String, status: SessionManifest.Status,
+                                          durationSeconds: Int) -> String {
+        var lines = contents.components(separatedBy: "\n")
+        guard let first = lines.firstIndex(where: { !$0.isEmpty }), lines[first] == "---",
+              let closing = lines[(first + 1)...].firstIndex(of: "---") else {
+            return contents
+        }
+        for index in (first + 1)..<closing {
+            if lines[index].hasPrefix("status:") {
+                lines[index] = "status: \(status.rawValue)"
+            } else if lines[index].hasPrefix("duration:") {
+                lines[index] = "duration: \(quote(formatDuration(seconds: durationSeconds)))"
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Хелперы сериализации
 
     /// Форматировать длительность как `HH:MM:SS` (отрицательные значения → ноль).

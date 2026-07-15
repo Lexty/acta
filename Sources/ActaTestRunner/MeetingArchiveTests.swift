@@ -102,3 +102,39 @@ func renderedInfoQuotesSpecialCharacters() {
     // markdown-заголовок — однострочный (перевод строки схлопнут в пробел).
     #expect(text.contains("# Q3: \"plan\" #1 line2"))
 }
+
+// MARK: - Патч front-matter при восстановлении
+
+@Test
+func patchedFrontMatterUpdatesStatusAndDurationOnly() {
+    let original = MeetingInfo(title: "Weekly Sync", date: Date(timeIntervalSince1970: 0),
+                              source: "Slack", durationSeconds: 0, status: .recording).rendered()
+    let patched = MeetingInfo.patchedFrontMatter(original, status: .recovered, durationSeconds: 3661)
+
+    #expect(patched.contains("status: recovered"))
+    #expect(patched.contains("duration: \"01:01:01\""))
+    // Остальные поля восстановление не знает и не трогает.
+    #expect(patched.contains("title: \"Weekly Sync\""))
+    #expect(patched.contains("source: \"Slack\""))
+    #expect(patched.contains("# Weekly Sync"))
+    #expect(patched.contains("status: recording") == false)
+    #expect(patched.contains("duration: \"00:00:00\"") == false)
+}
+
+@Test
+func patchedFrontMatterLeavesUnrecognizedContentsIntact() {
+    // Нет front-matter → лучше устаревшие метаданные, чем испорченный файл.
+    #expect(MeetingInfo.patchedFrontMatter("# Just a note\n", status: .recovered,
+                                          durationSeconds: 10) == "# Just a note\n")
+    // Незакрытый front-matter — тоже не трогаем.
+    let unclosed = "---\nstatus: recording\n"
+    #expect(MeetingInfo.patchedFrontMatter(unclosed, status: .done, durationSeconds: 5) == unclosed)
+}
+
+@Test
+func patchedFrontMatterIgnoresBodyLinesLookingLikeFields() {
+    // Правим только внутри front-matter: строка в теле с тем же префиксом остаётся как есть.
+    let contents = "---\nstatus: recording\n---\n\nstatus: recording\n"
+    let patched = MeetingInfo.patchedFrontMatter(contents, status: .recovered, durationSeconds: 0)
+    #expect(patched == "---\nstatus: recovered\n---\n\nstatus: recording\n")
+}

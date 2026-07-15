@@ -49,10 +49,20 @@ final class RecordingController: ObservableObject {
     /// клика: `phase` становится `.recording` лишь в конце `performStart` (после ~2 с самопроверки),
     /// поэтому без этого флага второй клик поднял бы вторую сессию, а первая утекла бы.
     private var isStarting = false
-    /// Восстановление прерванных записей запускаем один раз за запуск приложения. `onAppear`
-    /// дёргается при каждом открытии меню, а `RecoveryManager` считает любую папку со статусом
-    /// `recording` прерванной — включая активную запись, склейку которой нельзя запускать на лету.
+    /// Идёт ли асинхронный стоп прямо сейчас. Симметрично `isStarting`: `phase` становится `.idle`
+    /// лишь в конце `performStop` — после склейки, а она занимает секунды. Без флага второй клик
+    /// (или watchdog, сработавший в этот момент) запустил бы вторую склейку той же папки: два
+    /// `ffmpeg` писали бы одни и те же wav и list-файлы, вплоть до потери записи.
+    private var isStopping = false
+    /// Восстановление прерванных записей запускаем один раз за запуск приложения (из `onLaunch`).
+    /// `RecoveryManager` считает любую папку со статусом `recording` прерванной — включая активную
+    /// запись, склейку которой нельзя запускать на лету, поэтому старт ждёт эту задачу.
+    private var recoveryTask: Task<Void, Never>?
     private var didRunRecovery = false
+
+    /// Общий экземпляр: восстановление должно стартовать при запуске приложения (`AppDelegate`),
+    /// а не при первом открытии меню, и то же состояние показывает `MenuContent`.
+    static let shared = RecordingController()
 
     init(settingsStore: SettingsStore = SettingsStore()) {
         self.settingsStore = settingsStore
@@ -82,14 +92,21 @@ final class RecordingController: ObservableObject {
 
     // MARK: - Жизненный цикл приложения
 
-    /// Вызывать один раз при появлении меню: восстановить прерванные записи, запросить право на
-    /// уведомления, подсказать источник и обновить список.
+    /// Вызывать один раз при запуске приложения (`AppDelegate`), до и независимо от открытия меню:
+    /// SPEC §7 требует восстанавливать прерванные записи именно на старте. Меню-бар с
+    /// `menuBarExtraStyle(.window)` создаёт контент только по клику, поэтому вешать восстановление
+    /// на `onAppear` нельзя — после краха запись висела бы несклеенной, пока не откроют меню.
+    func onLaunch() {
+        Notifier.requestAuthorization()
+        guard !didRunRecovery else { return }
+        didRunRecovery = true
+        recoveryTask = Task { [weak self] in await self?.runRecovery() }
+    }
+
+    /// Вызывать при появлении меню: запросить право на уведомления, подсказать источник и
+    /// обновить список.
     func onAppear() {
         Notifier.requestAuthorization()
-        if !didRunRecovery {
-            didRunRecovery = true
-            runRecovery()
-        }
         if title.isEmpty {
             title = SourceDetector.detectedSource().map {
                 MeetingSource.suggestedTitle(source: $0, date: Date())
@@ -99,8 +116,15 @@ final class RecordingController: ObservableObject {
     }
 
     /// Просканировать архив и восстановить прерванные краш/рестартом записи (см. `RecoveryManager`).
-    private func runRecovery() {
-        let recovered = RecoveryManager(archiveRoot: store.archiveRoot).recoverInterruptedSessions()
+    ///
+    /// Склейка синхронно гоняет `ffmpeg` по всем прерванным папкам — для часовой встречи это
+    /// десятки секунд. На главном акторе это заморозило бы меню целиком, поэтому работа уходит с
+    /// него, а на главный возвращаются только баннер и уведомление.
+    private func runRecovery() async {
+        let root = store.archiveRoot
+        let recovered = await Task.detached(priority: .utility) {
+            RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+        }.value
         guard !recovered.isEmpty else { return }
         recoveredBanner = recovered.count == 1
             ? "Восстановлена 1 прерванная запись."
@@ -108,6 +132,7 @@ final class RecordingController: ObservableObject {
         log.info("Восстановлено записей: \(recovered.count)")
         Notifier.notify(title: "Записи восстановлены",
                         body: "После сбоя автоматически восстановлено: \(recovered.count).")
+        refresh()
     }
 
     /// Обновить список сохранённых записей.
@@ -119,7 +144,7 @@ final class RecordingController: ObservableObject {
 
     /// Начать запись. Заголовок берётся из поля, а если оно пусто — из авто-подсказки.
     func start() {
-        guard phase != .recording, !isStarting else { return }
+        guard phase != .recording, !isStarting, !isStopping else { return }
         isStarting = true
         recoveredBanner = ""
         errorMessage = ""
@@ -132,6 +157,10 @@ final class RecordingController: ObservableObject {
 
     private func performStart(title: String, source: String) async {
         defer { isStarting = false }
+        // Дождаться восстановления: оно считает прерванной любую папку со `status=recording` — а
+        // новая запись создаёт ровно такую. Старт сразу после запуска приложения иначе попал бы
+        // под склейку собственной, ещё пишущейся папки.
+        await recoveryTask?.value
         var createdDirectory: URL?
         do {
             // Снимок настроек на момент старта: смена пути архива/длины сегмента подхватывается
@@ -192,8 +221,9 @@ final class RecordingController: ObservableObject {
     /// Нельзя оставлять «идёт запись»: останавливаем сессию, склеиваем то, что успели записать,
     /// и показываем ошибку.
     private func handleFatalStall(_ failure: StartupFailure) {
-        guard phase == .recording, let session, let directory = currentDirectory,
+        guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
+        isStopping = true
         stopTimer()
         phase = .error
         errorMessage = failure.userMessage
@@ -207,13 +237,18 @@ final class RecordingController: ObservableObject {
         elapsedSeconds = 0
 
         Task { [weak self] in
-            await session.stop()
+            let result = await session.stop()
             let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
             await MainActor.run {
                 guard let self else { return }
+                self.isStopping = false
+                // Склейка могла не удаться — тогда маркер остался `recording` и её повторит
+                // восстановление. Ставить в `info.md` `done` в этом случае нельзя: файл — это
+                // архивные метаданные, и они разошлись бы с реальностью.
                 try? self.store.writeInfo(
                     MeetingInfo(title: title, date: startedAt, source: source,
-                                durationSeconds: duration, status: .done),
+                                durationSeconds: duration,
+                                status: result == nil ? .recording : .done),
                     to: directory)
                 self.refresh()
             }
@@ -222,27 +257,53 @@ final class RecordingController: ObservableObject {
 
     /// Остановить запись: финализировать сегменты, обновить `info.md`, уведомить, обновить список.
     func stop() {
-        guard phase == .recording, let session, let directory = currentDirectory,
+        guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
+        isStopping = true
         Task { await performStop(session: session, directory: directory, startedAt: startedAt) }
     }
 
     private func performStop(session: RecordingSession, directory: URL, startedAt: Date) async {
+        defer { isStopping = false }
         stopTimer()
-        await session.stop()
+        let result = await session.stop()
         let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
-        try? store.writeInfo(
-            MeetingInfo(title: currentTitle, date: startedAt, source: currentSource,
-                        durationSeconds: duration, status: .done),
-            to: directory)
-        Notifier.notify(title: "Запись сохранена", body: currentTitle)
-        log.info("Запись остановлена и сохранена")
+        let stoppedTitle = currentTitle
 
         self.session = nil
         currentDirectory = nil
         self.startedAt = nil
-        phase = .idle
         elapsedSeconds = 0
+
+        // Склейка не удалась (нет ffmpeg / ffmpeg упал): итоговых wav нет, маркер остался
+        // `recording`, сегменты целы и их подхватит восстановление на следующем запуске. Сказать
+        // «сохранена» тут — то же, что показывать «немой» recording: состояние не соответствует
+        // тому, что реально лежит на диске.
+        guard result != nil else {
+            try? store.writeInfo(
+                MeetingInfo(title: stoppedTitle, date: startedAt, source: currentSource,
+                            durationSeconds: duration, status: .recording),
+                to: directory)
+            phase = .error
+            errorMessage = SegmentAssembler.locateFFmpeg() == nil
+                ? "Запись остановлена, но собрать итоговый файл нечем: не найден ffmpeg "
+                    + "(установите его: brew install ffmpeg). Сегменты сохранены — их склеит "
+                    + "восстановление при следующем запуске."
+                : "Запись остановлена, но склейка не удалась. Сегменты сохранены — их склеит "
+                    + "восстановление при следующем запуске."
+            log.error("Запись остановлена, но склейка не удалась — оставляем сегменты восстановлению")
+            refresh()
+            return
+        }
+
+        try? store.writeInfo(
+            MeetingInfo(title: stoppedTitle, date: startedAt, source: currentSource,
+                        durationSeconds: duration, status: .done),
+            to: directory)
+        Notifier.notify(title: "Запись сохранена", body: stoppedTitle)
+        log.info("Запись остановлена и сохранена")
+
+        phase = .idle
         title = ""
         refresh()
     }
