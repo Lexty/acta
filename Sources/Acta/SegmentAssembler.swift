@@ -66,17 +66,22 @@ struct SegmentAssembler {
             }
         }
 
+        // Если микс запрошен, но не получился (сбой ffmpeg / одна из дорожек пуста), исходные
+        // system.wav/mic.wav и сегменты — единственные уцелевшие копии аудио. Не удаляем их, иначе
+        // при конфигурации «только combined» чистый стоп потерял бы запись целиком.
+        let combinedRequestedButMissing = tracks.combined && result.combinedWAV == nil
+
         // Убрать промежуточные дорожки, которые пользователь не просил сохранять.
-        if !tracks.system, let systemWAV {
+        if !tracks.system, let systemWAV, !combinedRequestedButMissing {
             try? fileManager.removeItem(at: systemWAV)
             result.systemWAV = nil
         }
-        if !tracks.mic, let micWAV {
+        if !tracks.mic, let micWAV, !combinedRequestedButMissing {
             try? fileManager.removeItem(at: micWAV)
             result.micWAV = nil
         }
 
-        if deleteSegments {
+        if deleteSegments, !combinedRequestedButMissing {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }

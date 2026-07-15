@@ -22,6 +22,16 @@ func recoveryPlanDropsCorruptLastSegment() {
 }
 
 @Test
+func recoveryPlanDropsCorruptMiddleSegment() {
+    // Битый сегмент отбрасывается независимо от позиции: пропуск одного чанка допустим, но
+    // трейлинг-валидные сегменты должны сохраниться (а не обрезаться на первом битом).
+    let names = ["0000.wav", "0001.wav", "0002.wav"]
+    let sizes = ["0000.wav": 4096, "0001.wav": 0, "0002.wav": 4096]
+    let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes)
+    #expect(plan == ["0000.wav", "0002.wav"])
+}
+
+@Test
 func recoveryPlanFiltersJunkAndMissingSizes() {
     let names = ["0000.wav", ".DS_Store", "combined.wav", "0001.wav"]
     // 0001.wav отсутствует в размерах → трактуем как 0 → отбрасываем.

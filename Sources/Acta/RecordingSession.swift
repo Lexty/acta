@@ -39,7 +39,11 @@ final class RecordingSession: @unchecked Sendable {
     /// Старт: создать папку, записать `session.json` (`recording`), запустить захват и
     /// самодиагностику. Если данные реально не пошли — стоп и бросок понятной ошибки: «немого»
     /// recording-статуса не показываем (Task 4).
-    func start(startedAt: Date = Date()) async throws {
+    /// - Parameter onStall: вызывается, если watchdog исчерпал попытки рестарта во время записи
+    ///   (поток буферов пропал безвозвратно). Контроллер обязан показать ошибку и остановить
+    ///   запись — «немой» recording-статус недопустим. Вызывается не на главном акторе.
+    func start(startedAt: Date = Date(),
+               onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
@@ -53,7 +57,7 @@ final class RecordingSession: @unchecked Sendable {
         }
 
         watchdogTask = Task { [selfCheck] in
-            await selfCheck.runWatchdog()
+            await selfCheck.runWatchdog(onStall: onStall)
         }
         log.info("Сессия записи начата: \(self.directory.lastPathComponent, privacy: .public)")
     }
@@ -62,7 +66,11 @@ final class RecordingSession: @unchecked Sendable {
     /// маркер `done`. Удаление сегментов после склейки — тоже из настроек (`deleteSegmentsAfterAssembly`).
     @discardableResult
     func stop() async -> SegmentAssembler.Result? {
+        // Дождаться завершения watchdog'а до остановки рекордера: иначе его `restart()` мог бы
+        // отработать уже после `recorder.stop()` и поднять новый `SCStream`, который писал бы
+        // сегменты после склейки (гонка за `stream`). Отмена + await сериализует переходы.
         watchdogTask?.cancel()
+        await watchdogTask?.value
         watchdogTask = nil
         await recorder.stop()
 

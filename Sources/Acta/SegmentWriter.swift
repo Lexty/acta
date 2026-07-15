@@ -57,16 +57,21 @@ final class SegmentWriter {
     }
 
     /// Финализировать текущий сегмент (чистый стоп). После вызова writer сброшен.
+    ///
+    /// Ждём завершения `finishWriting`: сразу после этого вызова запускается склейка сегментов
+    /// (`SegmentAssembler`), а файл валиден только когда отработал completion-хэндлер. Иначе
+    /// последний сегмент склеивается недописанным/отбрасывается — терялся бы хвост каждой записи.
     func finish() {
-        finalizeCurrent()
+        finalizeCurrent(waitForCompletion: true)
     }
 
     /// Финализировать текущий сегмент и перейти к следующему индексу — для рестарта стрима
     /// watchdog'ом (Task 4). В отличие от `finish()`, двигает счётчик вперёд, чтобы после
     /// перезапуска новый стрим писал в новый файл, а уже закрытый сегмент **не перезаписывался**.
+    /// Ждать флаша не нужно: запись продолжается, а склейка будет только на стопе/восстановлении.
     func finishAndAdvance() {
         guard writer != nil else { return }
-        finalizeCurrent()
+        finalizeCurrent(waitForCompletion: false)
         segmentIndex += 1
     }
 
@@ -100,22 +105,31 @@ final class SegmentWriter {
     }
 
     private func rotate(at pts: CMTime, formatHint: CMFormatDescription?) {
-        finalizeCurrent()
+        // Ротация на горячем пути записи: не блокируем очередь дорожки ожиданием флаша — сегмент
+        // допишется в фоне задолго до склейки, а следующий уже принимает буферы.
+        finalizeCurrent(waitForCompletion: false)
         segmentIndex += 1
         startSegment(at: pts, formatHint: formatHint)
     }
 
-    private func finalizeCurrent() {
+    private func finalizeCurrent(waitForCompletion: Bool) {
         guard let writer, let input else { return }
         self.writer = nil
         self.input = nil
         self.segmentStart = .invalid
         input.markAsFinished()
         // Сегмент закрыт: считаем его в счётчике сразу (мутация только с очереди дорожки, гонки
-        // нет). Финализация файла асинхронна, но ранее записанные сегменты уже валидны — краш в
-        // этот момент теряет максимум текущий. Валидность подтверждается ffprobe/восстановлением.
+        // нет). Ранее записанные сегменты уже валидны — краш в этот момент теряет максимум текущий.
         finalizedCount += 1
-        writer.finishWriting { }
+        if waitForCompletion {
+            // completion-хэндлер приходит на внутренней очереди AVFoundation, а не на нашей очереди
+            // дорожки, поэтому ожидание семафором здесь не деэдлочит.
+            let done = DispatchSemaphore(value: 0)
+            writer.finishWriting { done.signal() }
+            done.wait()
+        } else {
+            writer.finishWriting { }
+        }
     }
 
     /// Единые настройки WAV/PCM: 48 кГц, стерео, 16 бит. Приводим обе дорожки к одному формату,

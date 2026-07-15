@@ -18,6 +18,17 @@ func segmentIndexParsesValidNames() {
 }
 
 @Test
+func segmentNameAndIndexRoundTripPastFourDigits() {
+    // Индекс ≥ 10000 (длинная запись / короткие сегменты) не помещается в 4 цифры. Имя и парсер
+    // обязаны оставаться обратимыми, иначе такие сегменты молча выпадут из склейки/восстановления.
+    for index in [0, 42, 9999, 10000, 123_456] {
+        let name = SegmentLayout.segmentFileName(index: index)
+        #expect(SegmentLayout.segmentIndex(fromFileName: name) == index)
+    }
+    #expect(SegmentLayout.segmentIndex(fromFileName: "10000.wav") == 10000)
+}
+
+@Test
 func segmentIndexRejectsForeignNames() {
     #expect(SegmentLayout.segmentIndex(fromFileName: ".DS_Store") == nil)
     #expect(SegmentLayout.segmentIndex(fromFileName: "0000.caf") == nil)

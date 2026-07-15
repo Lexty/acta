@@ -45,6 +45,14 @@ final class RecordingController: ObservableObject {
     private var currentSource: String = ""
     private var startedAt: Date?
     private var timerTask: Task<Void, Never>?
+    /// Идёт ли асинхронный старт прямо сейчас (до перехода в `.recording`). Защищает от двойного
+    /// клика: `phase` становится `.recording` лишь в конце `performStart` (после ~2 с самопроверки),
+    /// поэтому без этого флага второй клик поднял бы вторую сессию, а первая утекла бы.
+    private var isStarting = false
+    /// Восстановление прерванных записей запускаем один раз за запуск приложения. `onAppear`
+    /// дёргается при каждом открытии меню, а `RecoveryManager` считает любую папку со статусом
+    /// `recording` прерванной — включая активную запись, склейку которой нельзя запускать на лету.
+    private var didRunRecovery = false
 
     init(settingsStore: SettingsStore = SettingsStore()) {
         self.settingsStore = settingsStore
@@ -78,7 +86,10 @@ final class RecordingController: ObservableObject {
     /// уведомления, подсказать источник и обновить список.
     func onAppear() {
         Notifier.requestAuthorization()
-        runRecovery()
+        if !didRunRecovery {
+            didRunRecovery = true
+            runRecovery()
+        }
         if title.isEmpty {
             title = SourceDetector.detectedSource().map {
                 MeetingSource.suggestedTitle(source: $0, date: Date())
@@ -108,7 +119,8 @@ final class RecordingController: ObservableObject {
 
     /// Начать запись. Заголовок берётся из поля, а если оно пусто — из авто-подсказки.
     func start() {
-        guard phase != .recording else { return }
+        guard phase != .recording, !isStarting else { return }
+        isStarting = true
         recoveredBanner = ""
         errorMessage = ""
         let source = SourceDetector.detectedSource() ?? ""
@@ -119,12 +131,15 @@ final class RecordingController: ObservableObject {
     }
 
     private func performStart(title: String, source: String) async {
+        defer { isStarting = false }
+        var createdDirectory: URL?
         do {
             // Снимок настроек на момент старта: смена пути архива/длины сегмента подхватывается
             // именно новой записью (Task 7), а текущая идёт со своими параметрами до конца.
             let currentSettings = settings.normalized()
             let directory = try MeetingStore(archiveRoot: settingsStore.archiveRoot(for: currentSettings))
                 .createMeetingDirectory(title: title)
+            createdDirectory = directory
             let startedAt = Date()
             let session = RecordingSession(directory: directory, settings: currentSettings)
             // Пишем предварительный info.md (recording): если процесс убьют, у папки уже есть
@@ -134,7 +149,9 @@ final class RecordingController: ObservableObject {
                             durationSeconds: 0, status: .recording),
                 to: directory)
 
-            try await session.start()
+            try await session.start(onStall: { [weak self] failure in
+                Task { @MainActor in self?.handleFatalStall(failure) }
+            })
 
             self.session = session
             currentDirectory = directory
@@ -151,12 +168,55 @@ final class RecordingController: ObservableObject {
             phase = .error
             errorMessage = failure.userMessage
             session = nil
+            cleanupFailedStart(createdDirectory)
             log.error("Старт отклонён самодиагностикой: \(failure.userMessage, privacy: .public)")
         } catch {
             phase = .error
             errorMessage = "Не удалось начать запись: \(error.localizedDescription)"
             session = nil
+            cleanupFailedStart(createdDirectory)
             log.error("Старт не удался: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Убрать папку неудавшегося старта. Данные не потекли (иначе самопроверка бы прошла), значит
+    /// сегментов нет — а брошенная папка со статусом `recording` иначе застряла бы навсегда:
+    /// восстановление на каждом запуске пыталось бы её склеить (нет сегментов → ошибка) и она
+    /// маячила бы «не завершена» в списке.
+    private func cleanupFailedStart(_ directory: URL?) {
+        guard let directory else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// Watchdog исчерпал попытки рестарта во время записи — поток буферов пропал безвозвратно.
+    /// Нельзя оставлять «идёт запись»: останавливаем сессию, склеиваем то, что успели записать,
+    /// и показываем ошибку.
+    private func handleFatalStall(_ failure: StartupFailure) {
+        guard phase == .recording, let session, let directory = currentDirectory,
+              let startedAt else { return }
+        stopTimer()
+        phase = .error
+        errorMessage = failure.userMessage
+        log.error("Watchdog: поток данных пропал — запись остановлена, показана ошибка")
+
+        let title = currentTitle
+        let source = currentSource
+        self.session = nil
+        currentDirectory = nil
+        self.startedAt = nil
+        elapsedSeconds = 0
+
+        Task { [weak self] in
+            await session.stop()
+            let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
+            await MainActor.run {
+                guard let self else { return }
+                try? self.store.writeInfo(
+                    MeetingInfo(title: title, date: startedAt, source: source,
+                                durationSeconds: duration, status: .done),
+                    to: directory)
+                self.refresh()
+            }
         }
     }
 

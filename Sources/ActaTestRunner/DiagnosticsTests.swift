@@ -52,6 +52,13 @@ func diagnoseStreamNotStarted() {
 }
 
 @Test
+func diagnoseStreamNotStartedBeatsMissingMic() {
+    // И стрим не поднялся, и нет микрофона: приоритет у стрима (без него звука нет вовсе).
+    let result = SelfDiagnosis.diagnose(snapshot(hasMic: false, streamStarted: false))
+    #expect(result == .streamNotStarted)
+}
+
+@Test
 func diagnoseNoMicrophone() {
     let result = SelfDiagnosis.diagnose(snapshot(hasMic: false))
     #expect(result == .noMicrophonePermission)

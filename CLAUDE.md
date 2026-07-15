@@ -19,7 +19,7 @@
 ## Команды
 - Сборка: `bash Scripts/bundle.sh` (SwiftPM → `.app` + ad-hoc codesign; полного Xcode НЕТ)
 - Компиляция: `swift build -c release`
-- Тесты: `swift test`
+- Тесты: `bash Scripts/test.sh` (реальный прогон через `ActaTestRunner`; падает с ненулевым кодом при первой ошибке). ⚠️ `swift test` под CLT-only ТОЛЬКО СОБИРАЕТ бандл (нет хост-утилиты `xctest`) — упавший тест даёт exit 0, поэтому для проверки не годится.
 - Линтер: `bash Scripts/lint.sh` (обёртка над SwiftLint; ставит `DYLD_FRAMEWORK_PATH` для CLT-only — **raw `swiftlint` без Xcode падает**; конфиг — `.swiftlint.yml`)
 - Запуск: `open Acta.app` (или `bash Scripts/run.sh`)
 

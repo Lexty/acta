@@ -32,12 +32,14 @@ public enum SegmentLayout {
     /// Порядковый номер из имени файла сегмента, либо `nil` если имя не соответствует схеме.
     ///
     /// Отсекает посторонние файлы (например `.DS_Store`, частично записанный мусор), чтобы
-    /// восстановление собирало только настоящие сегменты.
+    /// восстановление собирало только настоящие сегменты. Имена дополнены нулями минимум до
+    /// `indexDigits` (`%04d`), но при индексе ≥ 10000 длиннее — поэтому принимаем **не короче**
+    /// `indexDigits`, а не ровно столько (иначе длинные записи теряли бы сегменты со склейки).
     public static func segmentIndex(fromFileName name: String) -> Int? {
         let parts = name.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 2, parts[1] == segmentExtension else { return nil }
         let stem = parts[0]
-        guard stem.count == indexDigits, stem.allSatisfy(\.isNumber) else { return nil }
+        guard stem.count >= indexDigits, stem.allSatisfy(\.isNumber) else { return nil }
         return Int(stem)
     }
 
