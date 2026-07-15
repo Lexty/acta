@@ -88,6 +88,14 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         log.info("Захват остановлен")
     }
 
+    /// Число финализированных сегментов каждой дорожки (для `session.json`). Читается с очередей
+    /// дорожек, чтобы не гоняться с мутацией счётчика во writer'ах.
+    func finalizedSegmentCounts() -> (system: Int, mic: Int) {
+        let system = systemQueue.sync { systemWriter.finalizedCount }
+        let mic = micQueue.sync { micWriter.finalizedCount }
+        return (system, mic)
+    }
+
     // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
