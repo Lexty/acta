@@ -139,3 +139,31 @@ func patchedFrontMatterIgnoresBodyLinesLookingLikeFields() {
     let patched = MeetingInfo.patchedFrontMatter(contents, status: .recovered, durationSeconds: 0)
     #expect(patched == "---\nstatus: recovered\n---\n\nstatus: recording\n")
 }
+
+// MARK: - savedDuration
+
+@Test
+func savedDurationPrefersTheMeasuredAudioOverTheClock() {
+    // The clock overstates: SCStream takes seconds to come up and no audio flows until it does. The
+    // assembled file's own length is what info.md must report.
+    let startedAt = Date(timeIntervalSince1970: 1_000)
+    let now = startedAt.addingTimeInterval(29)
+    #expect(MeetingInfo.savedDuration(measuredSeconds: 23.66, startedAt: startedAt, now: now) == 24)
+}
+
+@Test
+func savedDurationFallsBackToTheClockWhenThereIsNothingToMeasure() {
+    // The assembly failed, so there is no file to measure — the clock is all we have.
+    let startedAt = Date(timeIntervalSince1970: 1_000)
+    let now = startedAt.addingTimeInterval(29.4)
+    #expect(MeetingInfo.savedDuration(measuredSeconds: nil, startedAt: startedAt, now: now) == 29)
+}
+
+@Test
+func savedDurationNeverGoesNegative() {
+    // A clock stepped backwards mid-recording must not put a negative duration into info.md.
+    let startedAt = Date(timeIntervalSince1970: 1_000)
+    let now = startedAt.addingTimeInterval(-5)
+    #expect(MeetingInfo.savedDuration(measuredSeconds: nil, startedAt: startedAt, now: now) == 0)
+    #expect(MeetingInfo.savedDuration(measuredSeconds: -2, startedAt: startedAt, now: now) == 0)
+}

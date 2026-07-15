@@ -101,7 +101,7 @@ struct MenuContent: View {
 
             Divider()
             HStack {
-                Button("Open Archive") { controller.openInFinder(controller.archiveRoot) }
+                Button("Open Archive") { controller.openArchive() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }

@@ -52,7 +52,7 @@ final class RecordingController: ObservableObject {
     private var currentTitle: String = ""
     private var currentSource: String = ""
     private var startedAt: Date?
-    private var timerTask: Task<Void, Never>?
+    private let timer = ElapsedTimer()
     /// Whether an asynchronous start is in flight right now (before the transition to `.recording`).
     /// Guards against a double click: `phase` only becomes `.recording` at the end of `performStart`
     /// (after the ~2 s self-check), so without this flag a second click would bring up a second
@@ -64,6 +64,10 @@ final class RecordingController: ObservableObject {
     /// assembly of the same folder: two `ffmpeg` processes would write the same wav and list files,
     /// up to losing the recording.
     private var isStopping = false
+    /// The active start task — `stopAndWait()` awaits it when the app quits, because a start that is
+    /// still in flight is already capturing into segments and there is nothing to stop until it has
+    /// handed the session over.
+    private var startTask: Task<Void, Never>?
     /// The active stop task — `stopAndWait()` awaits it when the app quits.
     private var stopTask: Task<Void, Never>?
     /// Recovery of interrupted recordings runs once per app launch (from `onLaunch`).
@@ -92,17 +96,16 @@ final class RecordingController: ObservableObject {
     /// Whether the app still has work that must not be cut short by quitting. Wider than `isBusy`:
     /// the watchdog's fatal-stall path (`handleFatalStall`) parks `phase` in `.error` while capture
     /// stop and the `ffmpeg` assembly are still running, and terminating then is `kill -9` by
-    /// another name.
-    var hasWorkInFlight: Bool { isBusy || isStopping }
+    /// another name. `isStarting` counts for the same reason: `phase` only reaches `.recording` at
+    /// the end of `performStart`, while `SCStream` is brought up and segments are written several
+    /// seconds earlier — quitting inside that window would abandon an unfinalized segment.
+    var hasWorkInFlight: Bool { isBusy || isStopping || isStarting }
 
     /// The recordings store for the current archive path from the settings. Read on every access so
     /// that a path change in the settings is picked up without a restart (Task 7).
     private var store: MeetingStore {
         MeetingStore(archiveRoot: settingsStore.archiveRoot(for: settings))
     }
-
-    /// The archive root for the current settings (the "Open Archive" button in the UI).
-    var archiveRoot: URL { settingsStore.archiveRoot(for: settings) }
 
     /// Save the settings after they were edited in the UI (normalised before being written to disk).
     func saveSettings() {
@@ -176,7 +179,7 @@ final class RecordingController: ObservableObject {
         let finalTitle = title.isEmpty
             ? MeetingSource.suggestedTitle(source: source.isEmpty ? nil : source, date: Date())
             : title
-        Task { await performStart(title: finalTitle, source: source) }
+        startTask = Task { await performStart(title: finalTitle, source: source) }
     }
 
     private func performStart(title: String, source: String) async {
@@ -214,7 +217,12 @@ final class RecordingController: ObservableObject {
             self.startedAt = startedAt
             elapsedSeconds = 0
             phase = .recording
-            startTimer()
+            // The timer runs from here, not from `startedAt`: `session.start()` above only returns
+            // once the self-diagnosis has confirmed the stream (~2 s, more if it had to restart), and
+            // no audio is captured before that. Counting from `startedAt` would show a timer that
+            // jumps straight to several seconds and overstates the audio for the whole meeting.
+            // `startedAt` stays the meeting's wall-clock start — that is what `info.md` records.
+            startTimer(from: Date())
             log.info("Recording started")
         } catch let failure as StartupFailure {
             // Self-diagnosis did not confirm the data stream — we show a clear error rather than a
@@ -222,41 +230,14 @@ final class RecordingController: ObservableObject {
             phase = .error
             errorMessage = failure.userMessage
             session = nil
-            cleanupFailedStart(createdDirectory)
+            FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start rejected by self-diagnosis: \(failure.userMessage, privacy: .public)")
         } catch {
             phase = .error
             errorMessage = "Could not start recording: \(error.localizedDescription)"
             session = nil
-            cleanupFailedStart(createdDirectory)
+            FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    /// Remove the folder of a failed start — but only if nothing was ever written into it.
-    ///
-    /// An empty folder must be deleted: with status `recording` it would be stuck forever — recovery
-    /// would try to assemble it on every launch (no segments → error), and it would loiter in the
-    /// list as "unfinished". But "the start failed" does not mean "there is nothing on disk":
-    /// `.diskWriteFailed` is also raised when one track was being written fine and the other broke
-    /// (`brokenTrack`) — there is real audio there already, and it is the only copy. Such a folder is
-    /// handed over to recovery instead of being deleted.
-    private func cleanupFailedStart(_ directory: URL?) {
-        guard let directory, !Self.hasSegments(in: directory) else { return }
-        try? FileManager.default.removeItem(at: directory)
-    }
-
-    /// Whether the folder holds at least one segment with salvageable audio (including one that is
-    /// unfinished but repairable) — the same rule the assembly will follow.
-    ///
-    /// Salvageable specifically, not "a file with a matching name": `AVAssetWriter` creates `0000.wav`
-    /// before the very first buffer, so a start that broke while writing leaves an empty preamble.
-    /// Counting it as audio would mean keeping a folder with `status=recording` that recovery would
-    /// vainly assemble on every launch, and that the list would forever show as "unfinished".
-    private static func hasSegments(in directory: URL) -> Bool {
-        [SegmentLayout.systemDirName, SegmentLayout.micDirName].contains { trackDir in
-            !SegmentAssembler.plannedSegments(
-                inTrackDir: directory.appendingPathComponent(trackDir)).isEmpty
         }
     }
 
@@ -267,7 +248,7 @@ final class RecordingController: ObservableObject {
         guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
         isStopping = true
-        stopTimer()
+        timer.stop()
         phase = .error
         errorMessage = failure.userMessage
         log.error("Watchdog: data stream is gone — recording stopped, error shown")
@@ -284,7 +265,7 @@ final class RecordingController: ObservableObject {
         // path exists to avoid.
         stopTask = Task { [weak self] in
             let result = await session.stop()
-            let duration = Self.savedDuration(result, startedAt: startedAt)
+            let duration = MeetingInfo.savedDuration(measuredSeconds: result?.durationSeconds, startedAt: startedAt)
             await MainActor.run {
                 guard let self else { return }
                 self.isStopping = false
@@ -301,38 +282,13 @@ final class RecordingController: ObservableObject {
         }
     }
 
-    /// Duration for `info.md`, s: taken from the assembled audio, falling back to the clock only if
-    /// there is nothing to measure (the assembly failed).
+    /// Stop the recording — finalise segments, update `info.md`, notify, refresh the list — if there
+    /// is anything to stop. Returns as soon as the work is kicked off; `stopAndWait()` is the variant
+    /// that waits for it.
     ///
-    /// The clock systematically overstates: `SCStream` does not come up instantly, and for the first
-    /// seconds after "Start" is pressed no audio is flowing yet — in a live run 29 s by the clock
-    /// against 23.66 s of audio. `info.md` is archival metadata (SPEC §6), and the number in it must
-    /// match the file.
-    private static func savedDuration(_ result: SegmentAssembler.Result?, startedAt: Date) -> Int {
-        if let measured = result?.durationSeconds { return max(0, Int(measured.rounded())) }
-        return max(0, Int(Date().timeIntervalSince(startedAt)))
-    }
-
-    /// Stop the recording: finalise segments, update `info.md`, notify, refresh the list.
+    /// The `isStopping` flag is set synchronously: `phase` leaves `.recording` only inside the task,
+    /// and without the flag a second click could slip past the check before the task starts.
     func stop() {
-        beginStop()
-    }
-
-    /// Stop the recording and wait until it is actually saved. Needed when the app quits: without
-    /// waiting for the assembly the process would die exactly as it does on `kill -9` — the last
-    /// segment would stay unfinalised, the marker `recording`, and a clean quit via the button would
-    /// lose up to `segmentSeconds` of audio, dumping the rescue of the recording onto recovery at the
-    /// next launch. If a stop is already in flight (the "Stop" button was pressed before "Quit") we
-    /// simply wait for it.
-    func stopAndWait() async {
-        beginStop()
-        await stopTask?.value
-    }
-
-    /// Kick off a stop if there is anything to stop. The `isStopping` flag is set synchronously:
-    /// `phase` leaves `.recording` only inside the task, and without the flag a second click could
-    /// slip past the check before the task starts.
-    private func beginStop() {
         guard phase == .recording, !isStopping, let session, let directory = currentDirectory,
               let startedAt else { return }
         isStopping = true
@@ -341,14 +297,32 @@ final class RecordingController: ObservableObject {
         }
     }
 
+    /// Stop the recording and wait until it is actually saved. Needed when the app quits: without
+    /// waiting for the assembly the process would die exactly as it does on `kill -9` — the last
+    /// segment would stay unfinalised, the marker `recording`, and a clean quit via the button would
+    /// lose up to `segmentSeconds` of audio, dumping the rescue of the recording onto recovery at the
+    /// next launch. If a stop is already in flight (the "Stop" button was pressed before "Quit") we
+    /// simply wait for it.
+    ///
+    /// A start in flight is awaited first: it is already capturing into segments, but `phase` has not
+    /// reached `.recording` yet, so `stop()` would find nothing to stop and return instantly — and the
+    /// process would die on the very segment the start had just opened. Once the start has settled,
+    /// the recording it produced (if any) is stopped normally; a start that failed leaves `phase` in
+    /// `.error` and `stop()` correctly does nothing.
+    func stopAndWait() async {
+        await startTask?.value
+        stop()
+        await stopTask?.value
+    }
+
     private func performStop(session: RecordingSession, directory: URL, startedAt: Date) async {
         defer { isStopping = false }
-        stopTimer()
+        timer.stop()
         // Capture is stopped first thing inside `session.stop()`, and the assembly follows — for that
         // time the state is honestly "Saving…", not "Recording".
         phase = .saving
         let result = await session.stop()
-        let duration = Self.savedDuration(result, startedAt: startedAt)
+        let duration = MeetingInfo.savedDuration(measuredSeconds: result?.durationSeconds, startedAt: startedAt)
         let stoppedTitle = currentTitle
 
         self.session = nil
@@ -391,9 +365,20 @@ final class RecordingController: ObservableObject {
 
     // MARK: - Actions on recordings
 
-    /// Open a recording's folder in Finder.
+    /// Reveal a recording's folder in Finder.
     func openInFinder(_ url: URL) {
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        ArchiveOpener.reveal(url)
+    }
+
+    /// Open the archive root in Finder ("Open Archive").
+    func openArchive() {
+        do {
+            try ArchiveOpener.openArchive(store: store)
+        } catch {
+            errorMessage = "Could not open the archive: \(error.localizedDescription)"
+            phase = .error
+            log.error("Could not open the archive: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Dismiss the recovery banner (once the user has seen it).
@@ -403,19 +388,9 @@ final class RecordingController: ObservableObject {
 
     // MARK: - Timer
 
-    private func startTimer() {
-        timerTask?.cancel()
-        timerTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard let self, let startedAt = self.startedAt else { break }
-                self.elapsedSeconds = max(0, Int(Date().timeIntervalSince(startedAt)))
-            }
+    private func startTimer(from origin: Date) {
+        timer.start(from: origin) { [weak self] seconds in
+            self?.elapsedSeconds = seconds
         }
-    }
-
-    private func stopTimer() {
-        timerTask?.cancel()
-        timerTask = nil
     }
 }

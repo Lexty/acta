@@ -51,14 +51,6 @@ final class SegmentWriter {
         return appended
     }
 
-    /// How many buffers were thrown away because the writer was not ready for them. Audio that never
-    /// reached the file: without a counter a shortened track looks exactly like a quiet meeting.
-    var droppedCount: Int {
-        appendedLock.lock()
-        defer { appendedLock.unlock() }
-        return dropped
-    }
-
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
         self.directory = directory
         self.segmentSeconds = segmentSeconds
@@ -89,6 +81,7 @@ final class SegmentWriter {
         }
         guard input.append(sampleBuffer) else {
             log.error("Writer rejected a buffer: \(String(describing: self.writer?.error), privacy: .public)")
+            countDrop()
             return
         }
         appendedLock.lock()
@@ -96,15 +89,17 @@ final class SegmentWriter {
         appendedLock.unlock()
     }
 
-    /// Account for a buffer the writer refused to take. Logged on the powers of two so that a long
-    /// backpressure spell leaves a trace without flooding the log from the hot audio path.
+    /// Account for a buffer that never reached a segment — either the writer was not ready
+    /// (backpressure) or it rejected the append outright (a failed writer, e.g. a full disk). Logged
+    /// on the powers of two so that a long spell leaves a trace without flooding the log from the hot
+    /// audio path.
     private func countDrop() {
         appendedLock.lock()
         dropped += 1
         let total = dropped
         appendedLock.unlock()
         if total & (total - 1) == 0 {
-            log.error("Writer was not ready — buffer dropped (total dropped: \(total))")
+            log.error("Buffer dropped, it did not reach the segment (total dropped: \(total))")
         }
     }
 
@@ -125,6 +120,22 @@ final class SegmentWriter {
         if pendingWrites.wait(timeout: .now() + Self.finishTimeoutSeconds) == .timedOut {
             log.error("Segment finalization did not fit the timeout — continuing without it")
         }
+        // The drop tally goes into the log exactly once per recording, at the point where the track
+        // is complete. This is what tells a shortened track apart from a quiet meeting after the
+        // fact: a non-zero count here means audio was captured but never made it into a segment.
+        let (accepted, lost) = countsSnapshot()
+        if lost > 0 {
+            log.error("Track finished: \(accepted) buffers written, \(lost) dropped — the track is short")
+        } else {
+            log.info("Track finished: \(accepted) buffers written, none dropped")
+        }
+    }
+
+    /// A consistent (accepted, dropped) pair under one lock acquisition.
+    private func countsSnapshot() -> (accepted: Int, dropped: Int) {
+        appendedLock.lock()
+        defer { appendedLock.unlock() }
+        return (appended, dropped)
     }
 
     /// The cap on waiting for segment finalization on stop, s. Comfortably longer than a normal

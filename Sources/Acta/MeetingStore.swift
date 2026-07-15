@@ -73,11 +73,13 @@ struct MeetingStore {
             .sorted { $0.directory.lastPathComponent > $1.directory.lastPathComponent }
     }
 
-    // MARK: - Private
-
     /// Guarantee that the archive root exists and drop a description for the user's Claude Code into
     /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6) — once, if the file is not there yet.
-    private func ensureArchiveRoot() throws {
+    ///
+    /// Also called before opening the archive in Finder: until the first recording the root does not
+    /// exist, and opening a missing path is a silent no-op — the button would look broken on a fresh
+    /// install.
+    func ensureArchiveRoot() throws {
         try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
         guard !fileManager.fileExists(atPath: claudeMD.path) else { return }

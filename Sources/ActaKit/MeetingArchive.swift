@@ -129,6 +129,21 @@ public struct MeetingInfo: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// The duration to record in `info.md`, s: the assembled audio's own length, falling back to the
+    /// clock only when there is nothing to measure (the assembly failed).
+    ///
+    /// The clock systematically overstates: `SCStream` does not come up instantly, and for the first
+    /// seconds after "Start" is pressed no audio is flowing yet — in a live run 29 s by the clock
+    /// against 23.66 s of audio. `info.md` is archival metadata (SPEC §6), and the number in it must
+    /// match the file.
+    ///
+    /// - Parameter measuredSeconds: length of the assembled audio, or `nil` if it could not be built.
+    public static func savedDuration(measuredSeconds: Double?, startedAt: Date,
+                                     now: Date = Date()) -> Int {
+        if let measuredSeconds { return max(0, Int(measuredSeconds.rounded())) }
+        return max(0, Int(now.timeIntervalSince(startedAt)))
+    }
+
     // MARK: - Serialisation helpers
 
     /// Format a duration as `HH:MM:SS` (negative values → zero).

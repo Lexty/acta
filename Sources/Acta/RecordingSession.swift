@@ -61,7 +61,11 @@ final class RecordingSession: @unchecked Sendable {
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
         try store.write(manifest, to: directory)
         recorder.setSegmentCountObserver { [weak self] count in
-            self?.manifestQueue.async { self?.persistSegmentCount(count) }
+            // Bind `self` once, strongly: loading the weak reference separately on each queue is a
+            // data race (the second load races with deallocation), and the session must stay alive
+            // until the counter it just accepted has been written anyway.
+            guard let self else { return }
+            manifestQueue.async { self.persistSegmentCount(count) }
         }
         do {
             try await recorder.start()
