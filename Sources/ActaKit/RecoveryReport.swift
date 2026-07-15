@@ -55,8 +55,9 @@ public enum RecoveryReport {
                 : "Recordings that could not be assembled: \(unassembled) — "
                     + "their raw segments were kept; see their info.md.")
         }
-        // The title follows the worse half: a pass that saved nothing must not announce itself as a
-        // recovery, and one that saved only pieces must not announce itself as a whole one.
+        // The title leads with the best outcome the pass actually reached, and the body carries every
+        // outcome regardless. The floor is what matters: a pass that recovered nothing whole must not
+        // announce itself as a recovery, and one that saved only pieces must not claim a whole one.
         let title: String
         if recovered > 0 {
             title = "Recordings recovered"

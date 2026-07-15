@@ -194,13 +194,17 @@ public struct SegmentAssembler {
             try? fileManager.removeItem(at: partial)
             throw AssembleError.concatFailed(track: dirName)
         }
-        // Recovery re-assembles a folder that may already hold an output from an earlier attempt;
-        // `moveItem` refuses to clobber, so clear the way first. A crash in this window leaves no
-        // output at all — the marker stays `recording` and the next launch retries, which is the
-        // failure we want over a half-written one.
-        try? fileManager.removeItem(at: output)
+        // Recovery re-assembles a folder that may already hold an output from an earlier attempt,
+        // and `moveItem` refuses to clobber. `replaceItemAt` commits in one step instead of
+        // unlinking the old track first: a delete-then-move whose move fails would leave the folder
+        // with neither file, destroying a track an earlier attempt had assembled whole and making
+        // the give-up misreport it as `closedWithoutTracks`.
         do {
-            try fileManager.moveItem(at: partial, to: output)
+            if fileManager.fileExists(atPath: output.path) {
+                _ = try fileManager.replaceItemAt(output, withItemAt: partial)
+            } else {
+                try fileManager.moveItem(at: partial, to: output)
+            }
         } catch {
             log.error("""
                 Track \(dirName, privacy: .public): assembled audio could not be moved into place: \
@@ -276,17 +280,37 @@ public struct SegmentAssembler {
     }
 
     /// Run `ffmpeg`; `true` on exit code 0.
+    ///
+    /// A failure captures `ffmpeg`'s stderr, because `-xerror` made the exit code load-bearing: it
+    /// turns any error-level event into a failed concat, which `RecoveryManager` retries only three
+    /// times before closing the folder over audio that exists solely as segments. A bare exit code
+    /// cannot say whether that was a segment `-c copy` refused to splice or a full disk, and
+    /// "self-diagnosis comes first" is not served by a number.
+    ///
+    /// Redirected to a file rather than a `Pipe`: `ffmpeg` is chatty enough to fill a pipe buffer,
+    /// and a full pipe with nobody draining it deadlocks `waitUntilExit` forever — with `start()`
+    /// waiting behind it.
     private func runFFmpeg(_ ffmpeg: String, args: [String]) -> Bool {
+        let errLog = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("acta-ffmpeg-\(UUID().uuidString).log")
+        fileManager.createFile(atPath: errLog.path, contents: nil)
+        defer { try? fileManager.removeItem(at: errLog) }
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: ffmpeg)
         proc.arguments = args
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        let errHandle = try? FileHandle(forWritingTo: errLog)
+        proc.standardError = errHandle ?? FileHandle.nullDevice
+        defer { try? errHandle?.close() }
         do {
             try proc.run()
             proc.waitUntilExit()
             if proc.terminationStatus != 0 {
-                log.error("ffmpeg exited with code \(proc.terminationStatus)")
+                log.error("""
+                    ffmpeg exited with code \(proc.terminationStatus, privacy: .public): \
+                    \(Self.tail(of: errLog), privacy: .public)
+                    """)
                 return false
             }
             return true
@@ -294,6 +318,18 @@ public struct SegmentAssembler {
             log.error("Failed to launch ffmpeg: \(error.localizedDescription, privacy: .public)")
             return false
         }
+    }
+
+    /// The last few lines of `ffmpeg`'s stderr — the part that names the failure. Bounded because the
+    /// preamble is banner and per-stream noise, and a whole log does not belong in `os_log`.
+    private static func tail(of file: URL, maxBytes: Int = 4096) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return "stderr unavailable" }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0)
+        guard let data = try? handle.readToEnd(), !data.isEmpty,
+              let text = String(data: data, encoding: .utf8) else { return "stderr empty" }
+        return text.split(separator: "\n").suffix(5).joined(separator: " | ")
     }
 
     /// Locate the `ffmpeg` binary: the usual Homebrew paths (Apple Silicon/Intel) + `PATH`.

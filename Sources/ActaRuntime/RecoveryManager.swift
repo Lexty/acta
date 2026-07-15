@@ -189,7 +189,13 @@ public struct RecoveryManager {
         // would seal a terminal marker around a number in the wrong unit — a 240-segment meeting
         // closing as `segment_count: 2` — which reads plausible and is exactly the kind of wrong the
         // duration fallback in `recover` would then multiply by `segmentSeconds`.
-        writeMarker(updated, to: directory)
+        //
+        // The marker is what actually closes the folder, so a failed write means it is not closed:
+        // `session.json` still says `recording` and the next launch will assemble it again. Report
+        // `.retrying` to match, and leave `info.md` alone — writing the give-up note over a folder
+        // the code will keep retrying would state the one thing that is not true, and hand the user
+        // a "could not be assembled" notification on every launch from here on.
+        guard writeMarker(updated, to: directory) else { return .retrying }
 
         // Every give-up leaves audio behind, so every give-up says so. Neither shape can state it in
         // the front-matter alone: with no track the folder is byte-for-byte `closeEmpty`'s — terminal,
@@ -235,26 +241,33 @@ public struct RecoveryManager {
         var updated = manifest
         updated.status = .recovered
         updated.segmentCount = 0
-        writeMarker(updated, to: directory)
+        // Same rule as the give-up path: the marker is what makes this terminal, so if it did not
+        // land the folder is still `recording` and `info.md` must not say otherwise.
+        guard writeMarker(updated, to: directory) else { return }
         updateInfo(in: directory, status: updated.status, durationSeconds: 0)
     }
 
-    /// Persist the marker, logging a failure instead of swallowing it.
+    /// Persist the marker, logging a failure instead of swallowing it. `false` = the marker on disk
+    /// is still the old one.
     ///
     /// The write is the one step the retry bound cannot do without: if it fails, `assemblyAttempts`
     /// never rises and the folder re-runs a full concat on every launch — the very loop the bound
     /// exists to stop. That case is also unfixable from here (an unwritable folder cannot be sealed
     /// terminal either, because sealing it *is* a write), so the honest thing this code can do is
-    /// leave a trace of why the bound stopped working.
-    private func writeMarker(_ manifest: SessionManifest, to directory: URL) {
+    /// leave a trace of why the bound stopped working — and tell the caller, so nothing downstream
+    /// describes a folder as closed when the file that closes it never landed.
+    @discardableResult
+    private func writeMarker(_ manifest: SessionManifest, to directory: URL) -> Bool {
         do {
             try store.write(manifest, to: directory)
+            return true
         } catch {
             log.error("""
                 \(directory.lastPathComponent, privacy: .public): could not write \
                 \(SessionManifest.fileName, privacy: .public) — the folder will be retried on every \
                 launch: \(error.localizedDescription, privacy: .public)
                 """)
+            return false
         }
     }
 
