@@ -228,5 +228,10 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         log.error("Стрим остановлен с ошибкой: \(error.localizedDescription, privacy: .public)")
+        // Стрим мёртв — снять его с себя, иначе `isStreaming` продолжит показывать самодиагностике
+        // поднятый стрим, и упавший захват она объяснит пользователю неисправным аудиоустройством
+        // вместо реальной причины. Сверяем тождество: за время доставки ошибки `restart()` мог уже
+        // поставить новый стрим, и обнулить его тут значило бы соврать в обратную сторону.
+        if self.stream === stream { self.stream = nil }
     }
 }

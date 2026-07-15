@@ -53,6 +53,12 @@ struct RecoveryManager {
             do {
                 let result = try recover(directory: dir, manifest: manifest)
                 recovered.append(result)
+            } catch SegmentAssembler.AssembleError.noSegments {
+                // Спасать нечего и уже никогда не будет: краш успел создать маркер, но ни одного
+                // валидного сегмента не осталось. Оставить `recording` — обречь папку на тщетную
+                // склейку при каждом запуске и вечное «не завершена» в списке без способа убрать.
+                // В `recovered` не добавляем: восстанавливать было нечего, врать в уведомление незачем.
+                closeEmpty(directory: dir, manifest: manifest)
             } catch {
                 let name = dir.lastPathComponent
                 log.error("Не удалось восстановить \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -74,6 +80,19 @@ struct RecoveryManager {
         updateInfo(in: directory, manifest: updated)
 
         return Recovered(directory: directory, combinedWAV: result.combinedWAV)
+    }
+
+    /// Закрыть маркер папки, из которой спасать нечего: `recovered` с нулём сегментов — терминальный
+    /// статус, поэтому следующий запуск её уже не тронет. Саму папку не удаляем: `info.md` с
+    /// названием и временем встречи — единственный след того, что запись пытались вести, и решение
+    /// стереть его остаётся за пользователем.
+    private func closeEmpty(directory: URL, manifest: SessionManifest) {
+        log.error("Нечего восстанавливать (валидных сегментов нет): \(directory.lastPathComponent, privacy: .public)")
+        var updated = manifest
+        updated.status = .recovered
+        updated.segmentCount = 0
+        try? store.write(updated, to: directory)
+        updateInfo(in: directory, manifest: updated)
     }
 
     /// Привести `info.md` в соответствие с маркером: на старте он записан как `recording` с нулевой

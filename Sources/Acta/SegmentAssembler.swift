@@ -27,6 +27,10 @@ struct SegmentAssembler {
         /// `ffmpeg` не смог склеить дорожку. Отдельно от `noSegments`: пустая дорожка — не ошибка,
         /// а провал склейки означает, что сегменты — единственная копия аудио и трогать их нельзя.
         case concatFailed(track: String)
+        /// Обе дорожки склеены, но `ffmpeg` не смог свести их в `combined.wav`. Ошибка, а не «микс
+        /// не вышел»: при настройке «только combined» пользователь просил ровно этот файл, и молчать
+        /// про его отсутствие — то же, что показывать «немой» recording.
+        case mixFailed
     }
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "SegmentAssembler")
@@ -66,25 +70,22 @@ struct SegmentAssembler {
         var result = Result(systemWAV: systemWAV, micWAV: micWAV, combinedWAV: nil,
                             segmentCount: max(system.count, mic.count))
 
+        // Обе дорожки склеились, а микс не вышел = сбой ffmpeg: доверия к склейке нет, поэтому
+        // бросаем, как и `concatFailed`. Маркер сессии остаётся `recording`, сегменты и промежуточные
+        // wav целы, а восстановление на следующем запуске повторит попытку. Вернуть тут «успех» без
+        // `combined.wav` значило бы сказать «сохранена» про файл, которого нет.
         if tracks.combined, let systemWAV, let micWAV {
             let combined = directory.appendingPathComponent("combined.wav")
             let args = FFmpeg.mixArgs(systemPath: systemWAV.path, micPath: micWAV.path,
                                       outputPath: combined.path)
-            if runFFmpeg(ffmpeg, args: args) {
-                result.combinedWAV = combined
-            }
+            guard runFFmpeg(ffmpeg, args: args) else { throw AssembleError.mixFailed }
+            result.combinedWAV = combined
         }
 
-        // Микс запрошен, но его нет — итоговые system.wav/mic.wav остаются единственным результатом
-        // записи, и удалять их по настройке «только combined» нельзя: стоп потерял бы встречу целиком.
+        // Микс запрошен, но одной из дорожек просто не было (мик отключён — `concatTrack` вернул nil,
+        // сбой бы бросил `concatFailed`): свести нечего. Уцелевшая дорожка — единственный результат
+        // записи, и удалять её по настройке «только combined» нельзя: стоп потерял бы встречу целиком.
         let combinedMissing = tracks.combined && result.combinedWAV == nil
-
-        // Почему именно нет — определяет судьбу сегментов. Обе дорожки склеились, а микс не вышел =
-        // ffmpeg сбойнул: доверия к склейке нет, сегменты держим как сырьё. Но если одной дорожки
-        // просто не было (мик отключён — `concatTrack` вернул nil, сбой бы бросил `concatFailed`),
-        // микс невозможен в принципе, а уцелевшая дорожка склеена целиком: сегменты уже избыточны.
-        // Без этого различия Mac без микрофона копил бы сегменты каждой записи вечно, вопреки настройке.
-        let combinedMixFailed = combinedMissing && systemWAV != nil && micWAV != nil
 
         // Убрать промежуточные дорожки, которые пользователь не просил сохранять.
         if !tracks.system, let systemWAV, !combinedMissing {
@@ -96,7 +97,9 @@ struct SegmentAssembler {
             result.micWAV = nil
         }
 
-        if deleteSegments, !combinedMixFailed {
+        // Сюда доходим только при успешной склейке всех запрошенных дорожек, поэтому сегменты —
+        // уже избыточное сырьё. Mac без микрофона (микс невозможен в принципе) тоже не копит их вечно.
+        if deleteSegments {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }
@@ -114,19 +117,7 @@ struct SegmentAssembler {
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
                              ffmpeg: String) throws -> (url: URL?, count: Int) {
         let trackDir = directory.appendingPathComponent(dirName)
-        let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
-
-        var sizes: [String: Int] = [:]
-        var headers: [String: Data] = [:]
-        for name in names {
-            let url = trackDir.appendingPathComponent(name)
-            let attrs = try? fileManager.attributesOfItem(atPath: url.path)
-            sizes[name] = (attrs?[.size] as? Int) ?? 0
-            headers[name] = headerPrefix(of: url)
-        }
-
-        let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
-                                         headerByFileName: headers)
+        let plan = Self.validSegments(inTrackDir: trackDir)
         guard !plan.isEmpty else {
             log.info("Дорожка \(dirName, privacy: .public): валидных сегментов нет")
             return (nil, 0)
@@ -143,9 +134,30 @@ struct SegmentAssembler {
         return (output, plan.count)
     }
 
+    /// Валидные сегменты дорожки в порядке склейки (`Recovery.recoveryPlan` поверх реальной FS).
+    ///
+    /// Статическая и внутренняя, потому что тем же правилом `RecordingController` решает, есть ли в
+    /// папке спасаемый звук: `AVAssetWriter` создаёт файл сегмента **до** первого буфера, поэтому
+    /// проверка «файл с именем NNNN.wav существует» приняла бы за звук пустую преамбулу.
+    static func validSegments(inTrackDir trackDir: URL) -> [String] {
+        let fileManager = FileManager.default
+        let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
+
+        var sizes: [String: Int] = [:]
+        var headers: [String: Data] = [:]
+        for name in names {
+            let url = trackDir.appendingPathComponent(name)
+            let attrs = try? fileManager.attributesOfItem(atPath: url.path)
+            sizes[name] = (attrs?[.size] as? Int) ?? 0
+            headers[name] = headerPrefix(of: url)
+        }
+        return Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
+                                     headerByFileName: headers)
+    }
+
     /// Прочитать начало файла для проверки WAV-заголовка (`Recovery.isValidSegment`). Пустой
     /// результат = файл не читается → сегмент не считается валидным.
-    private func headerPrefix(of url: URL) -> Data {
+    private static func headerPrefix(of url: URL) -> Data {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
         defer { try? handle.close() }
         return (try? handle.read(upToCount: Recovery.headerProbeBytes)) ?? Data()

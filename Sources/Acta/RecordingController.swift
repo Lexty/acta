@@ -221,12 +221,16 @@ final class RecordingController: ObservableObject {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// Записан ли в папку хоть один сегмент любой из дорожек.
+    /// Есть ли в папке хоть один **валидный** сегмент любой из дорожек.
+    ///
+    /// Именно валидный, а не «файл с подходящим именем»: `AVAssetWriter` создаёт `0000.wav` ещё до
+    /// первого буфера, поэтому старт, сломавшийся на записи, оставляет пустую преамбулу. Считать её
+    /// звуком — значит сохранить папку со `status=recording`, которую восстановление будет тщетно
+    /// склеивать на каждом запуске, а список — вечно показывать «не завершена».
     private static func hasSegments(in directory: URL) -> Bool {
         [SegmentLayout.systemDirName, SegmentLayout.micDirName].contains { trackDir in
-            let path = directory.appendingPathComponent(trackDir).path
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
-            return !SegmentLayout.orderedSegments(fromFileNames: names).isEmpty
+            !SegmentAssembler.validSegments(
+                inTrackDir: directory.appendingPathComponent(trackDir)).isEmpty
         }
     }
 
