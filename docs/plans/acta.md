@@ -16,10 +16,12 @@ API/пакетов, рецепт сборки без Xcode и критерии �
 
 ## Validation Commands
 - `swift build -c release`
+- `swift test`
 - `bash Scripts/bundle.sh`
 
 ### Task 1: Скелет пакета и сборка без Xcode
-- [ ] `Package.swift`: executable target `Acta`, зависимость `https://github.com/argmaxinc/WhisperKit` (product `WhisperKit`), platform macOS 14+
+- [ ] `Package.swift`: executable target `Acta` + **testTarget `ActaTests`**, зависимость `https://github.com/argmaxinc/WhisperKit` (product `WhisperKit`), platform macOS 14+
+- [ ] Пустой `Tests/ActaTests/` (заготовка), чтобы `swift test` проходил с самого начала
 - [ ] `Sources/Acta/ActaApp.swift`: `@main`, пустой `MenuBarExtra` с иконкой
 - [ ] `Resources/Info.plist` (`LSUIElement=true`, `CFBundleIdentifier=dev.personal.acta`, `NSMicrophoneUsageDescription`, `LSMinimumSystemVersion=14.0`) и `Resources/Acta.entitlements` (минимальные, без сэндбокса)
 - [ ] `Scripts/bundle.sh`: `swift build -c release` → сборка `Acta.app/Contents/{MacOS,Resources}` + Info.plist + `codesign --force --sign - --identifier dev.personal.acta --entitlements`; `Scripts/run.sh`
@@ -29,11 +31,13 @@ API/пакетов, рецепт сборки без Xcode и критерии �
 - [ ] `Permissions.swift`: проверка/запрос Screen Recording (`CGPreflightScreenCaptureAccess`) и Microphone
 - [ ] `AudioRecorder.swift`: один `SCStream` (`capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`, минимальный видео-конфиг), два `AVAssetWriter` → `system.wav`, `mic.wav`
 - [ ] Микс-даун в `mixed-16k.wav` (mono, 16 kHz) через `ffmpeg`
+- [ ] Юнит-тест: построение аргументов команды `ffmpeg` вынести в чистую функцию и покрыть тестом
 - [ ] Приёмка: запись 30–60 с даёт непустые `system.wav` и `mic.wav`; `ffprobe` показывает `mixed-16k.wav` 16 kHz mono длительностью > 0
 
 ### Task 3: Хранилище и пайплайн
 - [ ] `MeetingStore.swift`: папка `~/Acta/YYYY-MM-DD_HHMM__<slug>/`, `meeting.md` с YAML front-matter (`title,date,source,participants,duration,tags`)
 - [ ] `Pipeline.swift`: оркестрация stop → mix → transcribe → summarize со статусами и обработкой ошибок
+- [ ] Юнит-тесты: генерация slug из заголовка и сериализация YAML front-matter (чистые функции)
 - [ ] Приёмка: папка встречи создаётся; `meeting.md` парсится как YAML (проверить `python3`/`yq`)
 
 ### Task 4: Транскрипция
@@ -45,6 +49,7 @@ API/пакетов, рецепт сборки без Xcode и критерии �
 - [ ] `Resources/summary-prompt.md`: шаблон (TL;DR, ключевые темы, решения, action items `- [ ] что — кто — срок?`, открытые вопросы, теги; язык — по языку транскрипта)
 - [ ] `Summarizer.swift`: запуск `claude -p "<prompt>"` с `cwd` = папка встречи, чтение саммари из stdout, сохранение в `summary.md`
 - [ ] Сборка `meeting.md` (ссылки на transcript/summary) и `~/Acta/CLAUDE.md` (описание архива как рабочего контекста)
+- [ ] Юнит-тест: построение промпта саммари из шаблона + транскрипта (чистая функция)
 - [ ] Приёмка: `summary.md` содержит непустые секции TL;DR, булеты, action items
 
 ### Task 6: Menu-bar UX
