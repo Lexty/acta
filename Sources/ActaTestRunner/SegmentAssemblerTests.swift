@@ -34,6 +34,26 @@ private func writeWAV(to url: URL, frames: Int = 480, format: Int = 1, channels:
     try Data(bytes).write(to: url)
 }
 
+/// Build the segment a `kill -9` leaves behind: valid RIFF/WAVE and `fmt `, real audio in `data` —
+/// and both sizes still unwritten, because `AVAssetWriter` sets them only in `finishWriting`.
+///
+/// This is the one shape `Recovery.action` answers with `.repair`, and the only way to drive the
+/// repair path from a fixture: `writeWAV` writes its sizes through, so every segment it makes takes
+/// the `.include` branch instead.
+private func writeUnfinalizedWAV(to url: URL, frames: Int = 24_000) throws {
+    let fmtBody = pcmFormatBody()
+    let audio = [UInt8](repeating: 0, count: frames * 4) // 2 ch x 16 bit
+
+    var body: [UInt8] = Array("WAVE".utf8)
+    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
+    body += Array("data".utf8) + le32(0) + audio // the `data` size never made it to disk
+
+    // The RIFF size keeps the length of the preamble, exactly as a killed writer leaves it: it
+    // declares *less* than the file holds, which is why `Recovery` leans on the `data` size instead.
+    let bytes = Array("RIFF".utf8) + le32(body.count - audio.count) + body
+    try Data(bytes).write(to: url)
+}
+
 /// A recording folder with the requested number of valid segments per track. A track given `nil`
 /// still gets its (empty) directory — that is what the writers create before the first buffer.
 private func makeRecording(in directory: URL, systemSegments: Int?, micSegments: Int?) throws {
@@ -184,6 +204,64 @@ func assembleDropsASegmentWhoseFormatIsNotPlayablePCM() throws {
         let systemWAV = try #require(result.systemWAV)
         let duration = try #require(durationOfWAV(at: systemWAV))
         #expect(abs(duration - 0.5) < 0.05)
+    }
+}
+
+/// The repair path, end to end and through a real `ffmpeg` — the promise "we lose at most one
+/// segment" is what this file exists to keep, and until now no fixture here ever produced a
+/// `.repair`: `writeWAV` writes its sizes through, so every segment took `.include`.
+///
+/// It matters most right next to `-xerror`: a repaired segment (truncated in place, sizes patched
+/// from the actual bytes) is exactly the input a newly strict `ffmpeg` could reject — and under
+/// `-xerror` one rejected segment sinks the whole track's concat rather than costing it a tail.
+@Test
+func assembleRepairsAnUnfinalizedSegmentAndKeepsItsAudio() throws {
+    try withRecordingDirectory { directory in
+        try makeRecording(in: directory, systemSegments: 1, micSegments: 1)
+        let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
+        try writeWAV(to: systemDir.appendingPathComponent("0000.wav"), frames: 24_000) // 0.5 s
+        // The crashed tail: 0.5 s of audio behind a header that declares none of it.
+        try writeUnfinalizedWAV(to: systemDir.appendingPathComponent("0001.wav"), frames: 24_000)
+
+        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+
+        // Both segments reached the track: the tail was repaired, not dropped. `segmentCount` is
+        // `max(system, mic)` and mic holds one, so 2 can only have come from the system track.
+        #expect(result.segmentCount == 2)
+        let systemWAV = try #require(result.systemWAV)
+        // The audio is the real assertion — a count of 2 would also hold if `ffmpeg` had written the
+        // repaired segment's header and dropped its samples.
+        let duration = try #require(durationOfWAV(at: systemWAV))
+        #expect(abs(duration - 1.0) < 0.05)
+    }
+}
+
+/// The failure the plan cannot absorb: a segment holding audio that `SegmentRepair` cannot write
+/// back. It drops out of the assembly to save the rest of the track — a deliberate trade — and that
+/// makes its segment file the only copy of those seconds. Deleting the track directory then would
+/// destroy exactly the audio the repair path exists to rescue, and `status=done` means recovery
+/// never comes back for it.
+@Test
+func assembleKeepsSegmentsWhenAPlannedSegmentCouldNotBeRepaired() throws {
+    try withRecordingDirectory { directory in
+        try makeRecording(in: directory, systemSegments: 2, micSegments: nil)
+        // Mic: a single unfinalized segment with real audio, read-only so the repair's write fails.
+        // The plan still sees the audio — `Recovery.action` reads it, it just cannot be rescued.
+        let micDir = directory.appendingPathComponent(SegmentLayout.micDirName)
+        let micSegment = micDir.appendingPathComponent("0000.wav")
+        try writeUnfinalizedWAV(to: micSegment, frames: 24_000)
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: micSegment.path)
+
+        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: true)
+
+        // The healthy track is unaffected — the point is not to sink the assembly, only to keep the
+        // raw material of what did not make it.
+        #expect(result.systemWAV != nil)
+        #expect(result.micWAV == nil)
+        // The mic audio survives as the segment it still is.
+        #expect(exists(micSegment))
+        // And the system segments stay too: deletion is all-or-nothing per folder.
+        #expect(exists(directory.appendingPathComponent(SegmentLayout.systemDirName)))
     }
 }
 

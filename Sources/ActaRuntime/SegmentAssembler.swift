@@ -67,10 +67,13 @@ public struct SegmentAssembler {
         var result = Result(systemWAV: systemWAV, micWAV: micWAV,
                             segmentCount: max(system.count, mic.count))
 
-        // We get here once every track that there was anything to assemble from already sits next
-        // to us as its own wav: any assembly failure throws above. That is, the segments are by now
-        // redundant raw material.
-        if deleteSegments {
+        // The segments are redundant raw material only once every track that there was anything to
+        // assemble from sits next to us as its own wav. Two things break that, and only one of them
+        // throws above. A failed concat does. A planned segment that could not be repaired does not:
+        // the track around it assembles happily, while that segment's audio — which the plan saw and
+        // vouched for — reached no final file at all. The segment file is its only copy, so deleting
+        // here would destroy precisely the audio the repair path exists to rescue.
+        if deleteSegments && !system.retainedSegments && !mic.retainedSegments {
             for name in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
                 try? fileManager.removeItem(at: directory.appendingPathComponent(name))
             }
@@ -98,18 +101,43 @@ public struct SegmentAssembler {
 
     // MARK: - Private
 
-    /// Assemble the valid segments of a single track into `outputName`. Returns the URL of the
-    /// result or `nil` if there are no valid segments (an empty track is not an error, there is
-    /// simply nothing to assemble). Throws `concatFailed` if segments exist but `ffmpeg` did not
-    /// assemble them: silently returning `nil` is not an option — the caller would consider the
-    /// track empty and delete its segments.
+    /// The outcome of assembling a single track.
+    private struct TrackResult {
+        /// The assembled file, or `nil` if the track had no valid segments to assemble.
+        var url: URL?
+        /// How many segments went into it.
+        var count: Int
+        /// The track lost audio the plan had vouched for: a planned segment failed its repair, so
+        /// its bytes are in no final file and its segment file is the only copy left.
+        ///
+        /// `url == nil` cannot carry this on its own — an empty track and a track whose every
+        /// segment failed to repair both come back `nil`, and only the second must survive the
+        /// caller's deletion.
+        var retainedSegments: Bool
+    }
+
+    /// Assemble the valid segments of a single track into `outputName`. Returns a `url` of `nil` if
+    /// there are no valid segments (an empty track is not an error, there is simply nothing to
+    /// assemble). Throws `concatFailed` if segments exist but `ffmpeg` did not assemble them:
+    /// silently returning `nil` is not an option — the caller would consider the track empty and
+    /// delete its segments.
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
-                             ffmpeg: String) throws -> (url: URL?, count: Int) {
+                             ffmpeg: String) throws -> TrackResult {
         let trackDir = directory.appendingPathComponent(dirName)
-        let plan = preparedSegments(inTrackDir: trackDir)
+        let planned = Self.plannedSegments(inTrackDir: trackDir)
+        let plan = prepareSegments(planned, inTrackDir: trackDir)
+        // The plan lists only segments with usable audio in them, so anything that drops out here
+        // dropped out of the *output*, not out of a set of empty files.
+        let retainedSegments = plan.count < planned.count
+        if retainedSegments {
+            log.error("""
+                Track \(dirName, privacy: .public): \(planned.count - plan.count) segment(s) held \
+                audio that could not be repaired into the assembly — keeping the segments
+                """)
+        }
         guard !plan.isEmpty else {
             log.info("Track \(dirName, privacy: .public): no valid segments")
-            return (nil, 0)
+            return TrackResult(url: nil, count: 0, retainedSegments: retainedSegments)
         }
 
         let paths = plan.map { trackDir.appendingPathComponent($0).path }
@@ -120,7 +148,7 @@ public struct SegmentAssembler {
         let output = directory.appendingPathComponent(outputName)
         let args = FFmpeg.concatArgs(listPath: listURL.path, outputPath: output.path)
         guard runFFmpeg(ffmpeg, args: args) else { throw AssembleError.concatFailed(track: dirName) }
-        return (output, plan.count)
+        return TrackResult(url: output, count: plan.count, retainedSegments: retainedSegments)
     }
 
     /// The assembly plan for a track (`Recovery.recoveryPlan` on top of the real FS) — read only.
@@ -152,9 +180,11 @@ public struct SegmentAssembler {
     /// seconds of real audio and unwritten sizes, and there is no other chance to get that audio
     /// back. A segment that could not be repaired (the file did not open for writing) drops out of
     /// the plan — handing `ffmpeg` a knowingly broken file would mean sinking the assembly of the
-    /// whole track for the sake of its tail.
-    private func preparedSegments(inTrackDir trackDir: URL) -> [String] {
-        Self.plannedSegments(inTrackDir: trackDir).compactMap { segment in
+    /// whole track for the sake of its tail. That trade costs the tail its place in the output but
+    /// not its existence: the caller reads the shortfall against `planned` and keeps the segments.
+    private func prepareSegments(_ planned: [Recovery.PlannedSegment],
+                                 inTrackDir trackDir: URL) -> [String] {
+        planned.compactMap { segment in
             switch segment.action {
             case .include:
                 return segment.fileName
