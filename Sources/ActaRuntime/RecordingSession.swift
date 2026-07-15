@@ -7,13 +7,17 @@ import os
 /// into the final files.
 ///
 /// Splits responsibility with `AudioRecorder` (which only knows about `SCStream` and segments):
-/// here live the session marker and the assembly, that is, the fault-tolerant part. The UI wiring
-/// (start/stop from the menu bar) arrives in Task 6 and will call these methods.
+/// here live the session marker and the assembly, that is, the fault-tolerant part.
 ///
-/// `@unchecked Sendable`: every method is called by `RecordingController` from the main actor
-/// (serialized), while `AudioRecorder`/`SelfCheck` manage their own thread safety internally. This
-/// makes it possible to call the session's `async` methods from the main actor without data-race
-/// warnings.
+/// `@unchecked Sendable`, and the reason is *not* "the methods run on the main actor" — they do not.
+/// `start`/`stop` are `nonisolated async`, so under SE-0338 they hop to the cooperative pool rather
+/// than inherit `RecordingController`'s actor. What actually orders them is the controller's phase
+/// gate: it drives a session through start → stop from the main actor and never overlaps two calls
+/// on one instance, and its main-actor suspension points give the happens-before that `watchdogTask`
+/// and `startedAt` rely on. Everything shared beyond those synchronizes itself — `AudioRecorder` and
+/// `SelfCheck` internally, `lastWrittenSegmentCount` behind `manifestQueue`, `wakeLock` behind its
+/// own lock. Anything added here must bring its own synchronization; there is no ambient actor to
+/// inherit.
 @available(macOS 15.0, *)
 public final class RecordingSession: @unchecked Sendable {
     /// The recording folder.
@@ -32,8 +36,9 @@ public final class RecordingSession: @unchecked Sendable {
     ///
     /// Injectable so that the call sites are provable: while this was hardcoded, deleting either
     /// `acquire()` or `release()` left the whole suite green — the lock's own tests exercise it
-    /// standalone and cannot see the session. `stop()` is drivable from a test today; the `start()`
-    /// side still needs the backlog's capture seam (it needs TCC and a live audio session).
+    /// standalone and cannot see the session. Both halves are driven from `DisplayWakeLockTests`
+    /// today: `stop()` directly, and `start()` via a directory it cannot create, which throws below
+    /// before any capture and so needs neither TCC nor an audio session.
     private let wakeLock: DisplayWakeLock
 
     /// `segment_count` updates arrive here from the queues of both tracks: a dedicated serial queue

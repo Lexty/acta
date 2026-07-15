@@ -19,7 +19,15 @@ private func pmsetAssertions() -> String {
     return String(data: data, encoding: .utf8) ?? ""
 }
 
-/// Whether the OS reports *this process's* assertion, by the exact reason string a human would read.
+/// The assertion type that keeps the *display* on — the one Task 10 exists for. Its absence is the
+/// 2026-07-15 failure: the display slept, ScreenCaptureKit lost its display, the capture died.
+private let displaySleepAssertion = "PreventUserIdleDisplaySleep"
+/// The assertion type that keeps the *system* awake. Held alongside the display one, because idle
+/// system sleep kills a recording just as dead.
+private let systemSleepAssertion = "PreventUserIdleSystemSleep"
+
+/// Whether the OS reports *this process's* assertion of `type`, by the exact reason string a human
+/// would read.
 ///
 /// Scoped to our own pid on purpose. `pmset -g assertions` lists every process on the machine under
 /// "Listed by owning process" (`pid 7922(Safari): [0x...] PreventUserIdleDisplaySleep named: "..."`),
@@ -28,11 +36,21 @@ private func pmsetAssertions() -> String {
 /// this machine" — the normal state, and the very thing Task 10 exists to sustain for hours — into a
 /// suite-wide failure blaming code that is innocent. `.serialized` cannot help: the interference is
 /// cross-process.
-private func systemHoldsActaAssertion() -> Bool {
+///
+/// Matching the assertion *type* and not just pid + reason is what makes this test able to fail for
+/// the right reason. `pmset` prints one line per type, so a check that accepted any line passed on
+/// `PreventUserIdleSystemSleep` alone — verified by mutation: dropping `.idleDisplaySleepDisabled`
+/// from the options, which deletes the entire point of Task 10, kept the suite green.
+private func systemHoldsActaAssertion(_ type: String) -> Bool {
     let pid = ProcessInfo.processInfo.processIdentifier
     return pmsetAssertions()
         .split(separator: "\n")
-        .contains { $0.contains("pid \(pid)(") && $0.contains(DisplayWakeLock.reason) }
+        .contains { $0.contains("pid \(pid)(") && $0.contains(type) && $0.contains(DisplayWakeLock.reason) }
+}
+
+/// Whether the OS reports our recording assertion at all, in either of the two types it holds.
+private func systemHoldsAnyActaAssertion() -> Bool {
+    systemHoldsActaAssertion(displaySleepAssertion) || systemHoldsActaAssertion(systemSleepAssertion)
 }
 
 /// A lock whose `beginActivity`/`endActivity` calls are counted instead of made.
@@ -81,7 +99,7 @@ struct DisplayWakeLockTests {
         #expect(lock.isHeld == false)
         // "Never hold it while idle": constructing the lock must not pin the display on. Only a
         // recording may.
-        #expect(systemHoldsActaAssertion() == false)
+        #expect(systemHoldsAnyActaAssertion() == false)
     }
 
     @Test
@@ -90,12 +108,17 @@ struct DisplayWakeLockTests {
 
         lock.acquire()
         #expect(lock.isHeld)
-        #expect(systemHoldsActaAssertion(),
-                "pmset does not list the assertion — the display would sleep and take the capture with it")
+        // Asserted by type, not merely by presence: the display-sleep assertion is the whole feature.
+        // A recording that only prevents *system* idle sleep still dies exactly the way it died on
+        // 2026-07-15, because ScreenCaptureKit loses its display the moment the screen goes dark.
+        #expect(systemHoldsActaAssertion(displaySleepAssertion),
+                "pmset does not list PreventUserIdleDisplaySleep — the display would sleep and take the capture with it")
+        #expect(systemHoldsActaAssertion(systemSleepAssertion),
+                "pmset does not list PreventUserIdleSystemSleep — idle system sleep would end the recording")
 
         lock.release()
         #expect(lock.isHeld == false)
-        #expect(systemHoldsActaAssertion() == false,
+        #expect(systemHoldsAnyActaAssertion() == false,
                 "the assertion outlived the recording — the machine would never sleep again")
     }
 
@@ -118,11 +141,11 @@ struct DisplayWakeLockTests {
         lock.acquire()
         lock.acquire()
         #expect(lock.isHeld)
-        #expect(systemHoldsActaAssertion())
+        #expect(systemHoldsActaAssertion(displaySleepAssertion))
 
         lock.release()
         #expect(lock.isHeld == false)
-        #expect(systemHoldsActaAssertion() == false,
+        #expect(systemHoldsAnyActaAssertion() == false,
                 "three acquires needed more than one release — the assertion stacked")
     }
 
@@ -137,7 +160,7 @@ struct DisplayWakeLockTests {
         lock.release()
         lock.release()
         #expect(lock.isHeld == false)
-        #expect(systemHoldsActaAssertion() == false)
+        #expect(systemHoldsAnyActaAssertion() == false)
     }
 
     @Test
@@ -150,9 +173,9 @@ struct DisplayWakeLockTests {
         lock.release()
         lock.acquire()
         #expect(lock.isHeld)
-        #expect(systemHoldsActaAssertion())
+        #expect(systemHoldsActaAssertion(displaySleepAssertion))
         lock.release()
-        #expect(systemHoldsActaAssertion() == false)
+        #expect(systemHoldsAnyActaAssertion() == false)
     }
 
     @Test
@@ -203,8 +226,7 @@ struct DisplayWakeLockTests {
 
     // The lock is worth nothing if `RecordingSession` does not actually drive it, and every test
     // above exercises the lock standalone — deleting `stop()`'s `release()` left all of them green.
-    // This one asks the session, not the lock. Only the release half is reachable today: `start()`
-    // needs TCC and a live audio session, so its `acquire()` waits on the backlog's capture seam.
+    // These two ask the session, not the lock.
     @Test
     @available(macOS 15.0, *)
     func recordingSessionStopReleasesTheWakeLock() async {
@@ -216,12 +238,38 @@ struct DisplayWakeLockTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let session = RecordingSession(directory: directory, wakeLock: lock)
-        // `start()` is out of reach, so we stand in for the acquire it would have done: the point of
-        // the test is that `stop()` gives the assertion back, whatever took it.
+        // Stands in for the acquire a real `start()` would have done: the point of this test is that
+        // `stop()` gives the assertion back, whatever took it. That `start()` is what takes it is the
+        // next test's job.
         lock.acquire()
         await session.stop()
 
         #expect(activity.endCount == 1, "stop() left the display assertion held — the machine would never sleep")
+        #expect(!lock.isHeld)
+    }
+
+    @Test
+    @available(macOS 15.0, *)
+    func recordingSessionStartAcquiresTheWakeLockAndAFailedStartReleasesIt() async {
+        // The acquire call site used to be unproven: deleting `wakeLock.acquire()` from `start()`
+        // disables Task 10 outright and left the whole suite green. It was thought to need TCC and a
+        // live audio session — it does not. `start()` takes the assertion and *then* creates the
+        // folder, so an un-creatable directory throws before ScreenCaptureKit is ever involved and
+        // drives both halves: the acquire, and the `defer` that releases it when a start never became
+        // a recording. A leaked assertion after a failed start is the bug that pins a Mac awake with
+        // nothing recording.
+        let activity = CountingActivity()
+        let lock = activity.makeWakeLock()
+        // `/dev/null` is not a directory, so creating anything beneath it fails with ENOTDIR.
+        let unusable = URL(fileURLWithPath: "/dev/null/acta-cannot-exist-\(UUID().uuidString)")
+        let session = RecordingSession(directory: unusable, wakeLock: lock)
+
+        await #expect(throws: (any Error).self) {
+            try await session.start()
+        }
+
+        #expect(activity.beginCount == 1, "start() never took the assertion — the display would sleep mid-recording")
+        #expect(activity.endCount == 1, "a failed start leaked the assertion — the Mac would never sleep again")
         #expect(!lock.isHeld)
     }
 }
