@@ -35,6 +35,22 @@ At app startup scan the archive; for every folder with `status=recording`:
 3. Set `status=recovered`, notify the user.
 Keep the segment-selection logic a **pure function** and cover it with unit tests.
 
+## Sleep / lid close
+The most common real-world interruption on a laptop is not a crash — it is sleep. `SCStream` does
+not survive it.
+- Observe `NSWorkspace.shared.notificationCenter`: `willSleepNotification` / `didWakeNotification`.
+  Note `screensDidSleepNotification` is a **different** event — the screen sleeping does not mean the
+  system slept (e.g. lid closed with an external display attached).
+- 🪤 **`willSleep` gives you very little time and the system will not wait for you.** `finishWriting`
+  is async, so finalising the current segment may not complete. Do the cheapest possible thing and
+  accept truncation: the segment repair path (`SegmentRepair`) already rescues a truncated tail from
+  its actual file size, so a half-written segment is not a data loss. Do not try to run assembly
+  (`ffmpeg`) from a sleep handler.
+- On `didWake` the stream is dead: restart it (advancing the segment index so a closed segment is
+  never overwritten). If the restart fails, surface an error — never keep showing "recording".
+- A sleep gap simply means the assembled audio is shorter than wall-clock. That is honest and
+  consistent, because duration is computed from the assembled audio, not from the clock.
+
 ## Startup self-diagnosis (`SelfCheck`) + watchdog
 - Within ~2 s of starting, verify **data is actually flowing** (current segment growing / buffers
   arriving). If not — determine the cause and **heal**:

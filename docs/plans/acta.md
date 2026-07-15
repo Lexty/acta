@@ -253,3 +253,74 @@ provide an on-demand "Export mix" action. The track-selection setting disappears
 - [ ] Update tests: delete `TrackSelection` tests; adapt `SegmentAssembler`/`RecordingSettings` tests; keep `FFmpeg.mixArgs` covered (it is still used by Export mix)
 - [ ] Acceptance: `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; a recording produces exactly `system.wav` + `mic.wav` and no `combined.wav`; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
 - [ ] Acceptance (manual, needs a human): record → only two files appear; press "Export mix" → a valid `combined.wav` is produced (`ffprobe` duration > 0, non-silent); existing recordings that already contain `combined.wav` are left untouched
+
+### Task 13: Survive sleep and lid close
+
+Verified gap: nothing in `Sources/` observes sleep (`grep` for `willSleep|didWake|NSWorkspace.*[Ss]leep`
+returns nothing). Yet on a laptop this is **the most common interruption of all** — far more likely
+than the `kill -9` we already defend against. `SCStream` does not survive sleep, so today the
+behaviour is unknown: at best the watchdog thrashes restarts, at worst we show "recording" while
+nothing is written — the exact invariant the app exists to protect.
+
+See the sleep section of the `.claude/skills/crash-safe-recording` skill.
+
+- [ ] Observe `NSWorkspace.shared.notificationCenter` `willSleepNotification` / `didWakeNotification`. `screensDidSleepNotification` is a different event (screen sleep ≠ system sleep, e.g. lid closed with an external display) — do not conflate them
+- [ ] On `willSleep`: finalise the current segment as cheaply as possible. **The system will not wait**: `finishWriting` is async and may not complete. Do not attempt assembly (`ffmpeg`) from the handler. Accept truncation — `SegmentRepair` (Task 8.1) already rescues a truncated tail, so this is not data loss
+- [ ] On `didWake`: the stream is dead → restart it via the existing `AudioRecorder.restart` path, advancing the segment index so a closed segment is never overwritten. If the restart fails → surface the error; **never keep showing "recording"**
+- [ ] The watchdog must not fight the sleep handler: suppress stall detection between `willSleep` and `didWake`, otherwise it will burn its restart budget on a sleeping machine
+- [ ] A sleep gap means the assembled audio is shorter than wall-clock — that is correct and consistent, since duration comes from the audio (Task 8.3). Do not try to pad the gap
+- [ ] Pure logic in `ActaKit` where there is a decision to make (e.g. suppress-window state); the `NSWorkspace` I/O stays in `Acta`
+- [ ] Unit tests: watchdog stalls are ignored inside the sleep window and resume after wake; a restart failure after wake produces an error state rather than a "recording" state
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): start a recording → close the lid / sleep for ~1 min → wake → recording continues, the segment closed before sleep is valid, new segments appear after wake, and stopping assembles audio containing both sides of the gap
+
+### Task 14: Show the recording timer in the menu bar
+
+Today the elapsed time lives inside the popover — you must click to learn whether anything is being
+recorded. Putting it in the menu bar makes the state permanently visible, which both reinforces the
+"never a silent recording" invariant and stops you forgetting to hit Stop on a finished call.
+
+- [ ] `MenuBarExtra` label reflects state: idle → icon only; recording → icon + elapsed time (`MM:SS`, hours as `H:MM:SS` past an hour); error → a clearly distinct warning icon
+- [ ] Use **monospaced digits** so the menu bar does not jitter as the seconds change
+- [ ] Update once per second while recording only; no timer work while idle
+- [ ] The already-present `RecordingController.elapsedString` should be reused rather than duplicated
+- [ ] Unit test the formatting (pure): seconds → `MM:SS`, crossing an hour → `H:MM:SS`, zero, and a long recording
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): during a recording the menu bar shows a ticking timer without opening the popover; it disappears on stop; an error state is visible at a glance
+
+### Task 15: Auto-stop on prolonged silence, with a cancellable countdown
+
+Problem: it is easy to forget to stop. A forgotten recording writes gigabytes of silence
+(~1.38 GB/hour for two tracks, measured). But stopping silently would be as bad as recording
+silently — hence the symmetry with the app's core invariant: **never record silently, never stop
+silently**.
+
+Decided (agreed with the user): trigger on **silence in all channels**, not on the app releasing the
+microphone — if you are listening with your mic muted the meeting is still going. When silence
+persists, show a notification with a **countdown** ("recording stops in …") and a way to **cancel**.
+
+- [ ] Measure levels **streaming**, from the `CMSampleBuffer`s as they are written (cheap, per track). Do **not** shell out to `ffmpeg volumedetect` for this
+- [ ] Pure `SilenceWatcher`/`AutoStop` in `ActaKit`: given (timestamp, systemLevel, micLevel) snapshots → state machine `active → silent → countdown → stop`, plus `cancelled`. Thresholds are parameters, no I/O — fully unit-testable
+- [ ] **Both tracks must be quiet** to count as silence (mic muted + system audio playing = the meeting is on)
+- [ ] Grounded defaults: measured levels from real recordings are system ≈ −21…−24 dB, mic ≈ −34…−40 dB mean, so a silence threshold around **−50 dB** is sane. Silence duration default **10 min**, countdown default **2 min**. All configurable
+- [ ] Notification with a countdown and a **"Keep recording"** action that cancels the auto-stop. After a cancel, re-arm only on a **fresh** silence period — never re-notify immediately
+- [ ] Never auto-stop within the first minute of a recording; a thinking pause in a meeting is seconds, not minutes — the thresholds must not fire on one
+- [ ] If not cancelled → a normal **clean stop** (status `done`, assembly, the usual saved notification) — identical to pressing Stop, not a special path
+- [ ] Settings: master toggle (default on), silence duration, countdown duration; extend `RecordingSettings` (Codable + normalisation, clamp to sane ranges)
+- [ ] Unit tests: sustained speech → never fires; short pause → no countdown; silence ≥ threshold → countdown starts exactly once; cancel → no stop and no immediate re-notify; sound returns during the countdown → countdown aborts; system silent but mic active (you are talking) → no fire; both silent → fires; nothing fires in the first minute
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): leave a recording in silence → a countdown notification appears → pressing "Keep recording" cancels it and recording continues → left alone, it stops cleanly and the audio is assembled normally
+
+### Task 16: Handle audio device changes mid-recording
+
+Verified gap: nothing observes the default input device (`grep` for
+`kAudioHardwarePropertyDefaultInputDevice` returns nothing). Plugging in AirPods mid-call switches
+the default input — a routine event that currently has undefined behaviour. The per-track watchdog
+may notice the mic track dying, but that is a slow, indirect rescue at best.
+
+- [ ] Observe `kAudioHardwarePropertyDefaultInputDevice` via `AudioObjectAddPropertyListener`. Mind the Swift listener-removal bug noted in the `mic-activity-detection` skill (`AudioObjectRemovePropertyListenerBlock` — use `AudioObjectPropertyListenerProc`)
+- [ ] On a device change: restart the stream via the existing `AudioRecorder.restart` path, advancing the segment index and keeping every written segment. This must be faster and more explicit than waiting for the watchdog to spot a dead track
+- [ ] A device change must not consume the `SelfCheck` restart budget meant for genuine failures — it is an expected event, not a fault
+- [ ] Unit tests (pure): a device-change event triggers exactly one restart; the restart does not reset or consume the failure budget; a change while idle does nothing
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): start a recording on the built-in mic → connect AirPods mid-recording → recording continues, no segment is lost or overwritten, and the assembled audio spans the switch
