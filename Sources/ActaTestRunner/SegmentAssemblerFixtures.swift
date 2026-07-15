@@ -1,0 +1,106 @@
+import Foundation
+import ActaKit
+import ActaRuntime
+
+// Fixture WAVs and recording folders for `SegmentAssemblerTests`. They live in their own file
+// because the assembly suite is where the byte-level shapes matter, and the suite itself is long
+// enough without them.
+//
+// Everything here writes real bytes rather than faking a seam: `SegmentAssembler` takes a directory,
+// so a fixture segment is the honest input — the plan, the header repair and `ffmpeg` all read it
+// the way they would read a crashed recording.
+
+/// Build a valid, finalized PCM WAV: RIFF/WAVE + `fmt ` + `data` with `frames` frames of silence.
+/// The sizes are written through, so `Recovery.action` returns `.include` and `ffmpeg` reads it.
+///
+/// The `fmt ` fields can be overridden to build a file that passes the segment plan but that
+/// `ffmpeg` refuses — the plan only checks the RIFF/`data` sizes, not whether the format makes
+/// sense.
+func writeWAV(to url: URL, frames: Int = 480, format: Int = 1, channels: Int = 2,
+              sampleRate: Int = 48_000, bitsPerSample: Int = 16) throws {
+    let align = max(1, channels * bitsPerSample / 8)
+    let fmtBody = pcmFormatBody(format: format, channels: channels, sampleRate: sampleRate,
+                                bitsPerSample: bitsPerSample)
+    let audio = [UInt8](repeating: 0, count: frames * align)
+
+    var body: [UInt8] = Array("WAVE".utf8)
+    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
+    body += Array("data".utf8) + le32(audio.count) + audio
+
+    let bytes = Array("RIFF".utf8) + le32(body.count) + body
+    try Data(bytes).write(to: url)
+}
+
+/// Build the segment a `kill -9` leaves behind: valid RIFF/WAVE and `fmt `, real audio in `data` —
+/// and both sizes still unwritten, because `AVAssetWriter` sets them only in `finishWriting`.
+///
+/// This is the one shape `Recovery.action` answers with `.repair`, and the only way to drive the
+/// repair path from a fixture: `writeWAV` writes its sizes through, so every segment it makes takes
+/// the `.include` branch instead.
+func writeUnfinalizedWAV(to url: URL, frames: Int = 24_000) throws {
+    let fmtBody = pcmFormatBody()
+    let audio = [UInt8](repeating: 0, count: frames * 4) // 2 ch x 16 bit
+
+    var body: [UInt8] = Array("WAVE".utf8)
+    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
+    body += Array("data".utf8) + le32(0) + audio // the `data` size never made it to disk
+
+    // The RIFF size keeps the length of the preamble, exactly as a killed writer leaves it: it
+    // declares *less* than the file holds, which is why `Recovery` leans on the `data` size instead.
+    let bytes = Array("RIFF".utf8) + le32(body.count - audio.count) + body
+    try Data(bytes).write(to: url)
+}
+
+/// A recording folder with the requested number of valid segments per track. A track given `nil`
+/// still gets its (empty) directory — that is what the writers create before the first buffer.
+func makeRecording(in directory: URL, systemSegments: Int?, micSegments: Int?) throws {
+    for (dirName, count) in [(SegmentLayout.systemDirName, systemSegments),
+                             (SegmentLayout.micDirName, micSegments)] {
+        let trackDir = directory.appendingPathComponent(dirName)
+        try FileManager.default.createDirectory(at: trackDir, withIntermediateDirectories: true)
+        for index in 0..<(count ?? 0) {
+            try writeWAV(to: trackDir.appendingPathComponent(String(format: "%04d.wav", index)))
+        }
+    }
+}
+
+func withRecordingDirectory(_ body: (URL) throws -> Void) rethrows {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("acta-assembler-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: url) }
+    try body(url)
+}
+
+func exists(_ url: URL) -> Bool {
+    FileManager.default.fileExists(atPath: url.path)
+}
+
+/// Seconds of audio an assembled track really holds, read off its header (`WAV.durationSeconds` is
+/// the same pure function `SegmentAssembler` measures with).
+func durationOfWAV(at url: URL) -> Double? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return WAV.durationSeconds(header: data.prefix(Recovery.headerProbeBytes), fileSize: data.count)
+}
+
+/// The names of the final files sitting in the recording folder (the track directories and the
+/// concat lists are not final files).
+func finalFileNames(in directory: URL) -> Set<String> {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+    return Set(names.filter { $0.hasSuffix(".wav") })
+}
+
+/// Two segments the plan accepts and `ffmpeg` cannot concat under `-c copy`: the second declares a
+/// different sample rate and channel count, which `WAV.layout` has no reason to refuse (it is
+/// perfectly playable PCM) but which makes the muxer reject the packet stream mid-write.
+///
+/// This is the only fixture shape that drives a *real* `ffmpeg` failure. Blocking the output path
+/// instead would no longer fail at all, now that the concat writes under a temp name — and it never
+/// reproduced the thing that makes this failure dangerous: `ffmpeg` muxes the first segment before
+/// it dies, so the failure comes with a short, playable file attached.
+func makeConcatFailingSystemTrack(in directory: URL) throws {
+    let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
+    try writeWAV(to: systemDir.appendingPathComponent("0000.wav"), frames: 96_000) // 2 s @ 48 kHz
+    try writeWAV(to: systemDir.appendingPathComponent("0001.wav"), frames: 11_025,
+                 channels: 1, sampleRate: 22_050)
+}

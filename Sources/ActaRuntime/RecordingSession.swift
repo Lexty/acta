@@ -121,9 +121,8 @@ public final class RecordingSession: @unchecked Sendable {
         log.notice("Recording session started: \(self.directory.lastPathComponent, privacy: .public)")
     }
 
-    /// Clean stop: stop the capture, assemble the segments (per the track selection from the
-    /// settings), mark the marker as `done`. Deleting the segments after the assembly also comes
-    /// from the settings (`deleteSegmentsAfterAssembly`).
+    /// Clean stop: stop the capture, assemble the segments, mark the marker as `done`. Deleting the
+    /// segments after the assembly comes from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
     public func stop() async -> SegmentAssembler.Result? {
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`

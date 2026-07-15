@@ -11,88 +11,6 @@ import ActaRuntime
 // These tests need `ffmpeg` (a required runtime tool — see CLAUDE.md). Without it there is nothing
 // to assert about assembly, so they fail rather than pass quietly.
 
-// MARK: - Fixtures
-
-/// Build a valid, finalized PCM WAV: RIFF/WAVE + `fmt ` + `data` with `frames` frames of silence.
-/// The sizes are written through, so `Recovery.action` returns `.include` and `ffmpeg` reads it.
-///
-/// The `fmt ` fields can be overridden to build a file that passes the segment plan but that
-/// `ffmpeg` refuses — the plan only checks the RIFF/`data` sizes, not whether the format makes
-/// sense.
-private func writeWAV(to url: URL, frames: Int = 480, format: Int = 1, channels: Int = 2,
-                      sampleRate: Int = 48_000, bitsPerSample: Int = 16) throws {
-    let align = max(1, channels * bitsPerSample / 8)
-    let fmtBody = pcmFormatBody(format: format, channels: channels, sampleRate: sampleRate,
-                                bitsPerSample: bitsPerSample)
-    let audio = [UInt8](repeating: 0, count: frames * align)
-
-    var body: [UInt8] = Array("WAVE".utf8)
-    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
-    body += Array("data".utf8) + le32(audio.count) + audio
-
-    let bytes = Array("RIFF".utf8) + le32(body.count) + body
-    try Data(bytes).write(to: url)
-}
-
-/// Build the segment a `kill -9` leaves behind: valid RIFF/WAVE and `fmt `, real audio in `data` —
-/// and both sizes still unwritten, because `AVAssetWriter` sets them only in `finishWriting`.
-///
-/// This is the one shape `Recovery.action` answers with `.repair`, and the only way to drive the
-/// repair path from a fixture: `writeWAV` writes its sizes through, so every segment it makes takes
-/// the `.include` branch instead.
-private func writeUnfinalizedWAV(to url: URL, frames: Int = 24_000) throws {
-    let fmtBody = pcmFormatBody()
-    let audio = [UInt8](repeating: 0, count: frames * 4) // 2 ch x 16 bit
-
-    var body: [UInt8] = Array("WAVE".utf8)
-    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
-    body += Array("data".utf8) + le32(0) + audio // the `data` size never made it to disk
-
-    // The RIFF size keeps the length of the preamble, exactly as a killed writer leaves it: it
-    // declares *less* than the file holds, which is why `Recovery` leans on the `data` size instead.
-    let bytes = Array("RIFF".utf8) + le32(body.count - audio.count) + body
-    try Data(bytes).write(to: url)
-}
-
-/// A recording folder with the requested number of valid segments per track. A track given `nil`
-/// still gets its (empty) directory — that is what the writers create before the first buffer.
-private func makeRecording(in directory: URL, systemSegments: Int?, micSegments: Int?) throws {
-    for (dirName, count) in [(SegmentLayout.systemDirName, systemSegments),
-                             (SegmentLayout.micDirName, micSegments)] {
-        let trackDir = directory.appendingPathComponent(dirName)
-        try FileManager.default.createDirectory(at: trackDir, withIntermediateDirectories: true)
-        for index in 0..<(count ?? 0) {
-            try writeWAV(to: trackDir.appendingPathComponent(String(format: "%04d.wav", index)))
-        }
-    }
-}
-
-private func withRecordingDirectory(_ body: (URL) throws -> Void) rethrows {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("acta-assembler-\(UUID().uuidString)", isDirectory: true)
-    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: url) }
-    try body(url)
-}
-
-private func exists(_ url: URL) -> Bool {
-    FileManager.default.fileExists(atPath: url.path)
-}
-
-/// Seconds of audio an assembled track really holds, read off its header (`WAV.durationSeconds` is
-/// the same pure function `SegmentAssembler` measures with).
-private func durationOfWAV(at url: URL) -> Double? {
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    return WAV.durationSeconds(header: data.prefix(Recovery.headerProbeBytes), fileSize: data.count)
-}
-
-/// The names of the final files sitting in the recording folder (the track directories and the
-/// concat lists are not final files).
-private func finalFileNames(in directory: URL) -> Set<String> {
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-    return Set(names.filter { $0.hasSuffix(".wav") })
-}
-
 // MARK: - The two tracks, and nothing else
 
 /// The heart of Task 12: a mix is derived data and is no longer written. `exactly` matters here —
@@ -153,14 +71,9 @@ func assembleThrowsNoSegmentsWhenBothTracksAreEmpty() throws {
 @Test
 func assembleKeepsSegmentsWhenConcatFails() throws {
     try withRecordingDirectory { directory in
-        try makeRecording(in: directory, systemSegments: 2, micSegments: 2)
-        // The segments are valid — the failure has to happen at the `ffmpeg` stage, which is the
-        // one this test is about. A broken segment would not get there: the plan drops it and the
-        // track comes out simply empty. So the output path is blocked with a directory instead:
-        // `ffmpeg` reads the segments fine and fails to write `system.wav`.
+        try makeRecording(in: directory, systemSegments: 0, micSegments: 2)
+        try makeConcatFailingSystemTrack(in: directory)
         let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
-        try FileManager.default.createDirectory(at: directory.appendingPathComponent("system.wav"),
-                                                withIntermediateDirectories: true)
 
         // `concatFailed` for the system track, named: `AssembleError.self` would match just as well
         // if `assemble` had bailed out at its first line with `ffmpegNotFound` — and then the
@@ -174,6 +87,82 @@ func assembleKeepsSegmentsWhenConcatFails() throws {
         #expect(exists(systemDir.appendingPathComponent("0000.wav")))
         #expect(exists(systemDir.appendingPathComponent("0001.wav")))
         #expect(exists(directory.appendingPathComponent(SegmentLayout.micDirName)))
+    }
+}
+
+/// The half of a failed concat that the throw alone does not cover. `-xerror` makes `ffmpeg` exit
+/// non-zero, but only *after* it has muxed everything it read before the bad segment — so the failure
+/// arrives with a short, perfectly playable file already written. Left under its final name that file
+/// is indistinguishable from the real track: it sits next to `info.md`, it opens, it plays, and it
+/// silently under-reports a 2 s meeting while the segments that hold the rest wait for a retry.
+@Test
+func assembleLeavesNoPlausibleTrackFileBehindWhenConcatFails() throws {
+    try withRecordingDirectory { directory in
+        try makeRecording(in: directory, systemSegments: 0, micSegments: 2)
+        try makeConcatFailingSystemTrack(in: directory)
+
+        #expect(throws: SegmentAssembler.AssembleError
+            .concatFailed(track: SegmentLayout.systemDirName)) {
+            try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+        }
+
+        // Nothing under the final name, and no temp left lying around either.
+        #expect(!exists(directory.appendingPathComponent("system.wav")))
+        #expect(!exists(directory.appendingPathComponent("system.partial.wav")))
+        #expect(finalFileNames(in: directory).isEmpty)
+    }
+}
+
+/// A recovery that re-assembles a folder whose earlier attempt left a `system.wav` must not be
+/// blocked by it: the concat writes under a temp name and renames over whatever is there. Without
+/// clearing the way first, `moveItem` would refuse and turn a healthy assembly into `concatFailed`
+/// on every launch.
+@Test
+func assembleOverwritesATrackFileLeftByAnEarlierAttempt() throws {
+    try withRecordingDirectory { directory in
+        try makeRecording(in: directory, systemSegments: 0, micSegments: 1)
+        let systemDir = directory.appendingPathComponent(SegmentLayout.systemDirName)
+        try writeWAV(to: systemDir.appendingPathComponent("0000.wav"), frames: 96_000) // 2 s
+        // The earlier attempt's leftover: a short file under the final name.
+        try writeWAV(to: directory.appendingPathComponent("system.wav"), frames: 24_000) // 0.5 s
+
+        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+
+        let systemWAV = try #require(result.systemWAV)
+        // The fresh assembly replaced it — a stale 0.5 s would mean the rename never happened.
+        let duration = try #require(durationOfWAV(at: systemWAV))
+        #expect(abs(duration - 2.0) < 0.05)
+    }
+}
+
+/// The total case of the rule `assembleKeepsSegmentsWhenAPlannedSegmentCouldNotBeRepaired` covers
+/// partially: when *every* planned segment of *both* tracks fails its repair, no track comes out at
+/// all. The distinction is the whole point — `RecoveryManager` reads `noSegments` as "nothing was
+/// ever recorded, close the folder for good", and that verdict is false here. The audio is sitting
+/// in the segments, and the repair failed for a reason that commonly clears.
+@Test
+func assembleThrowsSegmentsUnrepairableWhenEveryTrackHeldAudioThatFailedRepair() throws {
+    try withRecordingDirectory { directory in
+        try makeRecording(in: directory, systemSegments: nil, micSegments: nil)
+        var segments: [URL] = []
+        for dirName in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
+            let segment = directory.appendingPathComponent(dirName).appendingPathComponent("0000.wav")
+            try writeUnfinalizedWAV(to: segment, frames: 24_000)
+            try FileManager.default.setAttributes([.posixPermissions: 0o444],
+                                                  ofItemAtPath: segment.path)
+            segments.append(segment)
+        }
+
+        // `segmentsUnrepairable`, not `noSegments`: the two differ only in what the caller does next,
+        // and getting that wrong strands the audio under a terminal marker forever.
+        #expect(throws: SegmentAssembler.AssembleError.segmentsUnrepairable) {
+            try SegmentAssembler().assemble(in: directory, deleteSegments: true)
+        }
+
+        // And the audio the plan vouched for is still on disk, waiting for that retry.
+        for segment in segments {
+            #expect(exists(segment))
+        }
     }
 }
 

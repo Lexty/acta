@@ -35,6 +35,13 @@ public struct SegmentAssembler {
     public enum AssembleError: Error, Equatable {
         case ffmpegNotFound
         case noSegments
+        /// Every track came back empty, but the plan had vouched for audio that failed its repair.
+        /// Kept separate from `noSegments`: that one means the crash left nothing behind and never
+        /// will, which is why the caller closes the folder for good. Here the audio exists — it is
+        /// sitting in the segments, which are its only copy — and the repair failed for reasons that
+        /// commonly clear (a read-only volume, a full disk, a permission). Closing the folder would
+        /// strand it: the marker would go terminal and no later launch would ever retry.
+        case segmentsUnrepairable
         /// `ffmpeg` failed to assemble a track. Kept separate from `noSegments`: an empty track is
         /// not an error, whereas a failed assembly means the segments are the only copy of the
         /// audio and must not be touched.
@@ -62,7 +69,16 @@ public struct SegmentAssembler {
 
         let systemWAV = system.url
         let micWAV = mic.url
-        guard systemWAV != nil || micWAV != nil else { throw AssembleError.noSegments }
+        guard systemWAV != nil || micWAV != nil else {
+            // "No track came out" has two causes that must not share an exit. Nothing was ever
+            // recorded — or everything was, and every last segment failed its repair. The second is
+            // recoverable and the segments still hold the audio, so it must not reach the caller as
+            // `noSegments`, which is its cue to close the folder permanently.
+            if system.retainedSegments || mic.retainedSegments {
+                throw AssembleError.segmentsUnrepairable
+            }
+            throw AssembleError.noSegments
+        }
 
         var result = Result(systemWAV: systemWAV, micWAV: micWAV,
                             segmentCount: max(system.count, mic.count))
@@ -145,9 +161,36 @@ public struct SegmentAssembler {
         try FFmpeg.concatListContents(segmentPaths: paths).write(to: listURL, atomically: true, encoding: .utf8)
         defer { try? fileManager.removeItem(at: listURL) }
 
+        // `ffmpeg` writes as it demuxes, so a concat that dies partway leaves the audio it had
+        // already muxed on disk. With `-xerror` making that failure loud, the leftover is the
+        // dangerous part: a short but perfectly playable `system.wav`, sitting next to `info.md`,
+        // indistinguishable from the real track. Assembling under a temp name and renaming only on
+        // success means the final name never exists unless it is whole.
+        // The temp keeps the `.wav` extension: `ffmpeg` picks its muxer from the output extension,
+        // so a name it cannot map to a format fails the concat before it reads a single segment.
         let output = directory.appendingPathComponent(outputName)
-        let args = FFmpeg.concatArgs(listPath: listURL.path, outputPath: output.path)
-        guard runFFmpeg(ffmpeg, args: args) else { throw AssembleError.concatFailed(track: dirName) }
+        let partial = directory
+            .appendingPathComponent("\(output.deletingPathExtension().lastPathComponent).partial.wav")
+        let args = FFmpeg.concatArgs(listPath: listURL.path, outputPath: partial.path)
+        guard runFFmpeg(ffmpeg, args: args) else {
+            try? fileManager.removeItem(at: partial)
+            throw AssembleError.concatFailed(track: dirName)
+        }
+        // Recovery re-assembles a folder that may already hold an output from an earlier attempt;
+        // `moveItem` refuses to clobber, so clear the way first. A crash in this window leaves no
+        // output at all — the marker stays `recording` and the next launch retries, which is the
+        // failure we want over a half-written one.
+        try? fileManager.removeItem(at: output)
+        do {
+            try fileManager.moveItem(at: partial, to: output)
+        } catch {
+            log.error("""
+                Track \(dirName, privacy: .public): assembled audio could not be moved into place: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            try? fileManager.removeItem(at: partial)
+            throw AssembleError.concatFailed(track: dirName)
+        }
         return TrackResult(url: output, count: plan.count, retainedSegments: retainedSegments)
     }
 

@@ -7,8 +7,8 @@ import os
 /// On `kill -9`/a computer restart the process never reaches a clean stop: the recording folder is
 /// left with a `session.json` carrying `status=recording` and unassembled segments. On launch,
 /// `RecoveryManager` scans the archive, finds such folders, assembles the surviving segments into
-/// `system.wav`/`mic.wav` (the unfinalized last segment is dropped) and moves the marker to
-/// `status=recovered`.
+/// `system.wav`/`mic.wav` (the unfinalized last segment is repaired from its actual size, not
+/// dropped) and moves the marker to `status=recovered`.
 public struct RecoveryManager {
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
     private let fileManager = FileManager.default
@@ -47,6 +47,10 @@ public struct RecoveryManager {
                 // the folder to a futile assembly on every launch and an eternal "not finished" in
                 // the list with no way to clear it. We do not add it to `recovered`: there was
                 // nothing to recover, and there is no reason to lie in the notification.
+                //
+                // `segmentsUnrepairable` deliberately does not come here: there the segments *do*
+                // hold audio, so the folder falls to the generic `catch` below and keeps its
+                // `recording` marker for a later launch to retry.
                 closeEmpty(directory: dir, manifest: manifest)
             } catch {
                 let name = dir.lastPathComponent
