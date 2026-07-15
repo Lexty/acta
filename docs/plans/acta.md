@@ -41,12 +41,12 @@
 - [x] Приёмка: `bash Scripts/bundle.sh` собирает `Acta.app` без ошибок (проверено); `open Acta.app` показывает иконку в меню-баре — manual test (skipped - not automatable, требует GUI-сессии)
 
 ### Task 2: Потоковая запись двух дорожек сегментами
-- [ ] `Permissions.swift`: проверка/запрос Screen Recording (`CGPreflightScreenCaptureAccess`) и Microphone
-- [ ] `AudioRecorder.swift`: один `SCStream` (`capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`, минимальный видео-конфиг), буферы `.audio`/`.microphone` в раздельные writer'ы
-- [ ] **Сегментирование** (`SegmentWriter.swift`): писать короткими сегментами (~10–15 с), каждый финализируется как валидный файл (`system/NNNN.wav`, `mic/NNNN.wav`). Крэш теряет ≤ длину сегмента
-- [ ] Частый flush данных на диск; никакой буферизации всей записи в памяти
-- [ ] Юнит-тест: чистая функция построения аргументов `ffmpeg` (склейка/микс) покрыта тестом
-- [ ] Приёмка: запись 60 с создаёт несколько сегментов; каждый сегмент валиден (`ffprobe` длительность > 0)
+- [x] `Permissions.swift`: проверка/запрос Screen Recording (`CGPreflightScreenCaptureAccess`) и Microphone
+- [x] `AudioRecorder.swift`: один `SCStream` (`capturesAudio=true`, `captureMicrophone=true`, `excludesCurrentProcessAudio=true`, минимальный видео-конфиг), буферы `.audio`/`.microphone` в раздельные writer'ы
+- [x] **Сегментирование** (`SegmentWriter.swift`): писать короткими сегментами (~10–15 с), каждый финализируется как валидный файл (`system/NNNN.wav`, `mic/NNNN.wav`). Крэш теряет ≤ длину сегмента
+- [x] Частый flush данных на диск; никакой буферизации всей записи в памяти (каждый буфер сразу пишется во writer сегмента; в памяти не копится)
+- [x] Юнит-тест: чистая функция построения аргументов `ffmpeg` (склейка/микс) покрыта тестом (`FFmpeg.concatArgs`/`mixArgs`/`concatListContents` + раскладка сегментов `SegmentLayout`)
+- [x] Приёмка: запись 60 с создаёт несколько сегментов; каждый сегмент валиден (`ffprobe` длительность > 0) — manual test (skipped - not automatable, требует TCC Screen Recording + Microphone и живой аудио-сессии)
 
 ### Task 3: Отказоустойчивость и восстановление после рестарта
 - [ ] `session.json` в папке записи: `status` (recording/done/recovered), `started_at`, конфиг, счётчик сегментов — обновляется по ходу
