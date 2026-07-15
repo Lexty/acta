@@ -144,9 +144,15 @@ untouched, with the watchdog silent throughout; 147 tests. Task 10 (display slee
 because a live run proved the app unusable for real meetings without it. Task 11 was the extraction
 everything else waited on; with `ActaRuntime` importable, test infrastructure is buildable at last.
 
-**Tasks 12–13 are open and written for an unattended overnight run.** Their acceptance is deliberately
-**fully automatable** — no TCC prompt, no GUI click, no real audio — because nobody is awake to grant
-or click. Anything needing a human is a morning check, never a blocking checkbox.
+**Task 12 is the only open task, and it is written for an unattended overnight run.** Its acceptance
+is deliberately **fully automatable** — no TCC prompt, no GUI click, no real audio — because nobody is
+awake to grant or click. Anything needing a human is a morning check, never a blocking checkbox.
+
+It is deliberately alone. A `ControlAPI` façade task was drafted alongside it and **pulled out** after
+external review: it required characterising a *successful* recording, which drives real TCC, a real
+`SCStream` and real buffers — unreachable with fake capture parked. An agent facing an unsatisfiable
+criterion at 3am either fakes it or stalls, and a night of plausible-looking fake coverage is worse
+than a night of nothing. It is parked in the backlog with the fixes it needs.
 
 Breaking things here is cheap: a protected stable build already exists (`Acta.app`,
 `dev.personal.acta`, built from the `v0.1.0` tag), and the dev build is a separate app with its own
@@ -267,33 +273,22 @@ scheduler lands.
 
 - [ ] `SegmentAssembler`: always assemble `system.wav` **and** `mic.wav`, nothing else. Remove the mix and its special cases — building `combined` via intermediate wavs, the "mix impossible" vs "mix failed" distinction, and the mix-related guards on segment deletion
 - [ ] `RecordingSettings` (ActaKit): remove `saveSystemTrack`, `saveMicTrack`, `saveCombinedTrack` and the whole `TrackSelection` type, plus the normalisation rule that forced `combined` when nothing was selected. Keep `archivePath`, `segmentSeconds`, `deleteSegmentsAfterAssembly`
-- [ ] **Settings migration is decode-only.** Real `UserDefaults` hold JSON with the removed keys — verified on this machine: `{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,"segmentSeconds":15,"archivePath":"","deleteSegmentsAfterAssembly":true}`. Decoding must ignore unknown keys and keep the surviving ones — **no crash, no silent reset to defaults**. Cover with a unit test using that exact payload
+- [ ] **Settings migration is decode-only.** Real `UserDefaults` hold JSON with the removed keys — verified on this machine: `{"saveSystemTrack":true,"saveMicTrack":true,"saveCombinedTrack":false,"segmentSeconds":15,"archivePath":"","deleteSegmentsAfterAssembly":true}`. Swift's keyed `Decodable` ignores unknown keys, so no migration code is needed — but that must be **proven, not assumed**. Unit-test with that exact payload and ⚠️ **assert every surviving value** (`archivePath`, `segmentSeconds`, `deleteSegmentsAfterAssembly`), not merely that decoding succeeded: a decode that quietly reset the user's settings to defaults would pass a "it decodes" assertion while silently losing their archive path and segment length
 - [ ] `MenuContent`: drop the "Save tracks" section from Settings. Do not add anything in its place
 - [ ] `RecoveryManager` must not gain a mix branch — recovery assembles both tracks, same as a clean stop
 - [ ] Update the generated `~/Acta/CLAUDE.md` (`MeetingStore.ensureArchiveRoot`): the archive holds `system.wav` and `mic.wav`; a mix is not produced
 - [ ] Update tests: delete `TrackSelection` tests and the "forces combined" normalisation tests; adapt `SegmentAssembler`/`RecordingSettings` tests. ⚠️ Keep `FFmpeg.mixArgs` and its tests — Export mix will use them when it is promoted. Assertions may be **removed only where they test deleted behaviour**; they may not be broadened, skipped, or turned into "does not throw"
-- [ ] Acceptance (automatable): `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing; `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev` all green
-- [ ] Morning check (needs a human, **not** a blocking checkbox): a dev recording produces exactly two final audio files and no `combined.wav`; existing recordings that already contain one are untouched
-
-### Task 13: A single `ControlAPI` façade, plus a characterization contract
-
-Task 11 made `ActaRuntime` importable, which unblocks this. It exists for two reasons that arrive
-together: the UI must stop reaching into the pipeline, and the **next** task in the backlog — the
-serialized lifecycle — is a refactor of `RecordingSession`/`SelfCheck`/`RecordingController` that
-must not silently change behaviour. "No behaviour change" is not an acceptance contract; a frozen
-set of characterization scenarios is. This task records that contract **before** anything is
-refactored.
-
-- [ ] **One façade, one entry point.** Every operation the app performs goes through `ControlAPI` in `ActaRuntime`: `start(title:)`, `stop()`, `status()`, `list()`, `getSettings()`, `setSettings(_:)`, `recoverNow()`. The SwiftUI menu bar calls **only** this — no UI path may reach into the coordinator, recorder, store or manifest directly. If the UI can do something the API cannot, that is a bug in this task
-- [ ] **No UI types across the boundary.** Parameters, results and state are plain values — no SwiftUI/AppKit types in the signatures. The UI adapts them; the runtime does not own UI-bound state
-- [ ] **Typed error categories** with stable identifiers, not display strings. A display string may be *derived* from a category; the category is what crosses the boundary and what tests assert on. `StartupFailure.userMessage` stays as the derived text
-- [ ] **A state stream the UI actually consumes** (e.g. `AsyncStream<ControlState>`) — idle / recording / error / recovered, with the elapsed time and the health signal. This is the same trace the characterization scenarios assert on: one mechanism, not a product one and a test one
-- [ ] ⚠️ **Do not build**: a universal `Codable` command envelope, an API version field, a socket, or a CLI. They are parked. A scenario is *not* just a list of commands — scenarios also need fault injection and clock control, which are harness directives, not API operations. Make types `Codable` only where it is free
-- [ ] ⚠️ **Privacy invariant**: anything able to invoke `start` can record the user. An API-initiated recording obeys the same rule as a UI one — visible state, never a silent recording. There is no "quiet mode"
-- [ ] **Characterization scenarios** in `ActaTestRunner`, driving the real pipeline through `ControlAPI` against a temp archive: start → confirmed recording → stop → done; a failed start; recovery running **once** per launch; start/stop **idempotence** (a second stop is a no-op, not a second path). Assert on the state stream, the manifest status transitions, the produced artifacts and the error categories
-- [ ] These scenarios are the **frozen contract** for the lifecycle refactor that follows. Anything they cannot express, they cannot protect — so record what the app does *today*, faithfully, rather than what it ought to do
-- [ ] Acceptance (automatable): `swift build -c release`, `bash Scripts/test.sh` (existing 147 tests **plus** the characterization scenarios), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev` all green; `grep -rn "RecordingSession\|SelfCheck\|SegmentAssembler" Sources/Acta/ActaApp.swift` returns nothing — the UI reaches the pipeline only through `ControlAPI`
-- [ ] Morning check (needs a human, **not** a blocking checkbox): the menu bar still starts, stops, shows state and lists recordings exactly as before
+- [ ] **Filesystem-level assembler tests** with fixture WAV segments (no capture needed — `SegmentAssembler` takes a directory, so this is fully automatable and is the only thing that proves the deletion did not break assembly):
+  - both tracks present → **exactly** `system.wav` and `mic.wav` appear, and no `combined.wav`;
+  - one track has no valid segments → the surviving track's WAV is still produced and the operation succeeds;
+  - `ffmpeg` concat fails → segment directories remain (the only copy of the audio is never destroyed);
+  - successful assembly with `deleteSegmentsAfterAssembly=true` → segment directories are removed;
+  - a folder that **already contains** an old `combined.wav` → assembly leaves it alone (see the decision below).
+- [ ] **Decision, so nobody has to guess:** "nothing else is produced" means the pipeline never *creates* a mix. It does **not** mean the output directory is scrubbed — re-assembling or recovering a folder that already holds a `combined.wav` from an older build leaves that file in place. Deleting a user's audio to satisfy a tidiness rule would be worse than leaving it. Test that it survives
+- [ ] Acceptance (automatable): identifier grep — `grep -rn "TrackSelection\|saveCombinedTrack\|saveSystemTrack\|saveMicTrack" Sources/` returns nothing
+- [ ] Acceptance (automatable): **behaviour grep** — `grep -rn "combined\.wav\|combinedWAV\|mixFailed" Sources/Acta Sources/ActaRuntime Sources/ActaKit` finds no runtime assembly branch. ⚠️ The identifier grep alone cannot prove this: a mix branch can survive under different names. `FFmpeg.mixArgs` and its tests **must remain** (Export mix will use them when promoted), so it is expected in `ActaKit` and in the tests — nowhere else
+- [ ] Acceptance (automatable): `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev` all green
+- [ ] Morning check (needs a human, **not** a blocking checkbox): a dev recording produces exactly two final audio files and no `combined.wav`
 
 ## Backlog
 

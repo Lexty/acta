@@ -81,6 +81,66 @@ come from the real bundle identifier so the two flavors are distinguishable.
 
 ---
 
+## Parked: the `ControlAPI` façade + characterization contract
+
+Pulled OUT of an overnight plan on 2026-07-15 after external review — it contained a criterion no
+autonomous agent could honestly satisfy. Fix these **before** promoting it.
+
+🪤 **The characterization scenarios cannot run without a capture seam.** The task asked for
+"start → confirmed recording → stop", but `RecordingSession.start()` checks TCC, creates a real
+`SCStream` and waits for real buffers in self-diagnosis. With fake capture parked, an unattended run
+cannot reach "confirmed recording" — so the agent would characterise only the *failed* start while
+claiming lifecycle coverage, fabricate manifests/WAVs directly (which characterises nothing), pull
+the parked fake-capture seam into scope anyway, or hang depending on this machine's TCC state.
+**Either promote a minimal fake capture/permission/clock seam first, or drop the successful-start
+scenario and say so out loud.** Do not leave the contradiction for the agent to resolve.
+
+🪤 **"One façade, every operation" does not match the app.** The listed API
+(`start/stop/status/list/getSettings/setSettings/recoverNow`) omits operations the UI genuinely
+performs today — all verified in the source: launch recovery (`RecordingController.recoveryTask`),
+`openInFinder`, open archive, the recovery banner and its dismissal, `suggestedTitle`, and the
+quit-time path (`ActaApp.applicationShouldTerminate` → `hasWorkInFlight` → `stopAndWait`). As written
+the criterion is unsatisfiable, which invites either uncontrolled API growth or UI paths that bypass
+the façade while the checkbox is ticked anyway. Enumerate the full operation set first.
+
+**Also underspecified — freeze these before execution:** the exact `ControlState` cases and fields;
+what "health signal" means concretely; the error-category identifiers; stream replay / initial-state
+semantics; the completion semantics of `start()` and `stop()`; ownership and "once per launch";
+whether `status()` duplicates the state stream.
+
+**The contract itself needs exact ordered traces**, not prose. For example: success
+`idle → starting → recording → saving → idle`; failed start `idle → starting → error(category)` with
+no wake lock left held and no phantom session; recovery attempted once across repeated launch calls
+with `recovered` emitted once; a second stop producing no state emission, no assembly, no manifest
+write. It must also cover the dangerous windows that exist today — start in flight, stop in flight,
+assembly failure, watchdog fatal stop — or the lifecycle refactor can break the very guards that
+prevent double capture and double assembly while every listed scenario stays green.
+
+The task as it stood when parked:
+
+### Task 13: A single `ControlAPI` façade, plus a characterization contract
+
+Task 11 made `ActaRuntime` importable, which unblocks this. It exists for two reasons that arrive
+together: the UI must stop reaching into the pipeline, and the **next** task in the backlog — the
+serialized lifecycle — is a refactor of `RecordingSession`/`SelfCheck`/`RecordingController` that
+must not silently change behaviour. "No behaviour change" is not an acceptance contract; a frozen
+set of characterization scenarios is. This task records that contract **before** anything is
+refactored.
+
+- [ ] **One façade, one entry point.** Every operation the app performs goes through `ControlAPI` in `ActaRuntime`: `start(title:)`, `stop()`, `status()`, `list()`, `getSettings()`, `setSettings(_:)`, `recoverNow()`. The SwiftUI menu bar calls **only** this — no UI path may reach into the coordinator, recorder, store or manifest directly. If the UI can do something the API cannot, that is a bug in this task
+- [ ] **No UI types across the boundary.** Parameters, results and state are plain values — no SwiftUI/AppKit types in the signatures. The UI adapts them; the runtime does not own UI-bound state
+- [ ] **Typed error categories** with stable identifiers, not display strings. A display string may be *derived* from a category; the category is what crosses the boundary and what tests assert on. `StartupFailure.userMessage` stays as the derived text
+- [ ] **A state stream the UI actually consumes** (e.g. `AsyncStream<ControlState>`) — idle / recording / error / recovered, with the elapsed time and the health signal. This is the same trace the characterization scenarios assert on: one mechanism, not a product one and a test one
+- [ ] ⚠️ **Do not build**: a universal `Codable` command envelope, an API version field, a socket, or a CLI. They are parked. A scenario is *not* just a list of commands — scenarios also need fault injection and clock control, which are harness directives, not API operations. Make types `Codable` only where it is free
+- [ ] ⚠️ **Privacy invariant**: anything able to invoke `start` can record the user. An API-initiated recording obeys the same rule as a UI one — visible state, never a silent recording. There is no "quiet mode"
+- [ ] **Characterization scenarios** in `ActaTestRunner`, driving the real pipeline through `ControlAPI` against a temp archive: start → confirmed recording → stop → done; a failed start; recovery running **once** per launch; start/stop **idempotence** (a second stop is a no-op, not a second path). Assert on the state stream, the manifest status transitions, the produced artifacts and the error categories
+- [ ] These scenarios are the **frozen contract** for the lifecycle refactor that follows. Anything they cannot express, they cannot protect — so record what the app does *today*, faithfully, rather than what it ought to do
+- [ ] Acceptance (automatable): `swift build -c release`, `bash Scripts/test.sh` (existing 147 tests **plus** the characterization scenarios), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev` all green; `grep -rn "RecordingSession\|SelfCheck\|SegmentAssembler" Sources/Acta/ActaApp.swift` returns nothing — the UI reaches the pipeline only through `ControlAPI`
+- [ ] Morning check (needs a human, **not** a blocking checkbox): the menu bar still starts, stops, shows state and lists recordings exactly as before
+
+
+---
+
 ## Round 4 review findings — apply these when promoting the relevant item
 
 These are real defects found in the parked text below. They are **not fixed** in it.
