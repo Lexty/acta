@@ -8,8 +8,12 @@ import os
 /// Разделяет ответственность с `AudioRecorder` (тот знает только про `SCStream` и сегменты):
 /// здесь — маркер сессии и сборка, то есть отказоустойчивая часть. UI-обвязка (старт/стоп из
 /// меню-бара) появится в Task 6 и будет дёргать эти методы.
+///
+/// `@unchecked Sendable`: все методы дёргает `RecordingController` с главного актора (сериализовано),
+/// а `AudioRecorder`/`SelfCheck` внутри сами управляют своей потокобезопасностью. Это позволяет
+/// вызывать `async`-методы сессии из main-actor без предупреждений о гонках.
 @available(macOS 15.0, *)
-final class RecordingSession {
+final class RecordingSession: @unchecked Sendable {
     /// Папка записи.
     let directory: URL
 
