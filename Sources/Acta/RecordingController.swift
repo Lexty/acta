@@ -23,7 +23,7 @@ final class RecordingController: ObservableObject {
         case error
     }
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingController")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecordingController")
     private let settingsStore: SettingsStore
 
     /// Current recording settings (edited in the "Settings" section, saved on change).

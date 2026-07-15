@@ -16,7 +16,7 @@ struct RecoveryManager {
         var combinedWAV: URL?
     }
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "RecoveryManager")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
     private let fileManager = FileManager.default
     private let store = SessionManifestStore()
     private let assembler = SegmentAssembler()

@@ -62,7 +62,7 @@ final class SegmentWriter {
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
         self.directory = directory
         self.segmentSeconds = segmentSeconds
-        self.log = Logger(subsystem: AppInfo.bundleID, category: "SegmentWriter")
+        self.log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SegmentWriter")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 

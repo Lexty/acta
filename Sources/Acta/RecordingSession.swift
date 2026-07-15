@@ -19,13 +19,17 @@ final class RecordingSession: @unchecked Sendable {
     /// The recording folder.
     let directory: URL
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingSession")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecordingSession")
     private let settings: RecordingSettings
     private let segmentSeconds: Int
     private let recorder: AudioRecorder
     private let selfCheck: SelfCheck
     private let store = SessionManifestStore()
     private var watchdogTask: Task<Void, Never>?
+    /// Held for exactly the span of a recording: the display going idle takes ScreenCaptureKit's
+    /// display away and kills the capture (Task 10). Taken in `start`, released on every exit path —
+    /// a failed start, a clean stop, and the watchdog's give-up, which reaches `stop()` too.
+    private let wakeLock = DisplayWakeLock()
 
     /// `segment_count` updates arrive here from the queues of both tracks: a dedicated serial queue
     /// serializes the read-modify-write of the marker and moves the disk write off the hot audio
@@ -55,6 +59,13 @@ final class RecordingSession: @unchecked Sendable {
     ///   the recording — a "mute" recording status is unacceptable. Not called on the main actor.
     func start(startedAt: Date = Date(),
                onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
+        // Every `throw` below is a start that never became a recording, and the assertion must not
+        // outlive it: a recorder that keeps the display awake after it stopped recording is the worst
+        // kind of bug — the machine never sleeps and nobody knows why. `confirmed` flips only once
+        // the self-diagnosis has confirmed the stream, and from then on `stop()` owns the release.
+        var confirmed = false
+        wakeLock.acquire()
+        defer { if !confirmed { wakeLock.release() } }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.startedAt = startedAt
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
@@ -83,10 +94,14 @@ final class RecordingSession: @unchecked Sendable {
             throw failure
         }
 
+        confirmed = true
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
         }
-        log.info("Recording session started: \(self.directory.lastPathComponent, privacy: .public)")
+        // `.notice`, not `.info`: `os_log` does not persist `.info`, so the lifecycle events were
+        // gone by the time anyone came to investigate a failure — which is how the display-sleep bug
+        // stayed invisible for as long as it did.
+        log.notice("Recording session started: \(self.directory.lastPathComponent, privacy: .public)")
     }
 
     /// Clean stop: stop the capture, assemble the segments (per the track selection from the
@@ -94,6 +109,11 @@ final class RecordingSession: @unchecked Sendable {
     /// from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
     func stop() async -> SegmentAssembler.Result? {
+        // Released first thing: from here on nothing is captured, and the assembly that follows —
+        // tens of seconds of `ffmpeg` for an hour-long meeting — has no business holding the display
+        // on. This is also the watchdog's give-up path (`handleFatalStall` → `stop()`), which is the
+        // exact path the 2026-07-15 failure took.
+        wakeLock.release()
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
         // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments
         // after the assembly (a race over `stream`). Cancel + await serializes the transitions.
@@ -131,7 +151,7 @@ final class RecordingSession: @unchecked Sendable {
             log.error("Assembly on stop failed: \(error.localizedDescription, privacy: .public)")
         }
         try? store.write(manifest, to: directory)
-        log.info("Recording session stopped: \(self.directory.lastPathComponent, privacy: .public)")
+        log.notice("Recording session stopped: \(self.directory.lastPathComponent, privacy: .public)")
         return result
     }
 

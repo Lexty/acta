@@ -16,7 +16,7 @@ import os
 /// recorder.
 @available(macOS 15.0, *)
 final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "AudioRecorder")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "AudioRecorder")
 
     /// The recording folder — its subdirectories hold the segments of both tracks.
     private let directory: URL

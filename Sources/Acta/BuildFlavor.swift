@@ -1,3 +1,4 @@
+import ActaKit
 import Foundation
 
 /// Which build this is: the stable app or the experimental one.
@@ -29,6 +30,17 @@ enum BuildFlavor: String {
         case .stable: return "Acta"
         case .dev: return "Acta-dev"
         }
+    }
+
+    /// The `os.Logger` subsystem: the bundle identifier this binary actually runs under.
+    ///
+    /// Not `AppInfo.bundleID`, which is hardcoded: the stable and dev builds are deliberately
+    /// separate apps with separate identifiers, and logging both under the same subsystem made their
+    /// lines indistinguishable in `log show` — exactly when telling them apart matters most. Outside
+    /// a bundle (tests, `swift run`) there is no `Bundle.main.bundleIdentifier`, so we fall back to
+    /// the constant.
+    static var logSubsystem: String {
+        Bundle.main.bundleIdentifier ?? AppInfo.bundleID
     }
 
     /// The build this binary was made from (`git describe`), stamped by `bundle.sh`.

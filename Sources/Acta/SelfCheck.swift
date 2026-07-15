@@ -25,7 +25,7 @@ final class SelfCheck: @unchecked Sendable {
     /// Watchdog polling period, s.
     static let watchdogTickSeconds = 1.0
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "SelfCheck")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SelfCheck")
     private let recorder: AudioRecorder
 
     init(recorder: AudioRecorder) {

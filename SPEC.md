@@ -113,6 +113,21 @@ Never display "recording" when nothing is being written.
 **Watchdog while recording.** If the buffer flow stalls for N seconds, flag it and try to restart the
 stream while keeping the already written segments; on failure — surface an error in the UI.
 
+**The display is held awake while recording** (`DisplayWakeLock`). ScreenCaptureKit is a *screen*
+capture API: when the display goes idle it loses its display, reports `"Failed to find any displays
+or windows to capture"` and the capture dies — proven live on 2026-07-15, where a recording stopped
+by itself after 2:20 the same second `pmset -g log` says `Display is turned off`. Sitting in a
+meeting *listening* is exactly the inactivity that puts a display to sleep, so this hits every other
+meeting. For the span of a recording — and only that span — Acta holds a
+`ProcessInfo.beginActivity([.idleDisplaySleepDisabled, .idleSystemSleepDisabled])` assertion, visible
+in `pmset -g assertions` under a human-readable reason. Letting the display sleep and reconnecting on
+wake was rejected: it leaves a hole in the audio for the whole sleep, the worst trade a recorder can
+make.
+
+⚠️ **The honest limit:** an activity assertion only prevents **idle** sleep. Closing the lid, a hot
+corner, or an explicit Sleep will still tear the stream down, and for those the watchdog remains the
+only defence — it stops the recording and says so. This fixes the everyday failure, not every failure.
+
 ## 8. Xcode-free build recipe (`Scripts/bundle.sh`) — see the `swiftpm-macos-app-bundle` skill
 1. `swift build -c release` → `.build/release/Acta`.
 2. Assemble `Acta.app/Contents/{MacOS,Resources}` + `Info.plist`

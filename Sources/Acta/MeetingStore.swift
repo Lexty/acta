@@ -14,7 +14,7 @@ struct MeetingStore {
         var manifest: SessionManifest?
     }
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "MeetingStore")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "MeetingStore")
     private let fileManager = FileManager.default
     private let manifestStore = SessionManifestStore()
 

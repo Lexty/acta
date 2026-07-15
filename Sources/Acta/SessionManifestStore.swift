@@ -6,7 +6,7 @@ import os
 /// serialisation lives in `ActaKit` (`SessionManifest`); here there is only atomic writing to disk
 /// and parsing.
 struct SessionManifestStore {
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "SessionManifestStore")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SessionManifestStore")
 
     /// URL of the marker in the recording directory.
     func url(in directory: URL) -> URL {

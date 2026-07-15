@@ -11,7 +11,7 @@ import os
 struct SettingsStore {
     private static let key = "settings"
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "SettingsStore")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SettingsStore")
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {

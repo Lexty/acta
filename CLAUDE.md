@@ -43,12 +43,20 @@ The conversation with the user may be in Russian; the repository must not be.
 - Lint: `bash Scripts/lint.sh` (SwiftLint wrapper; sets `DYLD_FRAMEWORK_PATH` for CLT-only —
   **raw `swiftlint` crashes without Xcode**; config in `.swiftlint.yml`)
 - Run: `open Acta.app` (or `bash Scripts/run.sh`)
+- Logs: `/usr/bin/log show --info --debug --predicate 'subsystem == "dev.personal.acta"'`
+  (add `--last 30m` to narrow it down; the dev build logs under `dev.personal.acta-dev`, so
+  `subsystem BEGINSWITH "dev.personal.acta"` catches both flavors).
+  ⚠️ The **absolute path is mandatory**: in zsh `log` is a *builtin*, so a bare `log show` silently
+  returns nothing — that cost an hour and produced a false "the app has no logs" conclusion.
+  `.info`/`.debug` are not persisted by `os_log`, hence the flags; lifecycle events are `.notice`.
 
 ## Project structure
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`. Anything worth testing goes here. (`SegmentRepair` is the deliberate exception:
-  it touches the FS, but it is the code that rescues crashed audio, so it must be testable.)
+  `SessionManifest`. Anything worth testing goes here. Two deliberate exceptions, both there because
+  under CLT-only a test can only reach `ActaKit`: `SegmentRepair` touches the FS, but it is the code
+  that rescues crashed audio; `DisplayWakeLock` touches `ProcessInfo`, and "was the assertion really
+  taken, and really released" is answerable only by asking the OS (`pmset -g assertions`).
 - `Sources/Acta/` — the executable: SwiftUI menu bar, `SCStream`, FS and process I/O. Kept thin;
   decisions are delegated to ActaKit.
 - `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via

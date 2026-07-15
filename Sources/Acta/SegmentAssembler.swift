@@ -43,7 +43,7 @@ struct SegmentAssembler {
         case mixFailed
     }
 
-    private let log = Logger(subsystem: AppInfo.bundleID, category: "SegmentAssembler")
+    private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SegmentAssembler")
     private let fileManager = FileManager.default
 
     /// Assemble the final files in `directory`.
