@@ -29,7 +29,12 @@ public final class RecordingSession: @unchecked Sendable {
     /// Held for exactly the span of a recording: the display going idle takes ScreenCaptureKit's
     /// display away and kills the capture (Task 10). Taken in `start`, released on every exit path —
     /// a failed start, a clean stop, and the watchdog's give-up, which reaches `stop()` too.
-    private let wakeLock = DisplayWakeLock()
+    ///
+    /// Injectable so that the call sites are provable: while this was hardcoded, deleting either
+    /// `acquire()` or `release()` left the whole suite green — the lock's own tests exercise it
+    /// standalone and cannot see the session. `stop()` is drivable from a test today; the `start()`
+    /// side still needs the backlog's capture seam (it needs TCC and a live audio session).
+    private let wakeLock: DisplayWakeLock
 
     /// `segment_count` updates arrive here from the queues of both tracks: a dedicated serial queue
     /// serializes the read-modify-write of the marker and moves the disk write off the hot audio
@@ -41,8 +46,11 @@ public final class RecordingSession: @unchecked Sendable {
     /// on stop with the real start time instead of an invented one.
     private var startedAt = Date()
 
-    public init(directory: URL, settings: RecordingSettings = .default) {
+    public init(directory: URL,
+                settings: RecordingSettings = .default,
+                wakeLock: DisplayWakeLock = DisplayWakeLock()) {
         self.directory = directory
+        self.wakeLock = wakeLock
         let settings = settings.normalized()
         self.settings = settings
         self.segmentSeconds = settings.segmentSeconds
@@ -109,11 +117,6 @@ public final class RecordingSession: @unchecked Sendable {
     /// from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
     public func stop() async -> SegmentAssembler.Result? {
-        // Released first thing: from here on nothing is captured, and the assembly that follows —
-        // tens of seconds of `ffmpeg` for an hour-long meeting — has no business holding the display
-        // on. This is also the watchdog's give-up path (`handleFatalStall` → `stop()`), which is the
-        // exact path the 2026-07-15 failure took.
-        wakeLock.release()
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
         // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments
         // after the assembly (a race over `stream`). Cancel + await serializes the transitions.
@@ -121,6 +124,16 @@ public final class RecordingSession: @unchecked Sendable {
         await watchdogTask?.value
         watchdogTask = nil
         await recorder.stop()
+        // Released here, and not at the top of `stop()`: the two awaits above are not instant —
+        // cancellation does not interrupt an `SCStream` bring-up already in flight inside the
+        // watchdog's `restart()` — and an assertion suppresses the idle timer without resetting it,
+        // so after a long meeting the display can go dark the moment it drops. Releasing before the
+        // capture is finalized would therefore risk killing the tail of the very recording this
+        // assertion exists to protect. From here on nothing is captured, and the assembly that
+        // follows — tens of seconds of `ffmpeg` for an hour-long meeting — has no business holding
+        // the display on. This is also the watchdog's give-up path (`handleFatalStall` → `stop()`),
+        // which is the exact path the 2026-07-15 failure took.
+        wakeLock.release()
         // Wait for the counter updates already sitting in the queue: otherwise a late one would land
         // on top of the final marker, turning `done` back into `recording`.
         manifestQueue.sync {}

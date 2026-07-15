@@ -1,4 +1,5 @@
 import ActaKit
+import ActaRuntime
 import Foundation
 import Testing
 
@@ -198,5 +199,29 @@ struct DisplayWakeLockTests {
         #expect(activity.beginCount == 2, "a redundant acquire began a second, stacked activity")
         lock.release()
         #expect(activity.endCount == 2)
+    }
+
+    // The lock is worth nothing if `RecordingSession` does not actually drive it, and every test
+    // above exercises the lock standalone — deleting `stop()`'s `release()` left all of them green.
+    // This one asks the session, not the lock. Only the release half is reachable today: `start()`
+    // needs TCC and a live audio session, so its `acquire()` waits on the backlog's capture seam.
+    @Test
+    @available(macOS 15.0, *)
+    func recordingSessionStopReleasesTheWakeLock() async {
+        let activity = CountingActivity()
+        let lock = activity.makeWakeLock()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-session-wakelock-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let session = RecordingSession(directory: directory, wakeLock: lock)
+        // `start()` is out of reach, so we stand in for the acquire it would have done: the point of
+        // the test is that `stop()` gives the assertion back, whatever took it.
+        lock.acquire()
+        await session.stop()
+
+        #expect(activity.endCount == 1, "stop() left the display assertion held — the machine would never sleep")
+        #expect(!lock.isHeld)
     }
 }
