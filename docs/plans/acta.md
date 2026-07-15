@@ -63,9 +63,9 @@
 - [x] Приёмка: запуск записи без выданного Screen Recording → приложение сразу показывает внятную ошибку и путь к исправлению, а не «пишет» вхолостую — manual test (skipped - not automatable, требует TCC-сессии и GUI; логика покрыта юнит-тестами `diagnoseNoScreenRecordingFirst`/`failureMessagesAreNonEmptyAndActionable`)
 
 ### Task 5: Хранилище записей и список
-- [ ] `MeetingStore.swift`: папка `~/Acta/YYYY-MM-DD_HHMM__<slug>/` с аудио и `info.md` (YAML front-matter: `title,date,source,duration,status`)
-- [ ] Юнит-тесты: генерация slug и сериализация YAML front-matter (чистые функции)
-- [ ] Приёмка: папка создаётся; `info.md` парсится как YAML
+- [x] `MeetingStore.swift`: папка `~/Acta/YYYY-MM-DD_HHMM__<slug>/` с аудио и `info.md` (YAML front-matter: `title,date,source,duration,status`) (FS-часть в таргете `Acta`: `createMeetingDirectory` с дедупликацией суффиксом, `writeInfo`, `listRecordings` по `session.json`, `~/Acta/CLAUDE.md`; чистая логика раскладки/сериализации — `MeetingArchive`/`MeetingInfo` в ActaKit: slug из заголовка, имя папки, YAML front-matter с double-quoted экранированием, `duration` как HH:MM:SS)
+- [x] Юнит-тесты: генерация slug и сериализация YAML front-matter (чистые функции) (`MeetingArchiveTests`: slug — регистр/сворачивание разделителей/кириллица/fallback/обрезка; имя папки; `formatDuration`; поля front-matter и экранирование спецсимволов — 12 тестов)
+- [x] Приёмка: папка создаётся; `info.md` парсится как YAML — manual test (skipped - not automatable без YAML-парсера в CLT-only; чистая генерация slug/имени папки/front-matter покрыта юнит-тестами, FS-раскладка — `MeetingStore`)
 
 ### Task 6: Menu-bar UX
 - [ ] Старт/стоп, таймер записи, индикатор состояния (idle/recording/error/recovered)
