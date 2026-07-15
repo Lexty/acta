@@ -234,15 +234,16 @@ final class RecordingController: ObservableObject {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// Есть ли в папке хоть один **валидный** сегмент любой из дорожек.
+    /// Есть ли в папке хоть один сегмент со спасаемым звуком (в том числе недописанный, но
+    /// чинящийся) — то же правило, по которому пойдёт склейка.
     ///
-    /// Именно валидный, а не «файл с подходящим именем»: `AVAssetWriter` создаёт `0000.wav` ещё до
+    /// Именно спасаемый, а не «файл с подходящим именем»: `AVAssetWriter` создаёт `0000.wav` ещё до
     /// первого буфера, поэтому старт, сломавшийся на записи, оставляет пустую преамбулу. Считать её
     /// звуком — значит сохранить папку со `status=recording`, которую восстановление будет тщетно
     /// склеивать на каждом запуске, а список — вечно показывать «не завершена».
     private static func hasSegments(in directory: URL) -> Bool {
         [SegmentLayout.systemDirName, SegmentLayout.micDirName].contains { trackDir in
-            !SegmentAssembler.validSegments(
+            !SegmentAssembler.plannedSegments(
                 inTrackDir: directory.appendingPathComponent(trackDir)).isEmpty
         }
     }
@@ -268,7 +269,7 @@ final class RecordingController: ObservableObject {
 
         Task { [weak self] in
             let result = await session.stop()
-            let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
+            let duration = Self.savedDuration(result, startedAt: startedAt)
             await MainActor.run {
                 guard let self else { return }
                 self.isStopping = false
@@ -283,6 +284,17 @@ final class RecordingController: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    /// Длительность для `info.md`, с: по собранному аудио, а с падением на часы — только если
+    /// измерить нечего (склейка не удалась).
+    ///
+    /// Часы систематически завышают: `SCStream` поднимается не мгновенно, и первые секунды после
+    /// нажатия «Начать» звук ещё не идёт — в живом прогоне 29 с по часам против 23.66 с аудио.
+    /// `info.md` — это архивные метаданные (SPEC §6), и цифра в них должна сходиться с файлом.
+    private static func savedDuration(_ result: SegmentAssembler.Result?, startedAt: Date) -> Int {
+        if let measured = result?.durationSeconds { return max(0, Int(measured.rounded())) }
+        return max(0, Int(Date().timeIntervalSince(startedAt)))
     }
 
     /// Остановить запись: финализировать сегменты, обновить `info.md`, уведомить, обновить список.
@@ -319,7 +331,7 @@ final class RecordingController: ObservableObject {
         // на это время состояние честно «Сохранение…», а не «Идёт запись».
         phase = .saving
         let result = await session.stop()
-        let duration = max(0, Int(Date().timeIntervalSince(startedAt)))
+        let duration = Self.savedDuration(result, startedAt: startedAt)
         let stoppedTitle = currentTitle
 
         self.session = nil

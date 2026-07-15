@@ -5,9 +5,10 @@ import os
 /// Сборка итоговых файлов записи из сегментов через `ffmpeg`. Используется и при чистом стопе,
 /// и при восстановлении (`RecoveryManager`) — правило выбора сегментов одинаковое.
 ///
-/// Порядок: для каждой дорожки собрать план валидных сегментов (`Recovery.recoveryPlan`) →
-/// `ffmpeg -f concat -c copy` → `system.wav`/`mic.wav`; если получились обе — микс в `combined.wav`.
-/// Битый (недописанный) последний сегмент план отбрасывает, поэтому склейка не падает.
+/// Порядок: для каждой дорожки собрать план сегментов (`Recovery.recoveryPlan`) → починить
+/// недописанные заголовки → `ffmpeg -f concat -c copy` → `system.wav`/`mic.wav`; если получились
+/// обе — микс в `combined.wav`. Сегмент без пригодного аудио план отбрасывает, поэтому склейка не
+/// падает, а недописанный (но со звуком) — чинится по фактическому размеру, а не теряется.
 ///
 /// Аргументы `ffmpeg` — чистые функции `FFmpeg.*` (покрыты юнит-тестами); тут только запуск процесса.
 struct SegmentAssembler {
@@ -16,9 +17,14 @@ struct SegmentAssembler {
         var systemWAV: URL?
         var micWAV: URL?
         var combinedWAV: URL?
-        /// Сколько валидных сегментов вошло в склейку (максимум по дорожкам). Восстановление
-        /// оценивает по нему длительность прерванной записи: чистого стопа с таймером не было.
+        /// Сколько валидных сегментов вошло в склейку (максимум по дорожкам).
         var segmentCount: Int = 0
+        /// Длительность собранного аудио, с — измеренная по итоговому файлу, а не по часам.
+        /// `nil`, если измерить не удалось (файла нет / заголовок не читается).
+        ///
+        /// Часы врут: `SCStream` поднимается не мгновенно, и в живом прогоне запись «на 29 с»
+        /// содержала 23.66 с звука. В `info.md` идёт именно эта величина (Task 8.3).
+        var durationSeconds: Double?
     }
 
     enum AssembleError: Error {
@@ -108,7 +114,22 @@ struct SegmentAssembler {
             }
         }
 
+        // Меряем по тому файлу, который пользователь и получит; дорожки одной записи равны по
+        // длине, поэтому выбор между ними на цифру не влияет.
+        result.durationSeconds = [result.combinedWAV, result.systemWAV, result.micWAV]
+            .compactMap { $0 }
+            .lazy
+            .compactMap { Self.measuredDuration(of: $0) }
+            .first
+
         return result
+    }
+
+    /// Длительность готового wav по его заголовку (`WAV.durationSeconds` поверх FS).
+    static func measuredDuration(of url: URL) -> Double? {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+        guard let size else { return nil }
+        return WAV.durationSeconds(header: headerPrefix(of: url), fileSize: size)
     }
 
     // MARK: - Приватное
@@ -120,7 +141,7 @@ struct SegmentAssembler {
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
                              ffmpeg: String) throws -> (url: URL?, count: Int) {
         let trackDir = directory.appendingPathComponent(dirName)
-        let plan = Self.validSegments(inTrackDir: trackDir)
+        let plan = preparedSegments(inTrackDir: trackDir)
         guard !plan.isEmpty else {
             log.info("Дорожка \(dirName, privacy: .public): валидных сегментов нет")
             return (nil, 0)
@@ -137,12 +158,12 @@ struct SegmentAssembler {
         return (output, plan.count)
     }
 
-    /// Валидные сегменты дорожки в порядке склейки (`Recovery.recoveryPlan` поверх реальной FS).
+    /// План склейки дорожки (`Recovery.recoveryPlan` поверх реальной FS) — только чтение.
     ///
-    /// Статическая и внутренняя, потому что тем же правилом `RecordingController` решает, есть ли в
+    /// Статический и внутренний, потому что тем же правилом `RecordingController` решает, есть ли в
     /// папке спасаемый звук: `AVAssetWriter` создаёт файл сегмента **до** первого буфера, поэтому
     /// проверка «файл с именем NNNN.wav существует» приняла бы за звук пустую преамбулу.
-    static func validSegments(inTrackDir trackDir: URL) -> [String] {
+    static func plannedSegments(inTrackDir trackDir: URL) -> [Recovery.PlannedSegment] {
         let fileManager = FileManager.default
         let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
 
@@ -156,6 +177,47 @@ struct SegmentAssembler {
         }
         return Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: headers)
+    }
+
+    /// Имена сегментов дорожки, готовых к склейке: план + починка недописанных заголовков на месте.
+    ///
+    /// Чинить приходится именно здесь, перед `ffmpeg`: `kill -9` оставляет последний сегмент с
+    /// секундами реального звука и непроставленными размерами, и другого шанса вернуть этот звук
+    /// нет. Сегмент, который починить не удалось (файл не открылся на запись), из плана выпадает —
+    /// отдать `ffmpeg` заведомо битый файл значило бы уронить склейку всей дорожки ради его хвоста.
+    private func preparedSegments(inTrackDir trackDir: URL) -> [String] {
+        Self.plannedSegments(inTrackDir: trackDir).compactMap { segment in
+            switch segment.action {
+            case .include:
+                return segment.fileName
+            case .repair(let repair):
+                let url = trackDir.appendingPathComponent(segment.fileName)
+                guard Self.applyRepair(repair, to: url) else {
+                    log.error("Не удалось починить заголовок \(segment.fileName, privacy: .public) — сегмент пропущен")
+                    return nil
+                }
+                log.info("Починен недописанный заголовок \(segment.fileName, privacy: .public): \(repair.dataSize) байт аудио")
+                return segment.fileName
+            }
+        }
+    }
+
+    /// Проставить размеры в заголовке и обрезать файл до целого числа кадров. `false` — файл не
+    /// поддался (вызывающий исключает сегмент из склейки).
+    private static func applyRepair(_ repair: WAV.HeaderRepair, to url: URL) -> Bool {
+        guard let handle = try? FileHandle(forUpdating: url) else { return false }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: UInt64(repair.riffSizeOffset))
+            try handle.write(contentsOf: WAV.le32(repair.riffSize))
+            try handle.seek(toOffset: UInt64(repair.dataSizeOffset))
+            try handle.write(contentsOf: WAV.le32(repair.dataSize))
+            try handle.truncate(atOffset: UInt64(repair.truncatedFileSize))
+            try handle.synchronize()
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Прочитать начало файла для проверки WAV-заголовка (`Recovery.isValidSegment`). Пустой

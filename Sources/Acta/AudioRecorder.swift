@@ -100,6 +100,33 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
     /// Поднят ли сейчас `SCStream` (для снимка самодиагностики).
     var isStreaming: Bool { activeStream != nil }
 
+    // Закрытые сегменты по дорожкам под замком: writer'ы дёргают колбэк со своих очередей
+    // (`systemQueue`/`micQueue`), а читает счётчик `RecordingSession` с третьей. Арифметика — в
+    // чистом `SegmentProgress` (ActaKit), здесь только сериализация.
+    private let progressLock = NSLock()
+    private var progress = SegmentProgress()
+    private var onSegmentCountChange: (@Sendable (Int) -> Void)?
+
+    /// Подписаться на изменение числа закрытых сегментов — `session.json` обновляется по этому
+    /// сигналу (Task 8.2). Подписчик вызывается с очереди дорожки: блокировать её нельзя.
+    /// Ставить подписку нужно до `start()`.
+    func setSegmentCountObserver(_ observer: @escaping @Sendable (Int) -> Void) {
+        progressLock.lock()
+        onSegmentCountChange = observer
+        progressLock.unlock()
+    }
+
+    /// Учесть закрытый сегмент дорожки и, если общий счётчик сдвинулся, сообщить подписчику.
+    private func countFinalizedSegment(track: SegmentProgress.Track) {
+        progressLock.lock()
+        let changed = progress.recordFinalizedSegment(track: track)
+        let count = progress.segmentCount
+        let observer = onSegmentCountChange
+        progressLock.unlock()
+        guard changed else { return }
+        observer?(count)
+    }
+
     /// - Parameter directory: папка записи; сегменты пишутся в её подкаталоги `system/` и `mic/`.
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
         self.directory = directory
@@ -112,6 +139,8 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
             segmentSeconds: segmentSeconds
         )
         super.init()
+        systemWriter.onSegmentFinalized = { [weak self] in self?.countFinalizedSegment(track: .system) }
+        micWriter.onSegmentFinalized = { [weak self] in self?.countFinalizedSegment(track: .mic) }
     }
 
     /// Собрать конфигурацию стрима. Вынесено, чтобы держать «магию» захвата в одном месте.
@@ -209,12 +238,11 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         log.info("Захват остановлен")
     }
 
-    /// Число финализированных сегментов каждой дорожки (для `session.json`). Читается с очередей
-    /// дорожек, чтобы не гоняться с мутацией счётчика во writer'ах.
+    /// Число финализированных сегментов каждой дорожки (для `session.json`).
     func finalizedSegmentCounts() -> (system: Int, mic: Int) {
-        let system = systemQueue.sync { systemWriter.finalizedCount }
-        let mic = micQueue.sync { micWriter.finalizedCount }
-        return (system, mic)
+        progressLock.lock()
+        defer { progressLock.unlock() }
+        return (progress.system, progress.mic)
     }
 
     // MARK: - SCStreamOutput

@@ -55,6 +55,16 @@ private func headers(_ names: [String], fileSize: Int) -> [String: Data] {
     Dictionary(uniqueKeysWithValues: names.map { ($0, finalizedHeader(fileSize: fileSize)) })
 }
 
+/// Имена сегментов, попавших в план (порядок и состав — то, что уходит в `ffmpeg`).
+private func planned(_ plan: [Recovery.PlannedSegment]) -> [String] {
+    plan.map(\.fileName)
+}
+
+/// Действие плана для сегмента; `nil`, если сегмент в план не попал.
+private func action(_ plan: [Recovery.PlannedSegment], for name: String) -> Recovery.Action? {
+    plan.first { $0.fileName == name }?.action
+}
+
 // MARK: - План склейки
 
 @Test
@@ -63,32 +73,39 @@ func recoveryPlanOrdersValidSegments() {
     let sizes = ["0000.wav": 4096, "0001.wav": 4096, "0002.wav": 4096]
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: headers(names, fileSize: 4096))
-    #expect(plan == ["0000.wav", "0001.wav", "0002.wav"])
+    #expect(planned(plan) == ["0000.wav", "0001.wav", "0002.wav"])
+    #expect(plan.allSatisfy { $0.action == .include })
 }
 
 @Test
 func recoveryPlanDropsEmptyLastSegment() {
-    // Классический сценарий kill -9: последний сегмент не финализирован → пустой.
+    // Сегмент, в который не успел лечь ни один буфер: спасать нечего, отбрасываем.
     let names = ["0000.wav", "0001.wav", "0002.wav"]
     let sizes = ["0000.wav": 4096, "0001.wav": 4096, "0002.wav": 0]
     var byName = headers(names, fileSize: 4096)
     byName["0002.wav"] = Data()
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: byName)
-    #expect(plan == ["0000.wav", "0001.wav"])
+    #expect(planned(plan) == ["0000.wav", "0001.wav"])
 }
 
 @Test
-func recoveryPlanDropsLargeSegmentWithUnfinalizedHeader() {
-    // Главный крэш-кейс: убитый writer оставил килобайты аудио, но размеры в заголовке не
-    // проставлены. По размеру такой файл «валиден», а ffmpeg на нём падает и рушит всю дорожку.
+func recoveryPlanRepairsLastSegmentWithUnfinalizedHeader() {
+    // Главный крэш-кейс (Task 8.1): убитый writer оставил килобайты аудио, но размеры в заголовке
+    // не проставлены. Такой сегмент чинится по фактическому размеру, а не выбрасывается: раньше
+    // это стоило живых секунд записи.
     let names = ["0000.wav", "0001.wav"]
     let sizes = ["0000.wav": 4096, "0001.wav": 8192]
     var byName = headers(names, fileSize: 4096)
     byName["0001.wav"] = header(riffSize: 0, dataSize: 0)
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: byName)
-    #expect(plan == ["0000.wav"])
+    #expect(planned(plan) == ["0000.wav", "0001.wav"])
+    #expect(action(plan, for: "0000.wav") == .include)
+    // Данные идут с 44-го байта: 8192 - 44 = 8148, и это уже целое число кадров по 4 байта.
+    #expect(action(plan, for: "0001.wav")
+        == .repair(WAV.HeaderRepair(riffSize: 8184, dataSizeOffset: 40,
+                                    dataSize: 8148, truncatedFileSize: 8192)))
 }
 
 @Test
@@ -101,7 +118,7 @@ func recoveryPlanDropsCorruptMiddleSegment() {
     byName["0001.wav"] = Data()
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: byName)
-    #expect(plan == ["0000.wav", "0002.wav"])
+    #expect(planned(plan) == ["0000.wav", "0002.wav"])
 }
 
 @Test
@@ -111,12 +128,13 @@ func recoveryPlanFiltersJunkAndMissingSizes() {
     let sizes = ["0000.wav": 4096]
     let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
                                      headerByFileName: headers(names, fileSize: 4096))
-    #expect(plan == ["0000.wav"])
+    #expect(planned(plan) == ["0000.wav"])
 }
 
 @Test
 func recoveryPlanDropsSegmentWithUnreadableHeader() {
-    // Заголовок не прочитался (файл исчез/недоступен) — подтвердить целостность нечем.
+    // Заголовок не прочитался (файл исчез/недоступен) — ни принять, ни починить: неизвестно даже,
+    // где в файле начинается аудио.
     let plan = Recovery.recoveryPlan(fromFileNames: ["0000.wav"], sizeByFileName: ["0000.wav": 4096],
                                      headerByFileName: [:])
     #expect(plan.isEmpty)
@@ -127,6 +145,36 @@ func recoveryPlanEmptyWhenNothingValid() {
     let plan = Recovery.recoveryPlan(fromFileNames: ["0000.wav"], sizeByFileName: ["0000.wav": 10],
                                      headerByFileName: ["0000.wav": finalizedHeader(fileSize: 10)])
     #expect(plan.isEmpty)
+}
+
+@Test
+func recoveryPlanKeepsEveryLiveRunSegment() {
+    // Приёмка Task 8.1 на фактах живого прогона (2026-07-15): на момент `kill -9` дорожка system
+    // держала 12 сегментов — 11 закрытых по 15 с и последний недописанный с 2.92 с звука.
+    // Прежнее правило оставляло 11 (165.0 с); все 12 дают ≈167.9 с.
+    let rate = 48_000 * 4 // 16-бит стерео: байт в секунду
+    let closedSize = 44 + 15 * rate
+    let killedSize = 44 + Int(2.92 * Double(rate))
+    let names = (0..<12).map { SegmentLayout.segmentFileName(index: $0) }
+    var sizes: [String: Int] = [:]
+    var byName: [String: Data] = [:]
+    for (index, name) in names.enumerated() {
+        let killed = index == 11
+        sizes[name] = killed ? killedSize : closedSize
+        byName[name] = killed ? header(riffSize: 0, dataSize: 0) : finalizedHeader(fileSize: closedSize)
+    }
+
+    let plan = Recovery.recoveryPlan(fromFileNames: names.shuffled(), sizeByFileName: sizes,
+                                     headerByFileName: byName)
+    #expect(planned(plan) == names)
+    #expect(plan.filter { $0.action == .include }.count == 11)
+
+    let duration = plan.reduce(0.0) { total, segment in
+        let size = sizes[segment.fileName] ?? 0
+        return total + (WAV.durationSeconds(header: byName[segment.fileName] ?? Data(),
+                                            fileSize: size) ?? 0)
+    }
+    #expect(abs(duration - 167.92) < 0.01)
 }
 
 // MARK: - Проверка сегмента

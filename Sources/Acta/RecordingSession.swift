@@ -25,6 +25,12 @@ final class RecordingSession: @unchecked Sendable {
     private let store = SessionManifestStore()
     private var watchdogTask: Task<Void, Never>?
 
+    /// Обновления `segment_count` идут сюда с очередей обеих дорожек: своя серийная очередь
+    /// сериализует read-modify-write маркера и уводит дисковую запись с горячего пути аудио.
+    private let manifestQueue = DispatchQueue(label: "dev.personal.acta.manifest")
+    /// Последний записанный счётчик (только с `manifestQueue`).
+    private var lastWrittenSegmentCount = 0
+
     init(directory: URL, settings: RecordingSettings = .default) {
         self.directory = directory
         let settings = settings.normalized()
@@ -47,6 +53,9 @@ final class RecordingSession: @unchecked Sendable {
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
         try store.write(manifest, to: directory)
+        recorder.setSegmentCountObserver { [weak self] count in
+            self?.manifestQueue.async { self?.persistSegmentCount(count) }
+        }
         do {
             try await recorder.start()
         } catch StartupFailure.streamNotStarted {
@@ -79,6 +88,9 @@ final class RecordingSession: @unchecked Sendable {
         await watchdogTask?.value
         watchdogTask = nil
         await recorder.stop()
+        // Дождаться уже поставленных в очередь обновлений счётчика: иначе запоздавшее из них легло
+        // бы поверх финального маркера, вернув `done` обратно в `recording`.
+        manifestQueue.sync {}
 
         let counts = recorder.finalizedSegmentCounts()
         var manifest = store.read(from: directory)
@@ -108,5 +120,26 @@ final class RecordingSession: @unchecked Sendable {
         try? store.write(manifest, to: directory)
         log.info("Сессия записи остановлена: \(self.directory.lastPathComponent, privacy: .public)")
         return result
+    }
+
+    /// Записать в `session.json` число закрытых сегментов. Вызывается только с `manifestQueue`.
+    ///
+    /// Счётчик информационный: восстановление читает файловую систему и на него не смотрит (Task
+    /// 8.2). Но держать его вечным нулём, как было до сих пор, нельзя — при взгляде в маркер он
+    /// утверждал бы, что записывать нечего, при дюжине сегментов рядом на диске.
+    ///
+    /// Счётчик только растёт, и статус маркера не трогаем: обновление могло разминуться со стопом,
+    /// и вернуть `done` в `recording` значило бы отправить готовую запись на восстановление.
+    private func persistSegmentCount(_ count: Int) {
+        guard count > lastWrittenSegmentCount else { return }
+        lastWrittenSegmentCount = count
+        guard var manifest = store.read(from: directory), manifest.status == .recording else { return }
+        manifest.segmentCount = count
+        do {
+            try store.write(manifest, to: directory)
+        } catch {
+            // Не фатально: сегменты на диске целы, а восстановление и так идёт от FS.
+            log.error("Не удалось обновить segment_count: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

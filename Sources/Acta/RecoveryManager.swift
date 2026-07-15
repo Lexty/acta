@@ -77,7 +77,11 @@ struct RecoveryManager {
         updated.status = .recovered
         updated.segmentCount = result.segmentCount
         try store.write(updated, to: directory)
-        updateInfo(in: directory, manifest: updated)
+        // По собранному аудио, а не по числу сегментов × длину: последний сегмент почти никогда не
+        // полон (краш приходится на середину), и оценка ×15 округлила бы его до целого сегмента.
+        let duration = result.durationSeconds.map { max(0, Int($0.rounded())) }
+            ?? (result.segmentCount * manifest.segmentSeconds)
+        updateInfo(in: directory, status: updated.status, durationSeconds: duration)
 
         return Recovered(directory: directory, combinedWAV: result.combinedWAV)
     }
@@ -92,20 +96,18 @@ struct RecoveryManager {
         updated.status = .recovered
         updated.segmentCount = 0
         try? store.write(updated, to: directory)
-        updateInfo(in: directory, manifest: updated)
+        updateInfo(in: directory, status: updated.status, durationSeconds: 0)
     }
 
     /// Привести `info.md` в соответствие с маркером: на старте он записан как `recording` с нулевой
     /// длительностью, и без этого восстановленная встреча навсегда осталась бы «идёт запись» —
     /// `info.md` и есть архивные метаданные (SPEC §6), их читают уже без приложения.
-    ///
-    /// Длительность оцениваем по числу уцелевших сегментов: чистого стопа с таймером не было.
-    private func updateInfo(in directory: URL, manifest: SessionManifest) {
+    private func updateInfo(in directory: URL, status: SessionManifest.Status,
+                            durationSeconds: Int) {
         let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return }
-        let duration = manifest.segmentCount * manifest.segmentSeconds
-        let patched = MeetingInfo.patchedFrontMatter(contents, status: manifest.status,
-                                                     durationSeconds: duration)
+        let patched = MeetingInfo.patchedFrontMatter(contents, status: status,
+                                                     durationSeconds: durationSeconds)
         try? patched.data(using: .utf8)?.write(to: url, options: .atomic)
     }
 }

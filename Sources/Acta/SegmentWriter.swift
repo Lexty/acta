@@ -20,13 +20,16 @@ final class SegmentWriter {
 
     private let log: Logger
 
+    /// Вызывается при закрытии каждого сегмента — с очереди дорожки, синхронно. Тем самым
+    /// `session.json` узнаёт о новом сегменте ровно тогда, когда тот появился на диске (Task 8.2);
+    /// подписчик обязан не блокировать очередь (запись маркера уходит на свою, см.
+    /// `RecordingSession`), иначе он подвиснет на горячем пути аудио.
+    var onSegmentFinalized: (@Sendable () -> Void)?
+
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var segmentIndex = 0
     private var segmentStart: CMTime = .invalid
-
-    /// Число финализированных (закрытых) сегментов — для `session.json`/самодиагностики.
-    private(set) var finalizedCount = 0
 
     /// Финализации, запущенные ротацией/рестартом и ещё не отработавшие. Файл сегмента валиден
     /// только после completion-хэндлера, поэтому `finish()` (перед склейкой) дожидается всей
@@ -157,13 +160,11 @@ final class SegmentWriter {
         self.input = nil
         self.segmentStart = .invalid
         input.markAsFinished()
-        // Сегмент закрыт: считаем его в счётчике сразу (мутация только с очереди дорожки, гонки
-        // нет). Ранее записанные сегменты уже валидны — краш в этот момент теряет максимум текущий.
-        finalizedCount += 1
         // completion-хэндлер приходит на внутренней очереди AVFoundation, а не на нашей очереди
         // дорожки, поэтому ожидание группы в `finish()` не деэдлочит.
         pendingWrites.enter()
         writer.finishWriting { [pendingWrites] in pendingWrites.leave() }
+        onSegmentFinalized?()
     }
 
     /// Единые настройки WAV/PCM: 48 кГц, стерео, 16 бит. Приводим обе дорожки к одному формату,
