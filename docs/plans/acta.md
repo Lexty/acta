@@ -27,17 +27,18 @@
 
 ## Validation Commands
 - `swift build -c release`
-- `swift test`
+- `swift test` (при CLT-only только СОБИРАЕТ тесты — нет хост-утилиты `xctest`)
+- `bash Scripts/test.sh` (настоящий прогон юнит-тестов через executable-раннер; падает при ошибке)
 - `bash Scripts/lint.sh`
 - `bash Scripts/bundle.sh`
 
 ### Task 1: Скелет пакета и сборка без Xcode
-- [ ] `Package.swift`: executable target `Acta` + testTarget `ActaTests`, platform macOS 14+, **без внешних зависимостей**
-- [ ] Пустой `Tests/ActaTests/` (заготовка), чтобы `swift test` проходил с самого начала
-- [ ] `Sources/Acta/ActaApp.swift`: `@main`, пустой `MenuBarExtra` с иконкой
-- [ ] `Resources/Info.plist` (`LSUIElement=true`, `CFBundleIdentifier=dev.personal.acta`, `NSMicrophoneUsageDescription`, `LSMinimumSystemVersion=14.0`) и `Resources/Acta.entitlements` (минимальные, без сэндбокса)
-- [ ] `Scripts/bundle.sh` (`swift build -c release` → `Acta.app` + Info.plist + `codesign --force --sign - --identifier dev.personal.acta --entitlements`), `Scripts/run.sh`
-- [ ] Приёмка: `bash Scripts/bundle.sh` собирает `Acta.app` без ошибок; `open Acta.app` показывает иконку в меню-баре
+- [x] `Package.swift`: executable target `Acta` + testTarget `ActaTests`, platform macOS 14+, **без внешних зависимостей** (добавлены `ActaKit` — библиотека для тестируемой логики — и `ActaTestRunner` — executable-раннер тестов, т.к. CLT-only не исполняет xctest-бандл)
+- [x] Пустой `Tests/ActaTests/` (заготовка), чтобы `swift test` проходил с самого начала
+- [x] `Sources/Acta/ActaApp.swift`: `@main`, пустой `MenuBarExtra` с иконкой
+- [x] `Resources/Info.plist` (`LSUIElement=true`, `CFBundleIdentifier=dev.personal.acta`, `NSMicrophoneUsageDescription`, `LSMinimumSystemVersion=14.0`) и `Resources/Acta.entitlements` (минимальные, без сэндбокса)
+- [x] `Scripts/bundle.sh` (`swift build -c release` → `Acta.app` + Info.plist + `codesign --force --sign - --identifier dev.personal.acta --entitlements`), `Scripts/run.sh`
+- [x] Приёмка: `bash Scripts/bundle.sh` собирает `Acta.app` без ошибок (проверено); `open Acta.app` показывает иконку в меню-баре — manual test (skipped - not automatable, требует GUI-сессии)
 
 ### Task 2: Потоковая запись двух дорожек сегментами
 - [ ] `Permissions.swift`: проверка/запрос Screen Recording (`CGPreflightScreenCaptureAccess`) и Microphone
