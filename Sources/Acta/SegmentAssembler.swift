@@ -100,12 +100,16 @@ struct SegmentAssembler {
         let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
 
         var sizes: [String: Int] = [:]
+        var headers: [String: Data] = [:]
         for name in names {
-            let attrs = try? fileManager.attributesOfItem(atPath: trackDir.appendingPathComponent(name).path)
+            let url = trackDir.appendingPathComponent(name)
+            let attrs = try? fileManager.attributesOfItem(atPath: url.path)
             sizes[name] = (attrs?[.size] as? Int) ?? 0
+            headers[name] = headerPrefix(of: url)
         }
 
-        let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes)
+        let plan = Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
+                                         headerByFileName: headers)
         guard !plan.isEmpty else {
             log.info("Дорожка \(dirName, privacy: .public): валидных сегментов нет")
             return nil
@@ -120,6 +124,14 @@ struct SegmentAssembler {
         let args = FFmpeg.concatArgs(listPath: listURL.path, outputPath: output.path)
         guard runFFmpeg(ffmpeg, args: args) else { return nil }
         return output
+    }
+
+    /// Прочитать начало файла для проверки WAV-заголовка (`Recovery.isValidSegment`). Пустой
+    /// результат = файл не читается → сегмент не считается валидным.
+    private func headerPrefix(of url: URL) -> Data {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: Recovery.headerProbeBytes)) ?? Data()
     }
 
     /// Запустить `ffmpeg`; `true` при коде выхода 0.

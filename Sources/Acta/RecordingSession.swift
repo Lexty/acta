@@ -48,7 +48,14 @@ final class RecordingSession: @unchecked Sendable {
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
         try store.write(manifest, to: directory)
-        try await recorder.start()
+        do {
+            try await recorder.start()
+        } catch StartupFailure.streamNotStarted {
+            // Стрим не поднялся — старт не срываем: самодиагностика ниже увидит
+            // `streamStarted == false` и отработает те же 2–3 попытки рестарта, что и для
+            // вставшего стрима (Task 4). Прочие причины (нет прав) рестартом не лечатся и летят выше.
+            log.error("Стрим не поднялся на старте — отдаём самодиагностике на рестарт")
+        }
 
         if let failure = await selfCheck.verifyStartAndHeal() {
             log.error("Старт не подтверждён самодиагностикой: \(failure.userMessage, privacy: .public)")

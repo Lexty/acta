@@ -28,6 +28,24 @@ final class SegmentWriter {
     /// Число финализированных (закрытых) сегментов — для `session.json`/самодиагностики.
     private(set) var finalizedCount = 0
 
+    /// Финализации, запущенные ротацией/рестартом и ещё не отработавшие. Файл сегмента валиден
+    /// только после completion-хэндлера, поэтому `finish()` (перед склейкой) дожидается всей
+    /// группы, а не только текущего writer'а: стоп сразу после ротации иначе отдал бы `ffmpeg`
+    /// ещё дописывающийся сегмент.
+    private let pendingWrites = DispatchGroup()
+
+    // Счётчик принятых writer'ом буферов: пишется с очереди дорожки, читается самодиагностикой с
+    // другой — отсюда замок. Сигнал «данные реально легли в сегмент», а не просто «пришли» (Task 4).
+    private let appendedLock = NSLock()
+    private var appended = 0
+
+    /// Сколько буферов writer реально принял в сегмент с начала записи.
+    var appendedCount: Int {
+        appendedLock.lock()
+        defer { appendedLock.unlock() }
+        return appended
+    }
+
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
         self.directory = directory
         self.segmentSeconds = segmentSeconds
@@ -53,16 +71,24 @@ final class SegmentWriter {
         }
 
         guard let input, input.isReadyForMoreMediaData else { return }
-        input.append(sampleBuffer)
+        guard input.append(sampleBuffer) else {
+            log.error("Writer отверг буфер: \(String(describing: self.writer?.error), privacy: .public)")
+            return
+        }
+        appendedLock.lock()
+        appended += 1
+        appendedLock.unlock()
     }
 
     /// Финализировать текущий сегмент (чистый стоп). После вызова writer сброшен.
     ///
-    /// Ждём завершения `finishWriting`: сразу после этого вызова запускается склейка сегментов
-    /// (`SegmentAssembler`), а файл валиден только когда отработал completion-хэндлер. Иначе
-    /// последний сегмент склеивается недописанным/отбрасывается — терялся бы хвост каждой записи.
+    /// Ждём завершения **всех** запущенных финализаций (текущей и оставшихся от ротаций): сразу
+    /// после этого вызова запускается склейка сегментов (`SegmentAssembler`), а файл валиден только
+    /// когда отработал его completion-хэндлер. Иначе `ffmpeg` прочитал бы ещё дописывающийся
+    /// сегмент — терялся бы хвост записи.
     func finish() {
-        finalizeCurrent(waitForCompletion: true)
+        finalizeCurrent()
+        pendingWrites.wait()
     }
 
     /// Финализировать текущий сегмент и перейти к следующему индексу — для рестарта стрима
@@ -71,7 +97,7 @@ final class SegmentWriter {
     /// Ждать флаша не нужно: запись продолжается, а склейка будет только на стопе/восстановлении.
     func finishAndAdvance() {
         guard writer != nil else { return }
-        finalizeCurrent(waitForCompletion: false)
+        finalizeCurrent()
         segmentIndex += 1
     }
 
@@ -106,13 +132,15 @@ final class SegmentWriter {
 
     private func rotate(at pts: CMTime, formatHint: CMFormatDescription?) {
         // Ротация на горячем пути записи: не блокируем очередь дорожки ожиданием флаша — сегмент
-        // допишется в фоне задолго до склейки, а следующий уже принимает буферы.
-        finalizeCurrent(waitForCompletion: false)
+        // допишется в фоне, а следующий уже принимает буферы. Ожидание берёт на себя `finish()`.
+        finalizeCurrent()
         segmentIndex += 1
         startSegment(at: pts, formatHint: formatHint)
     }
 
-    private func finalizeCurrent(waitForCompletion: Bool) {
+    /// Закрыть текущий сегмент и запустить его финализацию в фоне, зарегистрировав её в
+    /// `pendingWrites` — чтобы `finish()` перед склейкой мог дождаться всех.
+    private func finalizeCurrent() {
         guard let writer, let input else { return }
         self.writer = nil
         self.input = nil
@@ -121,15 +149,10 @@ final class SegmentWriter {
         // Сегмент закрыт: считаем его в счётчике сразу (мутация только с очереди дорожки, гонки
         // нет). Ранее записанные сегменты уже валидны — краш в этот момент теряет максимум текущий.
         finalizedCount += 1
-        if waitForCompletion {
-            // completion-хэндлер приходит на внутренней очереди AVFoundation, а не на нашей очереди
-            // дорожки, поэтому ожидание семафором здесь не деэдлочит.
-            let done = DispatchSemaphore(value: 0)
-            writer.finishWriting { done.signal() }
-            done.wait()
-        } else {
-            writer.finishWriting { }
-        }
+        // completion-хэндлер приходит на внутренней очереди AVFoundation, а не на нашей очереди
+        // дорожки, поэтому ожидание группы в `finish()` не деэдлочит.
+        pendingWrites.enter()
+        writer.finishWriting { [pendingWrites] in pendingWrites.leave() }
     }
 
     /// Единые настройки WAV/PCM: 48 кГц, стерео, 16 бит. Приводим обе дорожки к одному формату,

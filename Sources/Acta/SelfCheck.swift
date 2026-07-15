@@ -30,30 +30,67 @@ final class SelfCheck: @unchecked Sendable {
         self.recorder = recorder
     }
 
+    /// Снимок счётчиков рекордера — база для дельт за окно наблюдения. Дорожки держим раздельно:
+    /// по сумме мёртвую дорожку не отличить от живой (Task 4).
+    private struct Counters {
+        var system: TrackFlow
+        var mic: TrackFlow
+        var bytes: Int
+
+        var received: Int { system.received + mic.received }
+        var written: Int { system.written + mic.written }
+
+        /// Прирост счётчиков относительно базового снимка — то, что и оценивает диагностика.
+        func delta(from base: Counters) -> Counters {
+            Counters(system: TrackFlow(received: system.received - base.system.received,
+                                       written: system.written - base.system.written),
+                     mic: TrackFlow(received: mic.received - base.mic.received,
+                                    written: mic.written - base.mic.written),
+                     bytes: bytes - base.bytes)
+        }
+    }
+
+    private func counters() -> Counters {
+        let received = recorder.receivedBufferCounts
+        let written = recorder.writtenBufferCounts
+        return Counters(system: TrackFlow(received: received.system, written: written.system),
+                        mic: TrackFlow(received: received.mic, written: written.mic),
+                        bytes: recorder.segmentBytesOnDisk)
+    }
+
     /// После старта убедиться, что данные идут; при провале — самолечение. Возвращает `nil` при
     /// успехе, либо причину провала (её текст `userMessage` показывается в UI).
     func verifyStartAndHeal() async -> StartupFailure? {
         var attemptsLeft = Self.maxRestartAttempts
+        // Диалог TCC показываем не больше одного раза за проверку: при отказе он всё равно не
+        // появится повторно, а цикл лечения без этого крутился бы вхолостую.
+        var permissionRequested = false
         while true {
-            // Право на запись экрана — необходимое условие для системного звука; без него нет
-            // смысла ни пробовать, ни рестартить.
-            guard Permissions.hasScreenRecording else {
-                log.error("Самодиагностика: нет права Screen Recording")
-                return .noScreenRecordingPermission
+            // Права — необходимое условие: без записи экрана не будет системного звука, без
+            // микрофона запишется только половина встречи. Рестартить стрим тут бессмысленно.
+            if let missing = await missingPermission(alreadyRequested: &permissionRequested) {
+                log.error("Самодиагностика: \(missing.userMessage, privacy: .public)")
+                return missing
             }
 
-            if await probeDataFlow() {
-                return nil
-            }
-
+            let delta = await probeDataFlow(from: counters())
             let snapshot = SelfDiagnosis.Snapshot(
                 hasScreenRecording: Permissions.hasScreenRecording,
                 hasMicrophone: Permissions.hasMicrophone,
                 streamStarted: recorder.isStreaming,
-                bufferCount: recorder.receivedBufferCount,
-                segmentBytesDelta: 0
+                bufferCount: delta.received,
+                writtenBufferCount: delta.written,
+                segmentBytesDelta: delta.bytes,
+                system: delta.system,
+                mic: delta.mic
             )
-            let failure = SelfDiagnosis.diagnose(snapshot) ?? .noData
+            guard let failure = SelfDiagnosis.diagnose(snapshot) else {
+                warnIfTrackSilent(delta)
+                return nil
+            }
+            if let broken = SelfDiagnosis.brokenTrack(snapshot) {
+                log.error("Дорожка «\(broken.title, privacy: .public)» не пишется: буферы идут, writer их не принимает")
+            }
 
             switch SelfDiagnosis.action(for: failure, restartAttemptsLeft: attemptsLeft) {
             case .restartStream:
@@ -62,14 +99,20 @@ final class SelfCheck: @unchecked Sendable {
                 log.error("Данные не идут (\(reason, privacy: .public)); рестарт стрима, осталось: \(attemptsLeft)")
                 do {
                     try await recorder.restart()
+                } catch let failure as StartupFailure {
+                    log.error("Рестарт стрима не удался: \(failure.userMessage, privacy: .public)")
+                    // Не поднявшийся стрим — ровно то, ради чего попытки и заведены: сдаваться после
+                    // первой рано, следующая итерация увидит `streamStarted == false` и попробует
+                    // снова. Всё остальное (нет прав) рестартом не лечится — сообщаем сразу.
+                    guard failure == .streamNotStarted else { return failure }
                 } catch {
                     log.error("Рестарт стрима не удался: \(error.localizedDescription, privacy: .public)")
                     return .streamNotStarted
                 }
-            case .requestScreenRecording:
-                return .noScreenRecordingPermission
-            case .requestMicrophone:
-                return .noMicrophonePermission
+            case .requestScreenRecording, .requestMicrophone:
+                // Право отозвали на ходу — следующая итерация цикла запросит его и вернёт ошибку
+                // с подсказкой, если выдать так и не удалось.
+                continue
             case .reportError(let reported):
                 log.error("Самодиагностика: лечение не помогло — \(reported.userMessage, privacy: .public)")
                 return reported
@@ -77,53 +120,139 @@ final class SelfCheck: @unchecked Sendable {
         }
     }
 
-    /// Опросить поток буферов в течение окна старта. `true`, как только пришёл хотя бы один буфер.
-    private func probeDataFlow() async -> Bool {
-        let baseline = recorder.receivedBufferCount
-        let steps = 4
-        let perStepNanos = UInt64((Self.startupProbeSeconds / Double(steps)) * 1_000_000_000)
-        for _ in 0..<steps {
-            try? await Task.sleep(nanoseconds: perStepNanos)
-            let delta = recorder.receivedBufferCount - baseline
-            if SelfDiagnosis.isDataFlowing(bufferCount: delta, segmentBytesDelta: 0) {
-                return true
+    /// Проверить оба права, при необходимости показав системный диалог (один раз за проверку).
+    /// Возвращает причину провала, если права так и нет, иначе `nil`.
+    private func missingPermission(alreadyRequested: inout Bool) async -> StartupFailure? {
+        if !Permissions.hasScreenRecording {
+            if !alreadyRequested {
+                alreadyRequested = true
+                Permissions.requestScreenRecording()
             }
+            // Право на запись экрана применяется только к следующему запуску процесса, поэтому
+            // даже после согласия в диалоге эту запись начать нельзя — показываем подсказку.
+            guard Permissions.hasScreenRecording else { return .noScreenRecordingPermission }
         }
-        return false
+        if !Permissions.hasMicrophone {
+            if !alreadyRequested, Permissions.microphoneStatus == .notDetermined {
+                alreadyRequested = true
+                _ = await Permissions.requestMicrophone()
+            }
+            guard Permissions.hasMicrophone else { return .noMicrophonePermission }
+        }
+        return nil
+    }
+
+    /// Понаблюдать за счётчиками всё окно старта и вернуть прирост за него.
+    ///
+    /// Окно досматриваем до конца, даже если данные пошли на первом же шаге: ранний выход
+    /// подтверждал бы старт по первой ожившей дорожке, а вторая могла ещё не начать писать —
+    /// и мёртвую дорожку было бы не отличить от просто медленной.
+    private func probeDataFlow(from baseline: Counters) async -> Counters {
+        try? await Task.sleep(nanoseconds: UInt64(Self.startupProbeSeconds * 1_000_000_000))
+        return counters().delta(from: baseline)
+    }
+
+    /// Данные пошли, и обе дорожки пишутся, но источник одной из них молчит. Ошибкой это не
+    /// считаем: тишину в переговорке от мёртвого устройства не отличить, а сорвать из-за неё запись
+    /// нельзя. Пишем в лог, чтобы причина нашлась при разборе.
+    private func warnIfTrackSilent(_ delta: Counters) {
+        for track in Track.allCases where (track == .system ? delta.system : delta.mic).received == 0 {
+            log.error("Источник дорожки «\(track.title, privacy: .public)» молчит: буферы не приходят")
+        }
     }
 
     /// Watchdog во время записи: следит, что буферы продолжают приходить. Если поток встал —
     /// перезапускает стрим (сохраняя сегменты); когда попытки исчерпаны — сообщает ошибку через
     /// `onStall`. Завершается по отмене задачи (на чистом стопе).
     func runWatchdog(onStall: @Sendable @escaping (StartupFailure) -> Void = { _ in }) async {
-        var watchdog = FlowWatchdog(stallThreshold: Self.watchdogStallSeconds,
-                                    startTime: Self.monotonicSeconds(),
-                                    initialBufferCount: recorder.receivedBufferCount)
+        // Следим за записанным, а не за пришедшим: если сломается запись на диск, буферы от
+        // системы продолжат идти, и watchdog по ним ничего бы не заметил. Плюс к суммарному
+        // счётчику — по watchdog'у на дорожку: сумма растёт, пока жива хотя бы одна, и мёртвую
+        // вторую (половину встречи!) агрегатный watchdog не увидит никогда.
+        var trackers = makeWatchdogs(from: counters())
+        var receivedAtWindowStart = trackers.received
         var restartsLeft = Self.maxRestartAttempts
+        // Причина последнего неудавшегося рестарта: по счётчикам её потом не восстановить, а
+        // сообщить пользователю надо именно её, а не догадку «нет данных / не пишется диск».
+        var restartFailure: StartupFailure?
         let tickNanos = UInt64(Self.watchdogTickSeconds * 1_000_000_000)
 
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: tickNanos)
             if Task.isCancelled { break }
 
-            let stalled = watchdog.observe(bufferCount: recorder.receivedBufferCount,
-                                           at: Self.monotonicSeconds())
-            guard stalled else { continue }
+            let now = counters()
+            let time = Self.monotonicSeconds()
+            let stalled = trackers.flow.observe(bufferCount: now.written, at: time)
+            // Оба наблюдения обязательны: короткое замыкание оставило бы вторую дорожку без апдейта.
+            let systemStalled = trackers.system.observe(now.system, at: time)
+            let micStalled = trackers.mic.observe(now.mic, at: time)
+            let stalledTrack: Track? = systemStalled ? .system : (micStalled ? .mic : nil)
+            guard stalled || stalledTrack != nil else { continue }
+
+            if let stalledTrack {
+                log.error("Watchdog: дорожка «\(stalledTrack.title, privacy: .public)» не пишется на диск")
+            }
 
             if restartsLeft > 0 {
                 restartsLeft -= 1
-                log.error("Watchdog: поток буферов встал, рестарт стрима (осталось: \(restartsLeft))")
-                try? await recorder.restart()
-                // После рестарта сбрасываем окно наблюдения на новый счётчик буферов.
-                watchdog = FlowWatchdog(stallThreshold: Self.watchdogStallSeconds,
-                                        startTime: Self.monotonicSeconds(),
-                                        initialBufferCount: recorder.receivedBufferCount)
+                log.error("Watchdog: запись встала, рестарт стрима (осталось: \(restartsLeft))")
+                do {
+                    try await recorder.restart()
+                    restartFailure = nil
+                } catch let failure as StartupFailure {
+                    log.error("Watchdog: рестарт не удался — \(failure.userMessage, privacy: .public)")
+                    // Отозванное на ходу право рестартом не вернуть: тратить на него оставшиеся
+                    // попытки незачем — сообщаем сразу, с конкретной подсказкой.
+                    guard failure == .streamNotStarted else {
+                        onStall(failure)
+                        break
+                    }
+                    restartFailure = failure
+                } catch {
+                    log.error("Watchdog: рестарт не удался: \(error.localizedDescription, privacy: .public)")
+                    restartFailure = .streamNotStarted
+                }
+                // После рестарта сбрасываем окна наблюдения на новые счётчики.
+                trackers = makeWatchdogs(from: counters())
+                receivedAtWindowStart = trackers.received
             } else {
-                log.error("Watchdog: поток встал, попытки рестарта исчерпаны")
-                onStall(.noData)
+                // Рестарт падал с конкретной причиной — она точнее догадки по счётчикам. Иначе:
+                // дорожка получает буферы, но не пишет их (или буферы шли всё окно, а записи нет)
+                // → встал не стрим, а запись на диск.
+                let failure: StartupFailure = restartFailure
+                    ?? (stalledTrack != nil || now.received > receivedAtWindowStart
+                        ? .diskWriteFailed : .noData)
+                log.error("Watchdog: запись встала, попытки рестарта исчерпаны — \(failure.userMessage, privacy: .public)")
+                onStall(failure)
                 break
             }
         }
+    }
+
+    /// Набор watchdog'ов записи: суммарный (ловит смерть стрима) + по одному на дорожку (ловят
+    /// дорожку, которую суммарный не видит за живой второй).
+    private struct Watchdogs {
+        var flow: FlowWatchdog
+        var system: TrackWatchdog
+        var mic: TrackWatchdog
+        /// Пришло буферов на момент старта окна — по нему отличаем «нет звука» от «не пишется».
+        var received: Int
+
+        /// Свежий набор, заряженный текущими счётчиками (старт записи и каждый рестарт стрима).
+        init(from now: Counters, threshold: Double, startTime: Double) {
+            flow = FlowWatchdog(stallThreshold: threshold, startTime: startTime,
+                                initialBufferCount: now.written)
+            system = TrackWatchdog(stallThreshold: threshold, startTime: startTime,
+                                   initialFlow: now.system)
+            mic = TrackWatchdog(stallThreshold: threshold, startTime: startTime,
+                                initialFlow: now.mic)
+            received = now.received
+        }
+    }
+
+    private func makeWatchdogs(from now: Counters) -> Watchdogs {
+        Watchdogs(from: now, threshold: Self.watchdogStallSeconds, startTime: Self.monotonicSeconds())
     }
 
     /// Монотонное время в секундах (не зависит от перевода системных часов) — для watchdog'а.

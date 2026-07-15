@@ -13,13 +13,10 @@ import os
 /// `captureMicrophone` доступен с macOS 15, поэтому весь рекордер помечен соответственно.
 @available(macOS 15.0, *)
 final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
-    /// Ошибки старта записи для самодиагностики (Task 4).
-    enum RecorderError: Error {
-        case noDisplay
-        case notAuthorized
-    }
-
     private let log = Logger(subsystem: AppInfo.bundleID, category: "AudioRecorder")
+
+    /// Папка записи — в её подкаталогах лежат сегменты обеих дорожек.
+    private let directory: URL
 
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
@@ -32,17 +29,53 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     private var stream: SCStream?
 
-    // Счётчик пришедших буферов (обе дорожки) под замком: делегат дёргают разные очереди
-    // (`systemQueue`/`micQueue`), а читает самодиагностика/watchdog с ещё одной. Основной сигнал
-    // «данные реально идут» (Task 4).
+    // Счётчики пришедших буферов по дорожкам под замком: делегат дёргают разные очереди
+    // (`systemQueue`/`micQueue`), а читает самодиагностика/watchdog с ещё одной. Считаем дорожки
+    // раздельно, чтобы поток системного звука не маскировал мёртвую дорожку микрофона (Task 4).
     private let bufferCountLock = NSLock()
-    private var receivedBuffers = 0
+    private var receivedSystemBuffers = 0
+    private var receivedMicBuffers = 0
 
-    /// Сколько аудио-буферов пришло с момента старта (для `SelfCheck`/watchdog).
-    var receivedBufferCount: Int {
+    /// Сколько аудио-буферов пришло от системы с момента старта, по дорожкам.
+    var receivedBufferCounts: (system: Int, mic: Int) {
         bufferCountLock.lock()
         defer { bufferCountLock.unlock() }
-        return receivedBuffers
+        return (receivedSystemBuffers, receivedMicBuffers)
+    }
+
+    /// Сколько буферов пришло от системы с момента старта (обе дорожки).
+    var receivedBufferCount: Int {
+        let counts = receivedBufferCounts
+        return counts.system + counts.mic
+    }
+
+    /// Сколько буферов writer'ы реально приняли в сегменты, по дорожкам. В отличие от
+    /// `receivedBufferCounts` подтверждает, что данные дошли до файла, а не только до делегата.
+    var writtenBufferCounts: (system: Int, mic: Int) {
+        (systemWriter.appendedCount, micWriter.appendedCount)
+    }
+
+    /// Сколько буферов реально записано обеими дорожками — основной сигнал «запись идёт».
+    var writtenBufferCount: Int {
+        let counts = writtenBufferCounts
+        return counts.system + counts.mic
+    }
+
+    /// Суммарный размер сегментов обеих дорожек на диске, байт. Второй (независимый от writer'а)
+    /// сигнал для самодиагностики: файлы растут → данные действительно ложатся на диск.
+    var segmentBytesOnDisk: Int {
+        [SegmentLayout.systemDirName, SegmentLayout.micDirName]
+            .map { Self.directorySize(directory.appendingPathComponent($0)) }
+            .reduce(0, +)
+    }
+
+    private static func directorySize(_ url: URL) -> Int {
+        let manager = FileManager.default
+        let names = (try? manager.contentsOfDirectory(atPath: url.path)) ?? []
+        return names.reduce(0) { total, name in
+            let attrs = try? manager.attributesOfItem(atPath: url.appendingPathComponent(name).path)
+            return total + ((attrs?[.size] as? Int) ?? 0)
+        }
     }
 
     /// Поднят ли сейчас `SCStream` (для снимка самодиагностики).
@@ -50,6 +83,7 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
 
     /// - Parameter directory: папка записи; сегменты пишутся в её подкаталоги `system/` и `mic/`.
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
+        self.directory = directory
         self.systemWriter = SegmentWriter(
             directory: directory.appendingPathComponent(SegmentLayout.systemDirName),
             segmentSeconds: segmentSeconds
@@ -76,12 +110,26 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         return config
     }
 
-    /// Запустить захват. Бросает, если нет доступного дисплея или прав.
+    /// Запустить захват. Бросает `StartupFailure` с готовым текстом для меню-бара: причина старта
+    /// без записи — это то, что пользователь должен увидеть, а не «error 1» из `localizedDescription`.
     func start() async throws {
-        guard Permissions.hasScreenRecording else { throw RecorderError.notAuthorized }
+        try await requestPermissionsIfNeeded()
+        do {
+            try await startStream()
+        } catch let failure as StartupFailure {
+            throw failure
+        } catch {
+            // Сырые ошибки ScreenCaptureKit наружу не выпускаем: без `.streamNotStarted` вызывающий
+            // не отличит «стрим не поднялся» (лечится рестартом) от прочих сбоев, и самолечение
+            // (`SelfCheck`) не отработает свои попытки (Task 4).
+            log.error("Стрим не поднялся: \(error.localizedDescription, privacy: .public)")
+            throw StartupFailure.streamNotStarted
+        }
+    }
 
+    private func startStream() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first else { throw RecorderError.noDisplay }
+        guard let display = content.displays.first else { throw StartupFailure.streamNotStarted }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: makeConfiguration(), delegate: self)
@@ -91,6 +139,30 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         try await stream.startCapture()
         self.stream = stream
         log.info("Захват запущен")
+    }
+
+    /// Показать системные диалоги TCC, если права ещё не выданы, и убедиться, что после этого они
+    /// есть. Без явного запроса первый запуск молча упирался бы в отказ: `SCStream` без права на
+    /// запись экрана не поднимется, а без микрофона запишется только половина встречи.
+    ///
+    /// `CGRequestScreenCaptureAccess` при первом вызове показывает диалог, но право применяется
+    /// только к следующему запуску процесса — поэтому здесь всё равно завершаемся ошибкой с
+    /// подсказкой «выдайте право и перезапустите Acta».
+    private func requestPermissionsIfNeeded() async throws {
+        if !Permissions.hasScreenRecording {
+            Permissions.requestScreenRecording()
+            guard Permissions.hasScreenRecording else {
+                log.error("Нет права Screen Recording — старт отклонён")
+                throw StartupFailure.noScreenRecordingPermission
+            }
+        }
+        if Permissions.microphoneStatus == .notDetermined {
+            _ = await Permissions.requestMicrophone()
+        }
+        guard Permissions.hasMicrophone else {
+            log.error("Нет права Microphone — старт отклонён")
+            throw StartupFailure.noMicrophonePermission
+        }
     }
 
     /// Перезапустить стрим, **сохранив уже записанные сегменты** — для самолечения (`SelfCheck`)
@@ -132,19 +204,23 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
                 of type: SCStreamOutputType) {
         switch type {
         case .audio:
-            countBuffer()
+            countBuffer(system: true)
             systemWriter.append(sampleBuffer)
         case .microphone:
-            countBuffer()
+            countBuffer(system: false)
             micWriter.append(sampleBuffer)
         default:
             break // .screen и прочее — игнор
         }
     }
 
-    private func countBuffer() {
+    private func countBuffer(system: Bool) {
         bufferCountLock.lock()
-        receivedBuffers += 1
+        if system {
+            receivedSystemBuffers += 1
+        } else {
+            receivedMicBuffers += 1
+        }
         bufferCountLock.unlock()
     }
 
