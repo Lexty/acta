@@ -89,6 +89,12 @@ final class RecordingController: ObservableObject {
     /// the title is blocked, and the start button is unavailable.
     var isBusy: Bool { phase == .recording || phase == .saving }
 
+    /// Whether the app still has work that must not be cut short by quitting. Wider than `isBusy`:
+    /// the watchdog's fatal-stall path (`handleFatalStall`) parks `phase` in `.error` while capture
+    /// stop and the `ffmpeg` assembly are still running, and terminating then is `kill -9` by
+    /// another name.
+    var hasWorkInFlight: Bool { isBusy || isStopping }
+
     /// The recordings store for the current archive path from the settings. Read on every access so
     /// that a path change in the settings is picked up without a restart (Task 7).
     private var store: MeetingStore {
@@ -273,7 +279,10 @@ final class RecordingController: ObservableObject {
         self.startedAt = nil
         elapsedSeconds = 0
 
-        Task { [weak self] in
+        // Tracked in `stopTask` like a clean stop: the assembly that follows is what "Quit" must wait
+        // for. Without this, quitting mid-assembly would kill `ffmpeg` — exactly the `kill -9` this
+        // path exists to avoid.
+        stopTask = Task { [weak self] in
             let result = await session.stop()
             let duration = Self.savedDuration(result, startedAt: startedAt)
             await MainActor.run {

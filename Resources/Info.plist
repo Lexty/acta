@@ -21,6 +21,6 @@
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Acta записывает микрофон, чтобы сохранить вашу дорожку во время онлайн-встречи. Запись хранится только локально.</string>
+    <string>Acta records the microphone to save your own track during an online meeting. Recordings stay on this Mac.</string>
 </dict>
 </plist>

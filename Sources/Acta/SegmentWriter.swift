@@ -42,12 +42,21 @@ final class SegmentWriter {
     // signal, not just "data arrived" (Task 4).
     private let appendedLock = NSLock()
     private var appended = 0
+    private var dropped = 0
 
     /// How many buffers the writer has actually accepted into a segment since the recording started.
     var appendedCount: Int {
         appendedLock.lock()
         defer { appendedLock.unlock() }
         return appended
+    }
+
+    /// How many buffers were thrown away because the writer was not ready for them. Audio that never
+    /// reached the file: without a counter a shortened track looks exactly like a quiet meeting.
+    var droppedCount: Int {
+        appendedLock.lock()
+        defer { appendedLock.unlock() }
+        return dropped
     }
 
     init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
@@ -74,7 +83,10 @@ final class SegmentWriter {
             rotate(at: pts, formatHint: CMSampleBufferGetFormatDescription(sampleBuffer))
         }
 
-        guard let input, input.isReadyForMoreMediaData else { return }
+        guard let input, input.isReadyForMoreMediaData else {
+            countDrop()
+            return
+        }
         guard input.append(sampleBuffer) else {
             log.error("Writer rejected a buffer: \(String(describing: self.writer?.error), privacy: .public)")
             return
@@ -82,6 +94,18 @@ final class SegmentWriter {
         appendedLock.lock()
         appended += 1
         appendedLock.unlock()
+    }
+
+    /// Account for a buffer the writer refused to take. Logged on the powers of two so that a long
+    /// backpressure spell leaves a trace without flooding the log from the hot audio path.
+    private func countDrop() {
+        appendedLock.lock()
+        dropped += 1
+        let total = dropped
+        appendedLock.unlock()
+        if total & (total - 1) == 0 {
+            log.error("Writer was not ready — buffer dropped (total dropped: \(total))")
+        }
     }
 
     /// Finalize the current segment (a clean stop). After the call the writer is reset.
@@ -95,9 +119,9 @@ final class SegmentWriter {
         // We wait with a cap: `finish()` is called synchronously from the track's queue inside
         // `stop()`, and a `finishWriting` hung inside AVFoundation would, without a timeout, jam the
         // stop forever — the UI would stay on "recording" with a button that does nothing any more
-        // (`isStopping` would never clear). On timeout we move on: an unfinished segment is rejected
-        // by the header check (`Recovery.isValidSegment`), losing the tail but not the whole
-        // recording.
+        // (`isStopping` would never clear). On timeout we move on: the segment is left with an
+        // unfinalized header, which `Recovery.action` repairs from the actual file size — the tail
+        // is rescued, not lost.
         if pendingWrites.wait(timeout: .now() + Self.finishTimeoutSeconds) == .timedOut {
             log.error("Segment finalization did not fit the timeout — continuing without it")
         }

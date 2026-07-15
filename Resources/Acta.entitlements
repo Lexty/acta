@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Личное приложение: без App Sandbox. Entitlements минимальные.
-         ScreenCaptureKit (Screen Recording) и Microphone запрашиваются через TCC в рантайме. -->
+    <!-- Personal app: no App Sandbox. Entitlements are kept minimal.
+         ScreenCaptureKit (Screen Recording) and Microphone are requested through TCC at runtime. -->
     <key>com.apple.security.app-sandbox</key>
     <false/>
     <key>com.apple.security.device.audio-input</key>

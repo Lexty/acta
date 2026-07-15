@@ -204,7 +204,7 @@ struct SegmentAssembler {
                 return segment.fileName
             case .repair(let repair):
                 let url = trackDir.appendingPathComponent(segment.fileName)
-                guard Self.applyRepair(repair, to: url) else {
+                guard SegmentRepair.apply(repair, to: url) else {
                     log.error("""
                         Failed to repair the header of \(segment.fileName, privacy: .public) — \
                         segment skipped
@@ -220,25 +220,7 @@ struct SegmentAssembler {
         }
     }
 
-    /// Write the sizes into the header and truncate the file to a whole number of frames. `false`
-    /// means the file would not cooperate (the caller excludes the segment from the assembly).
-    private static func applyRepair(_ repair: WAV.HeaderRepair, to url: URL) -> Bool {
-        guard let handle = try? FileHandle(forUpdating: url) else { return false }
-        defer { try? handle.close() }
-        do {
-            try handle.seek(toOffset: UInt64(repair.riffSizeOffset))
-            try handle.write(contentsOf: WAV.le32(repair.riffSize))
-            try handle.seek(toOffset: UInt64(repair.dataSizeOffset))
-            try handle.write(contentsOf: WAV.le32(repair.dataSize))
-            try handle.truncate(atOffset: UInt64(repair.truncatedFileSize))
-            try handle.synchronize()
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    /// Read the beginning of the file to check the WAV header (`Recovery.isValidSegment`). An empty
+    /// Read the beginning of the file so `Recovery.action` can judge the WAV header. An empty
     /// result = the file is unreadable → the segment is not considered valid.
     private static func headerPrefix(of url: URL) -> Data {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }

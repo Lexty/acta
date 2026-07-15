@@ -28,6 +28,19 @@ func clampSegmentSecondsStaysInRange() {
     #expect(RecordingSettings.clampSegmentSeconds(30) == 30)
 }
 
+@Test
+func clampSegmentSecondsPinsTheRangeItself() {
+    // The bounds are what a UI stepper actually produces, so they are pinned as literals rather
+    // than against the constants - a range that silently moves must fail here.
+    #expect(RecordingSettings.minSegmentSeconds == 5)
+    #expect(RecordingSettings.maxSegmentSeconds == 120)
+    // The bounds pass through untouched; one step outside snaps back to them.
+    #expect(RecordingSettings.clampSegmentSeconds(5) == 5)
+    #expect(RecordingSettings.clampSegmentSeconds(120) == 120)
+    #expect(RecordingSettings.clampSegmentSeconds(4) == 5)
+    #expect(RecordingSettings.clampSegmentSeconds(121) == 120)
+}
+
 // MARK: - Normalization
 
 @Test

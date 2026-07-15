@@ -82,22 +82,6 @@ public enum Recovery {
         return WAV.headerRepair(header: header, fileSize: bytes).map(Action.repair)
     }
 
-    /// Whether a segment is usable for assembly — either on its own or after a header repair.
-    public static func isUsableSegment(bytes: Int, header: Data) -> Bool {
-        action(bytes: bytes, header: header) != nil
-    }
-
-    /// Whether a segment is valid **as is**: large enough and containing a finalised WAV header.
-    ///
-    /// Size alone is not enough: a `kill -9` in the middle of a segment leaves `AVAssetWriter` with
-    /// a file holding kilobytes of audio but with the sizes in the header unset — `ffmpeg` crashes
-    /// on such a file and drags the assembly of the whole track down with it. Such a segment is not
-    /// discarded but repaired (`WAV.headerRepair`); hence this check only answers the question "is a
-    /// repair needed".
-    public static func isValidSegment(bytes: Int, header: Data) -> Bool {
-        bytes >= minValidSegmentBytes && isFinalizedWAVHeader(header, fileSize: bytes)
-    }
-
     /// Whether the WAV header was written through to the end: the RIFF/WAVE magic is in place, the
     /// `fmt `/`data` chunks were actually found, and the sizes are set and fit within the real file
     /// size.

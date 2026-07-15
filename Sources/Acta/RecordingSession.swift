@@ -33,6 +33,9 @@ final class RecordingSession: @unchecked Sendable {
     private let manifestQueue = DispatchQueue(label: "dev.personal.acta.manifest")
     /// The last written counter value (only from `manifestQueue`).
     private var lastWrittenSegmentCount = 0
+    /// When the recording started — kept so that a `session.json` lost mid-recording can be rebuilt
+    /// on stop with the real start time instead of an invented one.
+    private var startedAt = Date()
 
     init(directory: URL, settings: RecordingSettings = .default) {
         self.directory = directory
@@ -53,6 +56,7 @@ final class RecordingSession: @unchecked Sendable {
     func start(startedAt: Date = Date(),
                onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        self.startedAt = startedAt
         let manifest = SessionManifest(status: .recording, startedAt: startedAt,
                                        segmentSeconds: segmentSeconds, segmentCount: 0)
         try store.write(manifest, to: directory)
@@ -97,11 +101,10 @@ final class RecordingSession: @unchecked Sendable {
         // on top of the final marker, turning `done` back into `recording`.
         manifestQueue.sync {}
 
-        let counts = recorder.finalizedSegmentCounts()
         var manifest = store.read(from: directory)
-            ?? SessionManifest(status: .recording, startedAt: Date(),
+            ?? SessionManifest(status: .recording, startedAt: startedAt,
                                segmentSeconds: segmentSeconds, segmentCount: 0)
-        manifest.segmentCount = max(counts.system, counts.mic)
+        manifest.segmentCount = recorder.finalizedSegmentCount
 
         var result: SegmentAssembler.Result?
         do {

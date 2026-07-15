@@ -67,23 +67,10 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         return (receivedSystemBuffers, receivedMicBuffers)
     }
 
-    /// How many buffers have arrived from the system since the start (both tracks).
-    var receivedBufferCount: Int {
-        let counts = receivedBufferCounts
-        return counts.system + counts.mic
-    }
-
     /// How many buffers the writers actually accepted into segments, per track. Unlike
     /// `receivedBufferCounts` it confirms that the data reached the file, not just the delegate.
     var writtenBufferCounts: (system: Int, mic: Int) {
         (systemWriter.appendedCount, micWriter.appendedCount)
-    }
-
-    /// How many buffers have actually been written by both tracks — the main "recording is running"
-    /// signal.
-    var writtenBufferCount: Int {
-        let counts = writtenBufferCounts
-        return counts.system + counts.mic
     }
 
     /// Total size of both tracks' segments on disk, bytes. A second signal for the self-diagnosis
@@ -173,8 +160,6 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         try await requestPermissionsIfNeeded()
         do {
             try await startStream()
-        } catch let failure as StartupFailure {
-            throw failure
         } catch {
             // Raw ScreenCaptureKit errors are not let out: without `.streamNotStarted` the caller
             // cannot tell "the stream did not come up" (healed by a restart) from other failures,
@@ -248,11 +233,12 @@ final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecke
         log.info("Capture stopped")
     }
 
-    /// The number of finalized segments of each track (for `session.json`).
-    func finalizedSegmentCounts() -> (system: Int, mic: Int) {
+    /// The number of finalized segments to publish in `session.json`. The arithmetic over the two
+    /// tracks lives in the pure `SegmentProgress`; this only serializes the read.
+    var finalizedSegmentCount: Int {
         progressLock.lock()
         defer { progressLock.unlock() }
-        return (progress.system, progress.mic)
+        return progress.segmentCount
     }
 
     // MARK: - SCStreamOutput

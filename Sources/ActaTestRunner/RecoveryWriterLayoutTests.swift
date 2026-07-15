@@ -31,18 +31,18 @@ private func realWriterLayout(dataSize: Int, fileSize: Int, padding: Int = 3984)
 }
 
 @Test
-func realWriterLayoutFitsInProbeWindow() {
+func realWriterLayoutIsIncludedAsIs() {
     // Regression: with a live writer the `data` header ends exactly at byte 4096 - in the former
     // 4096-byte window it fit byte for byte. Any extra chunk would push it out, and then ALL
     // segments would become invalid at once: both assembly and recovery would return nothing.
     let header = realWriterLayout(dataSize: 192_000, fileSize: 196_096)
     #expect(header.count == 4096)
     #expect(Recovery.headerProbeBytes > header.count)
-    #expect(Recovery.isValidSegment(bytes: 196_096, header: header))
+    #expect(Recovery.action(bytes: 196_096, header: header) == .include)
 }
 
 @Test
-func realWriterLayoutWithLargerPaddingStillValid() {
+func realWriterLayoutWithLargerPaddingIsIncludedAsIs() {
     // The window's headroom must not depend on the current padding size: a `data` chunk that
     // moved past 4 KiB (a different formatHint, an extra chunk, changed padding in a new macOS)
     // must still be found - otherwise segments become invalid all at once, which is a silent
@@ -51,15 +51,31 @@ func realWriterLayoutWithLargerPaddingStillValid() {
     let header = realWriterLayout(dataSize: 192_000, fileSize: 208_112, padding: 16_000)
     #expect(header.count > 4096)
     #expect(header.count <= Recovery.headerProbeBytes)
-    #expect(Recovery.isValidSegment(bytes: 208_112, header: header))
+    #expect(Recovery.action(bytes: 208_112, header: header) == .include)
 }
 
 @Test
-func realWriterLayoutFromCrashRejected() {
+func realWriterLayoutFromCrashIsRepairedNotDiscarded() {
     // A writer killed by `kill -9` leaves the `data` size at zero, and the RIFF field holds the
-    // preamble size (4088), which is SMALLER than the file, i.e. it passes the RIFF check. It is
-    // the zero `data` size that must reject the segment.
+    // preamble size (4088), which is SMALLER than the file, i.e. it passes the RIFF check. The
+    // zero `data` size means the header is not finalized - but the file still holds real audio
+    // (2.92 s in the live run of Task 8), so the segment must be REPAIRED, not discarded.
+    //
+    // Asserting the whole repair, not just "not valid as is": `dataSizeOffset` is 4092 here
+    // because of the `FLLR` padding, while every synthetic fixture puts it at 40. Any regression
+    // in the chunk walk would send `WAV.layout` to nil, `Recovery.action` to nil, and the last
+    // segment silently into the bin - the exact defect this branch fixed.
     var bytes = [UInt8](realWriterLayout(dataSize: 0, fileSize: 382_464))
     bytes.replaceSubrange(4..<8, with: le32(4088))
-    #expect(Recovery.isValidSegment(bytes: 382_464, header: Data(bytes)) == false)
+    #expect(Recovery.action(bytes: 382_464, header: Data(bytes))
+            == .repair(WAV.HeaderRepair(riffSize: 382_456, dataSizeOffset: 4092,
+                                        dataSize: 378_368, truncatedFileSize: 382_464)))
+}
+
+@Test
+func realWriterLayoutBelowTheSizeThresholdIsDiscarded() {
+    // The writer created the segment but the crash landed before any audio: only the preamble is
+    // on disk, there is nothing to rescue.
+    #expect(Recovery.action(bytes: Recovery.minValidSegmentBytes - 1,
+                            header: realWriterLayout(dataSize: 0, fileSize: 40)) == nil)
 }

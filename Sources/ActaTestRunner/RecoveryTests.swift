@@ -25,31 +25,6 @@ private func header(riffSize: Int, dataSize: Int) -> Data {
     return Data(bytes)
 }
 
-/// The body of the `fmt ` chunk: 16-bit stereo PCM 48 kHz - what `SegmentWriter` writes.
-/// The fields can be overridden to build a deliberately broken format.
-private func pcmFormatBody(format: Int = 1, channels: Int = 2, sampleRate: Int = 48_000,
-                           bitsPerSample: Int = 16, blockAlign: Int? = nil) -> [UInt8] {
-    let align = blockAlign ?? channels * bitsPerSample / 8
-    var bytes: [UInt8] = []
-    bytes += le16(format)
-    bytes += le16(channels)
-    bytes += le32(sampleRate)
-    bytes += le32(sampleRate * align) // byteRate
-    bytes += le16(align)
-    bytes += le16(bitsPerSample)
-    return bytes
-}
-
-func le32(_ value: Int) -> [UInt8] {
-    let v = UInt32(truncatingIfNeeded: value)
-    return [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
-}
-
-private func le16(_ value: Int) -> [UInt8] {
-    let v = UInt16(truncatingIfNeeded: value)
-    return [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)]
-}
-
 /// Headers for a set of valid segments of the same size.
 private func headers(_ names: [String], fileSize: Int) -> [String: Data] {
     Dictionary(uniqueKeysWithValues: names.map { ($0, finalizedHeader(fileSize: fileSize)) })
@@ -184,12 +159,13 @@ func recoveryPlanKeepsEveryLiveRunSegment() {
 // MARK: - Segment validation
 
 @Test
-func isValidSegmentThreshold() {
+func segmentSizeThreshold() {
     let size = Recovery.minValidSegmentBytes
-    #expect(Recovery.isValidSegment(bytes: size, header: finalizedHeader(fileSize: size)))
-    #expect(Recovery.isValidSegment(bytes: size - 1,
-                                    header: finalizedHeader(fileSize: size - 1)) == false)
-    #expect(Recovery.isValidSegment(bytes: 0, header: Data()) == false)
+    #expect(Recovery.action(bytes: size, header: finalizedHeader(fileSize: size)) == .include)
+    // Below the threshold there is not even a header's worth of file: nothing to include and
+    // nothing to repair.
+    #expect(Recovery.action(bytes: size - 1, header: finalizedHeader(fileSize: size - 1)) == nil)
+    #expect(Recovery.action(bytes: 0, header: Data()) == nil)
 }
 
 @Test
@@ -314,22 +290,6 @@ func headerWithNonsenseFormatFieldsRejected() {
     #expect(Recovery.isFinalizedWAVHeader(headerWithFormat(pcmFormatBody(format: 0)),
                                           fileSize: 4096) == false)
 }
-
-/// The `fmt ` body for WAVE_FORMAT_EXTENSIBLE: the PCM layout + cbSize/validBits/channelMask/GUID.
-func extensibleFormatBody(cbSize: Int = 22, subformat: [UInt8] = pcmSubformatGUID) -> [UInt8] {
-    var bytes = pcmFormatBody(format: 0xFFFE)
-    bytes += le16(cbSize)
-    bytes += le16(16) // wValidBitsPerSample
-    bytes += le32(3)  // dwChannelMask: FRONT_LEFT | FRONT_RIGHT
-    bytes += subformat
-    return bytes
-}
-
-/// KSDATAFORMAT_SUBTYPE_PCM.
-let pcmSubformatGUID: [UInt8] = [
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71
-]
 
 @Test
 func headerWithExtensiblePCMAccepted() {

@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AppKit calls this method on the main thread, which is where the controller lives.
         return MainActor.assumeIsolated {
             let controller = RecordingController.shared
-            guard controller.isBusy else { return .terminateNow }
+            guard controller.hasWorkInFlight else { return .terminateNow }
             Task {
                 await controller.stopAndWait()
                 NSApp.reply(toApplicationShouldTerminate: true)

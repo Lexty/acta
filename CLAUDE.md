@@ -9,9 +9,14 @@ plan — **`docs/plans/acta.md`**.
 
 **English only** across the whole project — no exceptions:
 
-- **UI strings** shown to the user (menu bar, buttons, statuses, errors, notifications).
+- **UI strings** shown to the user (menu bar, buttons, statuses, errors, notifications) — including
+  `NSMicrophoneUsageDescription` in `Resources/Info.plist`, which macOS renders verbatim in the TCC
+  dialog and which is the first string a new user ever sees.
 - **Code**: identifiers, comments, log messages, error text, generated files (e.g. `~/Acta/CLAUDE.md`).
-- **Docs**: `SPEC.md`, `docs/plans/*.md`, `CLAUDE.md`, `.claude/skills/**`, shell scripts, configs.
+- **Docs**: `SPEC.md`, `docs/plans/*.md`, `CLAUDE.md`, `.claude/skills/**`, shell scripts, configs
+  (`Resources/Info.plist`, `Resources/Acta.entitlements`, `.swiftlint.yml`, `.claude/hooks/**`).
+  Check with `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .` — a grep
+  scoped to `Sources/` alone once let a Russian TCC prompt ship.
 - **Git**: commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
   `type(scope): subject` — `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`.
   Subject in imperative mood, lowercase, no trailing period. Body explains *why*, not just *what*.
@@ -39,9 +44,31 @@ The conversation with the user may be in Russian; the repository must not be.
   **raw `swiftlint` crashes without Xcode**; config in `.swiftlint.yml`)
 - Run: `open Acta.app` (or `bash Scripts/run.sh`)
 
+## Project structure
+- `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
+  `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
+  `SessionManifest`. Anything worth testing goes here. (`SegmentRepair` is the deliberate exception:
+  it touches the FS, but it is the code that rescues crashed audio, so it must be testable.)
+- `Sources/Acta/` — the executable: SwiftUI menu bar, `SCStream`, FS and process I/O. Kept thin;
+  decisions are delegated to ActaKit.
+- `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via
+  `bash Scripts/test.sh`).
+- `Tests/ActaTests/` — **a stub only**, so `swift test` compiles. Never add real tests here: under
+  CLT-only they do not run and cannot fail.
+
+The rule: a new behaviour worth testing gets its decision in ActaKit as a pure function, its I/O in
+Acta, and its test in ActaTestRunner.
+
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).
-- **No external dependencies** (no transcription → no WhisperKit).
+- **No external SwiftPM dependencies** (no transcription → no WhisperKit). But `ffmpeg` is a
+  **required runtime tool** (`brew install ffmpeg`): every concat/mix goes through it.
+  `SegmentAssembler.locateFFmpeg()` searches `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, then
+  `PATH`. Without it nothing assembles — the segments survive and the marker stays `recording`, so
+  recovery retries on the next launch.
+- **Deployment target is macOS 14, but recording requires macOS 15+** (`SCStreamConfiguration.captureMicrophone`
+  is 15+). Everything below `MenuContent` is `@available(macOS 15.0, *)`; macOS 14 gets
+  `UnsupportedContent`. New code touching capture needs the same annotation.
 - The app is **not sandboxed** (personal use); entitlements are minimal.
 - Privacy: recordings stay **local** and are never uploaded.
 - **Crash safety beats speed:** write in segments, flush often, every segment must be a valid file.

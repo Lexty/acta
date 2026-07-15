@@ -10,7 +10,4 @@ public enum AppInfo {
 
     /// Fixed bundle identifier (for TCC stability).
     public static let bundleID = "dev.personal.acta"
-
-    /// Short version.
-    public static let version = "0.1.0"
 }

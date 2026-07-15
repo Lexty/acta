@@ -38,11 +38,6 @@ private func killedHeader() -> Data {
     wavHeader(riffSize: 0, dataSize: 0)
 }
 
-private func le16(_ value: Int) -> [UInt8] {
-    let v = UInt16(truncatingIfNeeded: value)
-    return [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)]
-}
-
 // MARK: - Duration
 
 @Test
@@ -110,6 +105,19 @@ func repairTruncatesToWholeFrames() {
     #expect(repair?.truncatedFileSize == 44 + byteRate)
 }
 
+/// Apply a repair plan to header bytes the way `SegmentAssembler.applyRepair` applies it to a file:
+/// splice both sizes in at the offsets the plan names. Deliberately uses `repair.riffSizeOffset` /
+/// `repair.dataSizeOffset` rather than rebuilding a header from the fixture - a wrong offset in the
+/// plan must fail the test, not be papered over by a helper that knows where the fields "should" be.
+private func applyRepair(_ repair: WAV.HeaderRepair, to header: Data) -> Data {
+    var bytes = [UInt8](header)
+    bytes.replaceSubrange(repair.riffSizeOffset..<(repair.riffSizeOffset + 4),
+                          with: WAV.le32(repair.riffSize))
+    bytes.replaceSubrange(repair.dataSizeOffset..<(repair.dataSizeOffset + 4),
+                          with: WAV.le32(repair.dataSize))
+    return Data(bytes)
+}
+
 @Test
 func repairedHeaderReadsBackWithTheSameDuration() {
     // End-to-end check: after the repair the header describes exactly the audio left in the file.
@@ -118,7 +126,7 @@ func repairedHeaderReadsBackWithTheSameDuration() {
         Issue.record("A segment with audio should be repairable")
         return
     }
-    let patched = wavHeader(riffSize: repair.riffSize, dataSize: repair.dataSize)
+    let patched = applyRepair(repair, to: killedHeader())
     let duration = WAV.durationSeconds(header: patched, fileSize: repair.truncatedFileSize)
     #expect(duration.map { abs($0 - 2.92) < 0.001 } == true)
 }

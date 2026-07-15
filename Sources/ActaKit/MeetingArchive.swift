@@ -59,11 +59,6 @@ public enum MeetingArchive {
         formatter.dateFormat = "yyyy-MM-dd_HHmm"
         return "\(formatter.string(from: date))__\(slug)"
     }
-
-    /// Folder name straight from a title (the slug is built inside).
-    public static func folderName(date: Date, title: String, timeZone: TimeZone = .current) -> String {
-        folderName(date: date, slug: slug(from: title), timeZone: timeZone)
-    }
 }
 
 /// Meeting metadata for `info.md` — **pure logic** of serialising to YAML front-matter.

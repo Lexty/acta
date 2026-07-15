@@ -46,7 +46,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
 
     /// Encoder with a fixed layout: snake_case keys + ISO-8601 dates (human-readable and stable
     /// across runs). `prettyPrinted` keeps `session.json` comfortable to read by eye.
-    public static func makeEncoder() -> JSONEncoder {
+    private static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.dateEncodingStrategy = .iso8601
@@ -55,7 +55,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
     }
 
     /// Decoder symmetric to `makeEncoder()`.
-    public static func makeDecoder() -> JSONDecoder {
+    private static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601

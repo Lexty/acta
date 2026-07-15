@@ -62,14 +62,6 @@ func folderNameFormatsDateAndSlug() {
     #expect(name == "2023-11-14_2213__weekly-sync")
 }
 
-@Test
-func folderNameFromTitleBuildsSlug() {
-    let date = Date(timeIntervalSince1970: 1_700_000_000)
-    let name = MeetingArchive.folderName(date: date, title: "Weekly Sync",
-                                         timeZone: TimeZone(identifier: "UTC")!)
-    #expect(name == "2023-11-14_2213__weekly-sync")
-}
-
 // MARK: - info.md / YAML front-matter
 
 @Test
