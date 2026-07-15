@@ -13,6 +13,64 @@
 
 ---
 
+## Found live on 2026-07-15 — two defects, both proven on real hardware
+
+### 1. The display going dark kills the recording (severe, everyday)
+
+Observed, not theorised. A dev-build recording started 21:09:47 local and stopped on its own at
+~21:12:07. `pmset -g log` shows **`Display is turned off` at 21:12:09** — the same moment.
+
+Chain: the display sleeps → ScreenCaptureKit (a *screen* capture API) loses the stream → the watchdog
+sees no buffers → restarts → fails while the display is off → exhausts its budget → stops the
+recording and reports an error. `session.json` ends at `status: done` with a clean assembly, which is
+why it looks like a normal stop rather than a crash.
+
+**The app behaved exactly as designed** (Task 4: never show "recording" when nothing is written). The
+design is what is wrong.
+
+The parked "Survive sleep and lid close" item **underestimates this**. Its own text says
+`screensDidSleepNotification` is "a different event — the screen sleeping does not mean the system
+slept", and treats it as the lesser case. It is the **greater** case: system sleep and lid close are
+occasional, while the display goes dark after a few minutes of inactivity. Sitting in a meeting
+listening, not touching the keyboard, is the *normal* state — and it kills the recording. This is a
+failure on every other meeting, not an edge case.
+
+When promoting that item: handle `screensDidSleepNotification` **first and primarily**, keep the
+stream alive across display sleep (or re-establish it immediately and account for the gap), and only
+then worry about system sleep. Verify by letting the display sleep during a recording — that is now a
+required acceptance test, not an optional one.
+
+### 2. Failures are not investigable (the recorder cannot explain itself)
+
+The incident above was diagnosed **only** through `pmset` — a system power log. Nothing from Acta.
+Had the display not left a trace in someone else's log, the cause would have been unknowable.
+
+What was found:
+- `log.info` (14 call sites) is **not persisted** by `os_log` — in-memory only. "Session started" and
+  "session stopped" are gone by the time anyone investigates.
+- `log.error` (42 call sites) *is* persisted, and `SelfCheck` genuinely does log
+  `"Watchdog: recording stalled, giving up"` at error level — **yet nothing was retrievable**.
+  Queried by subsystem (both bundle ids), by process, with `--info --debug`, and by a broad grep over
+  30 minutes of the unified log: empty. Why is unknown and must be established first — a logging
+  mechanism that does not produce a record is worse than none, because it looks like it works.
+- `AppInfo.bundleID` is a **hardcoded** `"dev.personal.acta"` used as the `Logger` subsystem, so both
+  flavors log under the same subsystem and cannot be told apart. (It is used *only* for logging —
+  identity itself comes from `Info.plist`, so the flavor split is not otherwise affected.)
+- The record lives in the **system log store**, which rotates, rather than next to the recording it
+  describes.
+
+For an app whose entire value is fault tolerance, an uninvestigable failure is nearly as bad as a
+lost one. Required: a **durable event journal in the recording folder itself** (e.g. `events.log`
+beside the audio) recording every lifecycle transition with timestamps — start, stall, restart,
+stop and its reason, assembly, recovery. Local, private, sits with the audio it explains, survives
+app restarts and log rotation. This is the persisted form of the `ControlAPI` event/trace stream
+already designed in the parked harness work — build them as one thing, not two.
+
+Also: lifecycle events must be logged at a **persisted** level, not `.info`; and the subsystem must
+come from the real bundle identifier so the two flavors are distinguishable.
+
+---
+
 ## Round 4 review findings — apply these when promoting the relevant item
 
 These are real defects found in the parked text below. They are **not fixed** in it.
