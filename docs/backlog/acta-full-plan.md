@@ -29,6 +29,34 @@
 
 ---
 
+## Parked: external transport for the control API (agterm-style automation)
+
+Requested by the user while re-planning: make Acta drivable by agents and automation, the way
+`agtermctl` drives agterm.
+
+**Most of this is already in the core**, because it turned out cheaper to build than to avoid: core
+Task 11 builds the in-process `ControlAPI` — one façade, `Codable` commands and results, an
+event/trace stream, typed error categories, an API version field, UI as just a client. It earns its
+place there by *replacing* test scaffolding: the harness's scenario file becomes a list of commands,
+and the event stream is the state trace the characterization contract needs.
+
+**What is parked here is only the out-of-process transport** — new surface with no testing payoff:
+
+- A **Unix domain socket** in the user's directory (mode `0600`, never a network listener), JSON
+  lines; hosted by the menu-bar app. Listener lifecycle, concurrency and error handling.
+- A thin CLI (`actactl`) speaking to the running app — a third client of the same façade, after the
+  UI and the harness.
+- **Launch semantics**: if the app is not running, does the CLI start it? What happens to a TCC
+  prompt raised by a recording started with no user in front of the screen?
+- **Compatibility rules** for the version field the core already records.
+
+⚠️ **Privacy constraint to carry over:** anything able to invoke `start` can record the user. The
+socket's file permissions are the entire trust boundary — there is no auth beyond them, which is why
+a network listener is out. The core's invariant already applies: an API-initiated recording is never
+silent and always shows visible state; there is no "quiet mode".
+
+---
+
 # Plan: Acta — fault-tolerant online meeting recorder (macOS)
 
 ## Overview
