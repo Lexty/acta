@@ -165,3 +165,60 @@ Decided behaviour (agreed with the user):
 - [ ] Unit tests for `MicActivity` (pure): blip < 5 s → no prompt; sustained ≥ 5 s → exactly one prompt; still active → no second prompt; idle then active again → prompts again; ignored bundle → no prompt; Acta's own PID → no prompt
 - [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
 - [ ] Acceptance (manual, needs a human): start a Slack/Meet call → within ~5 s a notification with a "Start Recording" button appears naming the app; pressing it starts a recording; no second notification for the same call; Siri or a 1–2 s mic blip produces no notification; starting a recording from the menu bar does not trigger a self-prompt
+
+### Task 11: Attach calendar event data to the recording
+
+Problem this solves: a recording is currently identified by "Slack — 2026-07-15 18:28". If the
+meeting is in the calendar, the archive should carry the real thing — title, agenda, participants —
+so it is searchable and worth returning to. This is the metadata the whole archive idea rests on.
+
+Read the `.claude/skills/eventkit-calendar` skill first — it holds the verified API facts and the
+macOS 14+ authorization trap. **Do not invent EventKit API — check the docs.**
+
+Design:
+- **Drift between the calendar and reality is the norm, not the exception** — the matcher must
+  tolerate it. Real cases that must all work:
+  - the call is at 15:00, you join and hit record at 15:08 (started late);
+  - you hit record at 14:50, before the scheduled start (started early);
+  - the 15:00–15:30 meeting actually ran 15:35–16:05, so at record time the calendar event has
+    **already ended** and there is no overlap at all;
+  - you start recording 40 minutes into a long meeting.
+  A naive "event covering the recording start" rule fails cases 2 and 3.
+- **Two-phase matching.** The folder is created at start, so a provisional match is needed then; the
+  full picture only exists at stop. Do a provisional match at start (for the title/folder) and
+  **re-match at stop** over the full recording interval to finalise `info.md`. Do **not** rename the
+  folder afterwards — record the final event in `info.md` instead.
+- **Graceful degradation is mandatory**: no permission, no calendar, or no match → record exactly as
+  today, just without calendar metadata. Calendar access is never a precondition for recording.
+- The event title becomes the recording title **only when the user did not type one** (an explicit
+  title always wins). This also improves the folder slug.
+- Keep matching **pure** in `ActaKit`; EventKit I/O stays in `Acta`.
+
+- [ ] `Resources/Info.plist`: add **`NSCalendarsFullAccessUsageDescription`** (English, per convention; macOS shows it verbatim). Without this key TCC refuses before EventKit is reached and no prompt ever appears
+- [ ] `CalendarService.swift` (in `Acta`): `requestFullAccessToEvents()`, status `.fullAccess`; fetch events via `predicateForEvents(withStart:end:calendars:)` over a **widened** window (recording interval expanded by the drift tolerance on both sides — note the predicate returns events *overlapping* the range, not only those starting in it). Never block or fail a recording on calendar errors
+- [ ] Pure `CalendarMatch` in `ActaKit`: given plain structs (title, start, end, isAllDay, currentUserStatus, …) + the recording interval → best match, **tolerant of calendar/reality drift**. Tiered rules, applied in order:
+  1. **Maximum overlap** with the recording interval wins (handles joining late and recording the middle of a long meeting);
+  2. no overlap at all → **nearest event by start time** within the drift tolerance (handles recording before the scheduled start, and a meeting that ran so late the event had already ended);
+  3. nothing within tolerance → **no match** (and the recording proceeds normally).
+  Always: **exclude/de-prioritise all-day events** (otherwise every recording matches "Vacation"); de-prioritise events the current user declined; break ties deterministically (shortest event, then earliest start, then `event_id`) — never arbitrary
+- [ ] Extend `MeetingInfo` (ActaKit) + `info.md`: front-matter gains `event_title`, `event_start`, `event_end`, `organizer`, `attendees` (list), `location`, `calendar`, `event_url`, `event_id`; the event **notes/agenda** go into the `info.md` body under a heading (they can be long and multi-line — front-matter is the wrong place). Keep the existing YAML escaping rules
+- [ ] Attendees: take `name` from `EKParticipant`; for the email use the `mailto:` `url` — **verify against the SDK** whether a public `emailAddress` exists before using it. Mark the current user via `isCurrentUser`
+- [ ] Title: use the matched event title when the user left the title empty; an explicitly typed title always wins. Feed the same value to `MeetingArchive.slug` for the folder name
+- [ ] Settings: master toggle for calendar lookup (default on) + **drift tolerance in minutes** (default 15; this is the knob for how far the calendar may disagree with reality); extend `RecordingSettings` (Codable + normalisation, clamp to a sane range) and the Settings section
+- [ ] Never log event notes — they routinely contain join links and passcodes (they stay local, but must not leak into `os.Logger`)
+- [ ] Unit tests for `CalendarMatch` (pure, no calendar needed) — **the drift cases are the point**:
+  - recording fully inside the event (joined on time) → matched;
+  - recording starts 8 min after the event start (joined late) → matched by overlap;
+  - recording starts 10 min **before** the event start, no overlap yet → matched by nearest-start within tolerance;
+  - event 15:00–15:30 but recording 15:35–16:05 (meeting ran late, **zero overlap, event already ended**) → matched by nearest-start within tolerance;
+  - same but the recording starts 2 h later → **no match**;
+  - recording covers the middle of a long meeting → matched by overlap;
+  - two overlapping events → the one with the larger overlap wins; equal overlap → deterministic tie-break;
+  - all-day event alongside a real one → the real one wins; all-day only → no match;
+  - declined event de-prioritised;
+  - nothing within tolerance → no match, recording still proceeds
+- [ ] Acceptance: `swift build -c release`, `bash Scripts/test.sh`, `bash Scripts/lint.sh`, `bash Scripts/bundle.sh` all green
+- [ ] Acceptance (manual, needs a human): with a real meeting in the calendar, start a recording → `info.md` front-matter carries the event title/participants/organizer and the agenda appears in the body; the folder is named after the event. **Drift check:** start a recording ~10 min after the scheduled start and confirm the event is still matched. **Degradation check:** deny Calendar access → recording proceeds normally, no calendar fields, no crash
+
+Synergy with Task 10: once this lands, the mic-activity notification can name the meeting
+("Record 'Weekly sync'?") instead of just the app. Wire it up if both tasks are done.
