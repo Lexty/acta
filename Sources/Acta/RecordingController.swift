@@ -20,7 +20,10 @@ final class RecordingController: ObservableObject {
     }
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingController")
-    private let store: MeetingStore
+    private let settingsStore: SettingsStore
+
+    /// Текущие настройки записи (редактируются в секции «Настройки», сохраняются при изменении).
+    @Published var settings: RecordingSettings
 
     /// Текущая фаза (idle/recording/error).
     @Published private(set) var phase: Phase = .idle
@@ -43,12 +46,28 @@ final class RecordingController: ObservableObject {
     private var startedAt: Date?
     private var timerTask: Task<Void, Never>?
 
-    init(store: MeetingStore = MeetingStore()) {
-        self.store = store
+    init(settingsStore: SettingsStore = SettingsStore()) {
+        self.settingsStore = settingsStore
+        self.settings = settingsStore.load()
     }
 
     /// Идёт ли запись прямо сейчас.
     var isRecording: Bool { phase == .recording }
+
+    /// Хранилище записей для текущего пути архива из настроек. Читается на каждом обращении, чтобы
+    /// смена пути в настройках подхватывалась без перезапуска (Task 7).
+    private var store: MeetingStore {
+        MeetingStore(archiveRoot: settingsStore.archiveRoot(for: settings))
+    }
+
+    /// Корень архива для текущих настроек (кнопка «Открыть архив» в UI).
+    var archiveRoot: URL { settingsStore.archiveRoot(for: settings) }
+
+    /// Сохранить настройки после редактирования в UI (нормализуются перед записью на диск).
+    func saveSettings() {
+        settings = settings.normalized()
+        settingsStore.save(settings)
+    }
 
     /// Форматированное прошедшее время `HH:MM:SS` для таймера в UI.
     var elapsedString: String { MeetingInfo.formatDuration(seconds: elapsedSeconds) }
@@ -101,9 +120,13 @@ final class RecordingController: ObservableObject {
 
     private func performStart(title: String, source: String) async {
         do {
-            let directory = try store.createMeetingDirectory(title: title)
+            // Снимок настроек на момент старта: смена пути архива/длины сегмента подхватывается
+            // именно новой записью (Task 7), а текущая идёт со своими параметрами до конца.
+            let currentSettings = settings.normalized()
+            let directory = try MeetingStore(archiveRoot: settingsStore.archiveRoot(for: currentSettings))
+                .createMeetingDirectory(title: title)
             let startedAt = Date()
-            let session = RecordingSession(directory: directory)
+            let session = RecordingSession(directory: directory, settings: currentSettings)
             // Пишем предварительный info.md (recording): если процесс убьют, у папки уже есть
             // метаданные; на чистом стопе перезапишем со статусом done и длительностью.
             try? store.writeInfo(

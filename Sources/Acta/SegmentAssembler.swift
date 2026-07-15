@@ -31,26 +31,49 @@ struct SegmentAssembler {
     /// - Parameters:
     ///   - directory: папка записи (содержит `system/`, `mic/`).
     ///   - deleteSegments: удалить каталоги сегментов после успешной склейки.
+    ///   - tracks: какие итоговые дорожки сохранить (настройка Task 7). `combined` требует обеих
+    ///     дорожек, поэтому промежуточные `system.wav`/`mic.wav` собираются и при снятом флаге
+    ///     дорожки, если нужен микс, и затем удаляются.
     @discardableResult
-    func assemble(in directory: URL, deleteSegments: Bool) throws -> Result {
+    func assemble(in directory: URL, deleteSegments: Bool,
+                  tracks: RecordingSettings.TrackSelection = .init(system: true, mic: true, combined: true)
+    ) throws -> Result {
         guard let ffmpeg = Self.locateFFmpeg() else { throw AssembleError.ffmpegNotFound }
 
-        let systemWAV = try concatTrack(dirName: SegmentLayout.systemDirName,
-                                        outputName: "system.wav", in: directory, ffmpeg: ffmpeg)
-        let micWAV = try concatTrack(dirName: SegmentLayout.micDirName,
-                                     outputName: "mic.wav", in: directory, ffmpeg: ffmpeg)
+        // combined = микс двух дорожек, поэтому исходные wav нужны, даже если сама дорожка не сохраняется.
+        let needSystem = tracks.system || tracks.combined
+        let needMic = tracks.mic || tracks.combined
+
+        let systemWAV = needSystem
+            ? try concatTrack(dirName: SegmentLayout.systemDirName,
+                              outputName: "system.wav", in: directory, ffmpeg: ffmpeg)
+            : nil
+        let micWAV = needMic
+            ? try concatTrack(dirName: SegmentLayout.micDirName,
+                              outputName: "mic.wav", in: directory, ffmpeg: ffmpeg)
+            : nil
 
         guard systemWAV != nil || micWAV != nil else { throw AssembleError.noSegments }
 
         var result = Result(systemWAV: systemWAV, micWAV: micWAV, combinedWAV: nil)
 
-        if let systemWAV, let micWAV {
+        if tracks.combined, let systemWAV, let micWAV {
             let combined = directory.appendingPathComponent("combined.wav")
             let args = FFmpeg.mixArgs(systemPath: systemWAV.path, micPath: micWAV.path,
                                       outputPath: combined.path)
             if runFFmpeg(ffmpeg, args: args) {
                 result.combinedWAV = combined
             }
+        }
+
+        // Убрать промежуточные дорожки, которые пользователь не просил сохранять.
+        if !tracks.system, let systemWAV {
+            try? fileManager.removeItem(at: systemWAV)
+            result.systemWAV = nil
+        }
+        if !tracks.mic, let micWAV {
+            try? fileManager.removeItem(at: micWAV)
+            result.micWAV = nil
         }
 
         if deleteSegments {

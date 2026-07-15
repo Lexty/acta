@@ -18,6 +18,7 @@ final class RecordingSession: @unchecked Sendable {
     let directory: URL
 
     private let log = Logger(subsystem: AppInfo.bundleID, category: "RecordingSession")
+    private let settings: RecordingSettings
     private let segmentSeconds: Int
     private let recorder: AudioRecorder
     private let selfCheck: SelfCheck
@@ -25,10 +26,12 @@ final class RecordingSession: @unchecked Sendable {
     private let assembler = SegmentAssembler()
     private var watchdogTask: Task<Void, Never>?
 
-    init(directory: URL, segmentSeconds: Int = SegmentLayout.defaultSegmentSeconds) {
+    init(directory: URL, settings: RecordingSettings = .default) {
         self.directory = directory
-        self.segmentSeconds = segmentSeconds
-        let recorder = AudioRecorder(directory: directory, segmentSeconds: Double(segmentSeconds))
+        let settings = settings.normalized()
+        self.settings = settings
+        self.segmentSeconds = settings.segmentSeconds
+        let recorder = AudioRecorder(directory: directory, segmentSeconds: Double(settings.segmentSeconds))
         self.recorder = recorder
         self.selfCheck = SelfCheck(recorder: recorder)
     }
@@ -55,11 +58,10 @@ final class RecordingSession: @unchecked Sendable {
         log.info("Сессия записи начата: \(self.directory.lastPathComponent, privacy: .public)")
     }
 
-    /// Чистый стоп: остановить захват, склеить сегменты, пометить маркер `done`.
-    ///
-    /// - Parameter deleteSegments: удалять ли каталоги сегментов после успешной склейки.
+    /// Чистый стоп: остановить захват, склеить сегменты (по выбору дорожек из настроек), пометить
+    /// маркер `done`. Удаление сегментов после склейки — тоже из настроек (`deleteSegmentsAfterAssembly`).
     @discardableResult
-    func stop(deleteSegments: Bool = true) async -> SegmentAssembler.Result? {
+    func stop() async -> SegmentAssembler.Result? {
         watchdogTask?.cancel()
         watchdogTask = nil
         await recorder.stop()
@@ -72,7 +74,9 @@ final class RecordingSession: @unchecked Sendable {
 
         var result: SegmentAssembler.Result?
         do {
-            result = try assembler.assemble(in: directory, deleteSegments: deleteSegments)
+            result = try assembler.assemble(in: directory,
+                                            deleteSegments: settings.deleteSegmentsAfterAssembly,
+                                            tracks: settings.trackSelection)
             manifest.status = .done
         } catch {
             // Склейка не удалась (нет ffmpeg / нет сегментов). Оставляем маркер как есть, чтобы

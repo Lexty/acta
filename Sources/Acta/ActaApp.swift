@@ -39,6 +39,7 @@ struct UnsupportedContent: View {
 @available(macOS 15.0, *)
 struct MenuContent: View {
     @StateObject private var controller = RecordingController()
+    @State private var settingsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -61,8 +62,11 @@ struct MenuContent: View {
             recordingsList
 
             Divider()
+            settingsSection
+
+            Divider()
             HStack {
-                Button("Открыть архив") { controller.openInFinder(MeetingStore.defaultArchiveRoot()) }
+                Button("Открыть архив") { controller.openInFinder(controller.archiveRoot) }
                 Spacer()
                 Button("Выход") { NSApplication.shared.terminate(nil) }
             }
@@ -156,6 +160,45 @@ struct MenuContent: View {
             }
             .buttonStyle(.borderless)
             .help("Открыть папку в Finder")
+        }
+    }
+
+    // MARK: - Настройки
+
+    private var settingsSection: some View {
+        DisclosureGroup(isExpanded: $settingsExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Папка архива").font(.caption2).foregroundStyle(.secondary)
+                    TextField("~/Acta", text: $controller.settings.archivePath)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Сохранять дорожки").font(.caption2).foregroundStyle(.secondary)
+                    Toggle("Системный звук (system.wav)", isOn: $controller.settings.saveSystemTrack)
+                    Toggle("Микрофон (mic.wav)", isOn: $controller.settings.saveMicTrack)
+                    Toggle("Микс (combined.wav)", isOn: $controller.settings.saveCombinedTrack)
+                }
+                .toggleStyle(.checkbox)
+                .font(.caption)
+
+                Stepper(value: $controller.settings.segmentSeconds,
+                        in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
+                        step: 5) {
+                    Text("Длина сегмента: \(controller.settings.segmentSeconds) с").font(.caption)
+                }
+
+                Toggle("Удалять сегменты после склейки",
+                       isOn: $controller.settings.deleteSegmentsAfterAssembly)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+            }
+            .padding(.top, 6)
+            .disabled(controller.isRecording)
+            .onChange(of: controller.settings) { controller.saveSettings() }
+        } label: {
+            Label("Настройки", systemImage: "gearshape").font(.caption)
         }
     }
 
