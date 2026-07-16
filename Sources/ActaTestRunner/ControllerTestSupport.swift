@@ -30,9 +30,6 @@ final class ControllerHarness {
     let wakeLock: CountingWakeLock
     let controller: RecordingController
 
-    private let suiteName: String
-    private let defaults: UserDefaults
-
     init(label: String, permissions: FakePermissions = FakePermissions()) {
         // Bound to locals first: the session factory below is a closure, and `self` cannot be
         // captured until every stored property is initialized — `controller` is the last of them.
@@ -45,11 +42,12 @@ final class ControllerHarness {
         self.wakeLock = wakeLock
         self.root = root
 
-        // An isolated defaults suite: the settings are real `SettingsStore` state, and writing them
-        // into `.standard` would point the developer's own app at a temp archive.
-        suiteName = "acta-controller-\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)!
-        let settingsStore = SettingsStore(defaults: defaults)
+        // Isolated defaults: the settings are real `SettingsStore` state, and writing them into
+        // `.standard` would point the developer's own app at a temp archive. Volatile rather than a
+        // named suite — a suite is a persistent domain whose file `cfprefsd` writes on its own
+        // schedule, so the `removePersistentDomain` that used to stand here raced the daemon and lost;
+        // see `VolatileDefaults`.
+        let settingsStore = SettingsStore(defaults: VolatileDefaults.make())
         settingsStore.save(RecordingSettings(archivePath: root.path,
                                              segmentSeconds: testSegmentSeconds,
                                              deleteSegmentsAfterAssembly: false))
@@ -76,10 +74,10 @@ final class ControllerHarness {
         return root.appendingPathComponent(folders[0], isDirectory: true)
     }
 
-    /// Not a `deinit`: the archive and the defaults suite must be gone before the next scenario runs,
-    /// and a `deinit` on a `@MainActor` type is not a point in the test's own timeline.
+    /// Not a `deinit`: the archive must be gone before the next scenario runs, and a `deinit` on a
+    /// `@MainActor` type is not a point in the test's own timeline. The defaults need no teardown —
+    /// they were never on disk.
     func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: root)
     }
 }

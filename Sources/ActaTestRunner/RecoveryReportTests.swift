@@ -9,16 +9,19 @@ import ActaKit
 /// dismiss the one that matters.
 @Test
 func recoveryReportSaysNothingWhenThePassChangedNothing() {
-    #expect(RecoveryReport.message(recovered: 0, partial: 0, unassembled: 0, retrying: 0, lost: 0) == nil)
+    #expect(RecoveryReport.message(.init(recovered: 0, partial: 0, unassembled: 0, retrying: 0, lost: 0,
+                                   unscannable: false)) == nil)
 }
 
 @Test
 func recoveryReportAnnouncesRecoveredFolders() throws {
-    let one = try #require(RecoveryReport.message(recovered: 1, partial: 0, unassembled: 0, retrying: 0, lost: 0))
+    let one = try #require(RecoveryReport.message(.init(recovered: 1, partial: 0, unassembled: 0,
+                                                  retrying: 0, lost: 0, unscannable: false)))
     #expect(one.title == "Recordings recovered")
     #expect(one.body == "Recovered 1 interrupted recording.")
 
-    let many = try #require(RecoveryReport.message(recovered: 3, partial: 0, unassembled: 0, retrying: 0, lost: 0))
+    let many = try #require(RecoveryReport.message(.init(recovered: 3, partial: 0, unassembled: 0,
+                                                   retrying: 0, lost: 0, unscannable: false)))
     #expect(many.body.contains("3"))
 }
 
@@ -27,7 +30,8 @@ func recoveryReportAnnouncesRecoveredFolders() throws {
 /// it into the recovered count and let "Recovered 1 interrupted recording" be the last word on it.
 @Test
 func recoveryReportDoesNotCallAPartiallyRecoveredFolderRecovered() throws {
-    let message = try #require(RecoveryReport.message(recovered: 0, partial: 1, unassembled: 0, retrying: 0, lost: 0))
+    let message = try #require(RecoveryReport.message(.init(recovered: 0, partial: 1, unassembled: 0,
+                                                      retrying: 0, lost: 0, unscannable: false)))
 
     #expect(message.title == "Recordings partially recovered")
     #expect(message.body.contains("in part"))
@@ -40,7 +44,8 @@ func recoveryReportDoesNotCallAPartiallyRecoveredFolderRecovered() throws {
 /// call that a recovery — nor stay silent, since the marker is terminal and nothing will retry it.
 @Test
 func recoveryReportDoesNotCallAnUnassembledFolderRecovered() throws {
-    let message = try #require(RecoveryReport.message(recovered: 0, partial: 0, unassembled: 1, retrying: 0, lost: 0))
+    let message = try #require(RecoveryReport.message(.init(recovered: 0, partial: 0, unassembled: 1,
+                                                      retrying: 0, lost: 0, unscannable: false)))
 
     #expect(message.title == "Recordings could not be assembled")
     #expect(!message.body.contains("Recovered"))
@@ -53,7 +58,8 @@ func recoveryReportDoesNotCallAnUnassembledFolderRecovered() throws {
 /// hide it behind good news.
 @Test
 func recoveryReportReportsEveryOutcomeOfAMixedPass() throws {
-    let message = try #require(RecoveryReport.message(recovered: 2, partial: 1, unassembled: 1, retrying: 0, lost: 0))
+    let message = try #require(RecoveryReport.message(.init(recovered: 2, partial: 1, unassembled: 1,
+                                                      retrying: 0, lost: 0, unscannable: false)))
 
     #expect(message.body.contains("2"))
     #expect(message.body.contains("in part"))
@@ -68,8 +74,8 @@ func recoveryReportReportsEveryOutcomeOfAMixedPass() throws {
 /// told the meeting is gone.
 @Test
 func recoveryReportAnnouncesALostRecordingRatherThanSayingNothing() throws {
-    let message = try #require(RecoveryReport.message(recovered: 0, partial: 0, unassembled: 0,
-                                                      retrying: 0, lost: 1))
+    let message = try #require(RecoveryReport.message(.init(recovered: 0, partial: 0, unassembled: 0,
+                                                      retrying: 0, lost: 1, unscannable: false)))
 
     #expect(message.title == "Recordings lost")
     #expect(message.body.contains("lost"))
@@ -83,8 +89,8 @@ func recoveryReportAnnouncesALostRecordingRatherThanSayingNothing() throws {
 /// user could apply in one command.
 @Test
 func recoveryReportPointsADeferredRecoveryAtFfmpeg() throws {
-    let message = try #require(RecoveryReport.message(recovered: 0, partial: 0, unassembled: 0,
-                                                      retrying: 1, lost: 0))
+    let message = try #require(RecoveryReport.message(.init(recovered: 0, partial: 0, unassembled: 0,
+                                                      retrying: 1, lost: 0, unscannable: false)))
 
     // Not terminal, so it must not be worded as a give-up.
     #expect(message.title == "Recovery will retry")
@@ -97,11 +103,30 @@ func recoveryReportPointsADeferredRecoveryAtFfmpeg() throws {
 /// outcome reached — but the body carries both. Folding the loss away entirely is the failure mode.
 @Test
 func recoveryReportCarriesALossThroughAMixedPass() throws {
-    let message = try #require(RecoveryReport.message(recovered: 1, partial: 0, unassembled: 0,
-                                                      retrying: 1, lost: 1))
+    let message = try #require(RecoveryReport.message(.init(recovered: 1, partial: 0, unassembled: 0,
+                                                      retrying: 1, lost: 1, unscannable: false)))
 
     #expect(message.title == "Recordings recovered")
     #expect(message.body.contains("Recovered 1 interrupted recording."))
     #expect(message.body.contains("lost"))
     #expect(message.body.contains("brew install ffmpeg"))
+}
+
+/// A pass that could not read the archive at all. Every count is zero — not because the archive is
+/// clean, but because nothing was looked at — so the empty-pass silence above would be the pass
+/// vouching for meetings it never saw. It must speak, and it must not borrow another outcome's
+/// wording: nothing here is lost, deferred, or recovered, and each of those would send the user after
+/// something that has not been established.
+@Test
+func recoveryReportAnnouncesAnArchiveItCouldNotRead() throws {
+    let message = try #require(RecoveryReport.message(.init(recovered: 0, partial: 0, unassembled: 0,
+                                                      retrying: 0, lost: 0, unscannable: true)))
+
+    #expect(message.title == "Recordings folder unreadable")
+    // Says what to check: the cause is outside the app, so the user is the only one who can fix it.
+    #expect(message.body.contains("could not be read"))
+    // It must not claim a loss it never established, nor promise a retry it cannot make.
+    #expect(!message.body.contains("lost"))
+    #expect(!message.body.contains("Recovered"))
+    #expect(!message.body.contains("brew install ffmpeg"))
 }

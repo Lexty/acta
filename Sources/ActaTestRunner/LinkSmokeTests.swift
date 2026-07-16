@@ -68,13 +68,10 @@ func recoveryManagerIsReachableFromTests() {
 @MainActor
 @available(macOS 15.0, *)
 func recordingControllerIsReachableFromTests() {
-    // A fresh `UserDefaults` suite rather than `.standard`: the runner must not read or write the
-    // real app's saved settings.
-    let suite = "dev.personal.acta.tests.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    defer { defaults.removePersistentDomain(forName: suite) }
-
-    let controller = RecordingController(settingsStore: SettingsStore(defaults: defaults))
+    // Volatile defaults rather than `.standard`: the runner must not read or write the real app's
+    // saved settings — and rather than a named suite, which no teardown can reliably remove (see
+    // `VolatileDefaults`).
+    let controller = RecordingController(settingsStore: SettingsStore(defaults: VolatileDefaults.make()))
     #expect(controller.phase == .idle)
     #expect(!controller.isRecording)
     #expect(!controller.isBusy)

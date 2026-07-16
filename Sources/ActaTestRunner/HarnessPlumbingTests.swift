@@ -87,6 +87,27 @@ extension HarnessTests {
                     == Harness.Fault(frames: Harness.Fault.maxFrames - 1, bufferIndex: 1))
         }
 
+        /// The same rule one flag over. Recover mode drives no capture, so a fault asked of it is a
+        /// fault nothing will ever inject — and returning a plain `.recover` after reading past the
+        /// option is the silent drop the test above exists to forbid, in the one place the grammar
+        /// could still allow it.
+        @Test("A fault handed to recover mode is malformed, not quietly ignored")
+        func recoverModeRejectsAFaultItCouldNeverInject() {
+            #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.recoverFlag,
+                                                   Harness.rootOption, "/tmp/x",
+                                                   Harness.dropOption, "4096@1"])
+                    == .malformed("\(Harness.recoverFlag) does not take \(Harness.dropOption)"))
+            // Rejected for being present at all, not for being unparseable: a well-formed fault is
+            // no more injectable here than a broken one.
+            #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.recoverFlag,
+                                                   Harness.rootOption, "/tmp/x", Harness.dropOption])
+                    == .malformed("\(Harness.recoverFlag) does not take \(Harness.dropOption)"))
+            // And the mode itself still parses when nothing asks for a fault.
+            #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.recoverFlag,
+                                                   Harness.rootOption, "/tmp/x"])
+                    == .harness(.recover(root: URL(fileURLWithPath: "/tmp/x", isDirectory: true))))
+        }
+
         /// A harness flag the parser cannot honour must not become a test run. Falling through would put
         /// the suite inside the child — and the suite spawns children.
         @Test("A harness flag with no root is a malformed invocation, not a test run")

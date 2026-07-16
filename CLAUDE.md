@@ -120,19 +120,31 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
 `RecordingController.awaitRecovery()` (`RecordingController+Recovery.swift`) is a **completion** seam,
 not an injection point — it returns the verdict of the pass `onLaunch()` already started
 (`RecoveryOutcome`: `.nothingToRecover` / `.recovered(count:)` /
-`.incomplete(partial:unassembled:retrying:lost:)`).
+`.incomplete(partial:unassembled:retrying:lost:)` / `.scanFailed`).
 The disk cannot answer that question: a pass still running and a pass that finished but could not
 assemble both leave `session.json` at `recording`, so polling can only bound the ambiguity, never
 resolve it — and the crash harness's recoverer has to tell "recovery worked" from "recovery gave up"
 to have proved anything. The verdict rides on `recoveryTask`'s own value, which is why that property
 is `internal` rather than `private` and why `didRunRecovery` is gone: the task's existence *is* that
-fact. Relatedly, `RecoveryManager.Outcome` has **five** lists, not three, and the last two exist for
-one reason: a folder the pass acted on that lands in no list is reported as an archive with nothing
-to recover — the opposite answer. `retrying` holds folders left interrupted for a later launch (a
-spent repair attempt, or no `ffmpeg`); it is not terminal, the marker still says `recording`.
-`lost` holds folders closed because the crash left no salvageable segment — terminal, and total data
-loss, which must never come back as success. `isEmpty` counts both, and either makes the verdict
-`.incomplete`.
+fact. Relatedly, `RecoveryManager.Outcome` (`RecoveryManager+Outcome.swift`) has **five** lists, not
+three, and the last two exist for one reason: a folder the pass acted on that lands in no list is
+reported as an archive with nothing to recover — the opposite answer. `retrying` holds folders left
+interrupted for a later launch (a spent repair attempt, or no `ffmpeg`); it is not terminal, the
+marker still says `recording`. `lost` holds folders closed because the crash left no salvageable
+segment — terminal, and total data loss, which must never come back as success. `isEmpty` counts both,
+and either makes the verdict `.incomplete`.
+
+**A sixth signal, `unscannable`, is not a list**, and it closes the same ambiguity one level up: the
+scan's *own* failure. An archive root on an unmounted volume or behind a lost permission fails
+`contentsOfDirectory`, and returning the empty `Outcome` for that is the pass vouching for every
+meeting at the one moment it checked none — `.nothingToRecover`, exit `0`, no banner. It maps to its
+own verdict (`.scanFailed`, `Exit.recoveryScanFailed` = 73) and its own sentence, because "I could not
+look" is not "there was nothing to find". A root that **does not exist** is deliberately not this: that
+is an ordinary first launch, and reporting it would put a banner in front of every new user — the
+distinction is existence, not readability. Both readings of a pass go through
+`RecoveryReport.Counts`, whose `init` defaults nothing: a field added to `Outcome` and forgotten in
+either reading fails to compile instead of going quiet, which is how `retrying` and `lost` once
+reached the log while the other three reached the user.
 
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).
@@ -205,6 +217,15 @@ loss, which must never come back as success. `isEmpty` counts both, and either m
   gate, a draining `stop()`. A guarantee the fake makes and `SCKCaptureSource` does not is a bug in
   the fake. Where the real source cannot answer (it needs a live `SCStream`), **skip visibly** with
   `.enabled(if:)` — a bare `return` reports as a pass and hides that nothing ran.
+  **A test that needs settings uses `VolatileDefaults.make()`, never `UserDefaults(suiteName:)`.**
+  `.standard` would point the developer's own app at a temp archive, but a *named suite* is a
+  persistent domain: it mints `~/Library/Preferences/<name>.plist`, and `cfprefsd` — not the process —
+  decides when that file is written. So `removePersistentDomain` at teardown races the daemon and
+  loses, and a unique suite per run leaks a file per run: that is not hypothetical, it left ~2 700 of
+  them in the home directory before `VolatileDefaults` replaced it (and `SIGKILL`, which the crash
+  harness depends on, runs no teardown at all). Nothing needs the persistence — settings are read back
+  by the process that wrote them, and the harness's two processes agree on the archive through
+  `--root`.
 - **Two confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
   ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
   `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,

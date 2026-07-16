@@ -12,7 +12,8 @@ import Testing
 
 @available(macOS 15.0, *)
 private func outcome(recovered: Int = 0, partial: Int = 0, unassembled: Int = 0,
-                     retrying: Int = 0, lost: Int = 0) -> RecoveryManager.Outcome {
+                     retrying: Int = 0, lost: Int = 0,
+                     unscannable: Bool = false) -> RecoveryManager.Outcome {
     func urls(_ count: Int, _ label: String) -> [URL] {
         (0..<count).map { URL(fileURLWithPath: "/tmp/\(label)-\($0)", isDirectory: true) }
     }
@@ -20,7 +21,8 @@ private func outcome(recovered: Int = 0, partial: Int = 0, unassembled: Int = 0,
                                    partial: urls(partial, "partial"),
                                    unassembled: urls(unassembled, "unassembled"),
                                    retrying: urls(retrying, "retrying"),
-                                   lost: urls(lost, "lost"))
+                                   lost: urls(lost, "lost"),
+                                   unscannable: unscannable)
 }
 
 /// A pass that did nothing and a pass that could do nothing are opposite answers, and the exit code
@@ -76,4 +78,20 @@ func aDeferredFolderIsIncompleteNotRecovered() {
             == .incomplete(partial: 0, unassembled: 0, retrying: 1, lost: 0))
     #expect(RecordingController.RecoveryOutcome(outcome(recovered: 3, retrying: 1))
             == .incomplete(partial: 0, unassembled: 0, retrying: 1, lost: 0))
+}
+
+/// The pass that never looked. Its five lists are empty for the opposite reason an untouched
+/// archive's are, and reading them at face value is the pass swearing every meeting is fine at the
+/// one moment it could not check a single one — an unmounted volume, a folder the app cannot open.
+/// `.nothingToRecover` exits zero, so without this the recoverer reports success over an archive it
+/// could not read.
+@Test("A pass that could not read the archive is not a pass that found nothing")
+@available(macOS 15.0, *)
+func anUnscannableArchiveIsNotAnEmptyPass() {
+    #expect(RecordingController.RecoveryOutcome(outcome(unscannable: true)) == .scanFailed)
+    #expect(!outcome(unscannable: true).isEmpty)
+    // And it outranks the lists rather than being outranked by them: a pass that read some of the
+    // archive and failed on the rest has still not established anything about what it missed.
+    #expect(RecordingController.RecoveryOutcome(outcome(recovered: 2, unscannable: true))
+            == .scanFailed)
 }

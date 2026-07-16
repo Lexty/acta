@@ -190,7 +190,13 @@ enum PositionEncodedAudio {
         /// channel is a real shift. Without this, a single corrupted sample that landed a multiple of
         /// the stride away would be misreported as a clean loss.
         private func shiftHolds(from frame: Int, by shift: Int) -> Bool {
-            let end = min(frame + confirmationFrames, frameCount)
+            // Not `min(..., frameCount)`: a window the file is too short to fill confirms less than
+            // the function promises, and at the very last frame it would confirm on one position —
+            // the "one position agreeing is arithmetic" case this exists to reject. Refusing an
+            // unconfirmable shift falls back to `wrongValue`, which is the honest answer where a
+            // repaired tail lives and a shift cannot be told from corruption.
+            let end = frame + confirmationFrames
+            guard end <= frameCount else { return false }
             for f in frame..<end {
                 for channel in 0..<layout.format.channels
                 where value(frame: f, channel: channel)
@@ -216,7 +222,13 @@ enum PositionEncodedAudio {
 
     /// The multiplicative inverse of the track's stride mod 2^16 — what turns a value delta back
     /// into a frame delta. `3 * 43691 == 1` and `5 * 52429 == 1`, both mod 2^16.
-    private static func strideInverse(for track: Track) -> Int {
+    ///
+    /// A table, so it is only right for the strides above — and internal rather than private for that
+    /// reason: `strideAndItsInverseAreActuallyInverses` is what ties the two together. Retune a stride
+    /// without retuning this and `classify` derives a wrong shift, `shiftHolds` rejects it, and every
+    /// real loss reports as `wrongValue` — the crash test still passes and only the negative control
+    /// fails, blaming the oracle for a stale constant.
+    static func strideInverse(for track: Track) -> Int {
         switch track {
         case .system: return 43_691
         case .mic: return 52_429

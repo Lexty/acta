@@ -153,26 +153,14 @@ final class HarnessProcess {
     /// It waits for nothing, which is what lets it be a `defer` in an async test: `SIGKILL` needs no
     /// reaping from here — Foundation reaps its own children — and the temp directory is not
     /// something a dying process can hold on to.
+    ///
+    /// There is no defaults suite to remove: the child records through `VolatileDefaults`, which
+    /// writes nothing. This used to delete a plist per run and lose the race against `cfprefsd` more
+    /// often than it won it — see `VolatileDefaults`.
     func tearDown() {
         if process.isRunning { kill() }
         stderr.fileHandleForReading.readabilityHandler = nil
         try? FileManager.default.removeItem(at: root)
-        removeDefaultsSuite()
-    }
-
-    /// Remove the defaults suite the child recorded through — from here, because the child may never
-    /// have had the chance: `SIGKILL` runs no cleanup. That is why the name is derived from `root`
-    /// rather than minted inside the child; see `Harness.defaultsSuiteName(in:)`.
-    ///
-    /// The domain *and* the file. `removePersistentDomain` empties the plist but leaves it behind in
-    /// `~/Library/Preferences`, so on its own it would still mean one file per run accumulating there
-    /// forever — only an empty one.
-    private func removeDefaultsSuite() {
-        let suite = Harness.defaultsSuiteName(in: root)
-        UserDefaults.standard.removePersistentDomain(forName: suite)
-        let plist = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Preferences/\(suite).plist")
-        try? FileManager.default.removeItem(at: plist)
     }
 
     enum HarnessError: Error {

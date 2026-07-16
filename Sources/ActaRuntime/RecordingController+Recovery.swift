@@ -27,11 +27,22 @@ extension RecordingController {
         /// outcome for the four because they are one answer: the pass ran, and a meeting it found is
         /// not in a playable track.
         case incomplete(partial: Int, unassembled: Int, retrying: Int, lost: Int)
+        /// The pass could not read the archive at all, so it never reached a folder. Its own case, and
+        /// not `nothingToRecover`: those are the same silence for opposite reasons, and this one says
+        /// nothing about whether an interrupted meeting is sitting there.
+        case scanFailed
 
         /// A pass's lists read as one verdict. Any folder that did not come back whole — terminal or
         /// not, salvageable or not — makes the pass incomplete: `recovered` may only be claimed when
         /// nothing was left behind.
         public init(_ outcome: RecoveryManager.Outcome) {
+            // First, because it is the one answer that is not about the lists: they are empty here
+            // because the pass never looked, and reading them as "nothing to recover" is the failure
+            // this case exists to name.
+            guard !outcome.unscannable else {
+                self = .scanFailed
+                return
+            }
             guard outcome.partial.isEmpty, outcome.unassembled.isEmpty, outcome.retrying.isEmpty,
                   outcome.lost.isEmpty else {
                 self = .incomplete(partial: outcome.partial.count,
@@ -65,8 +76,8 @@ extension RecoveryManager.Outcome {
     /// What to tell the user about this pass, or `nil` when it changed nothing and there is nothing
     /// to say.
     var report: RecoveryReport.Message? {
-        RecoveryReport.message(recovered: recovered.count, partial: partial.count,
-                               unassembled: unassembled.count, retrying: retrying.count,
-                               lost: lost.count)
+        RecoveryReport.message(.init(recovered: recovered.count, partial: partial.count,
+                                     unassembled: unassembled.count, retrying: retrying.count,
+                                     lost: lost.count, unscannable: unscannable))
     }
 }

@@ -158,10 +158,9 @@ struct FailedStartCleanupThroughControllerTests {
         let root = makeTemporaryDirectory("controller-archive")
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let suiteName = "acta-test-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let settingsStore = SettingsStore(defaults: defaults)
+        // Volatile rather than a named suite, which is a persistent domain no teardown can reliably
+        // remove — see `VolatileDefaults`.
+        let settingsStore = SettingsStore(defaults: VolatileDefaults.make())
         settingsStore.save(RecordingSettings(archivePath: root.path, segmentSeconds: testSegmentSeconds))
 
         let source = FakeCaptureSource()

@@ -274,9 +274,17 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
             emittedBuffers[track] = index + 1
             let frame = Int(nextFrame[track] ?? 0)
             nextFrame[track] = Int64(frame) + Int64(frames)
-            guard let fault, fault.bufferIndex == index, fault.frames < Int(frames) else {
-                return (frame, frames)
-            }
+            guard let fault, fault.bufferIndex == index else { return (frame, frames) }
+            // A fault this source cannot honour is never quietly dropped. `Fault.init` bounds the
+            // width against the encoding's wrap, which is a different question from whether a hole
+            // fits in a buffer — the two constants (`Fault.maxFrames`, `framesPerBuffer`) are related
+            // only by today's arithmetic. Were the guard above to swallow it, the negative control
+            // would run a *healthy* child and rubber-stamp the oracle, which is the one thing it
+            // exists to prevent. So it fails here, loudly, naming both numbers.
+            precondition(fault.frames < Int(frames), """
+                a fault of \(fault.frames) frames does not fit in a \(frames)-frame buffer — \
+                the hole could not be injected and the negative control would run healthy
+                """)
             return (frame + fault.frames, frames - AVAudioFrameCount(fault.frames))
         }
     }

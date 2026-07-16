@@ -10,62 +10,6 @@ import os
 /// `system.wav`/`mic.wav` (the unfinalized last segment is repaired from its actual size, not
 /// dropped) and moves the marker to `status=recovered`.
 public struct RecoveryManager {
-    /// What a recovery pass changed in the archive.
-    ///
-    /// Five lists rather than one, because the outcomes need different things said about them: a
-    /// folder that assembled whole holds audio the user can play, whereas one that gave up holds a
-    /// meeting that lives, in part or entirely, only as raw segments. Reporting either give-up as
-    /// "recovered" would be false, and not reporting it at all would leave the audio undiscoverable
-    /// outside `log show`.
-    public struct Outcome: Sendable, Equatable {
-        /// Folders whose every track assembled — nothing was left behind in the segments.
-        public var recovered: [URL] = []
-        /// Folders closed over a track that assembled while audio the plan vouched for stayed in the
-        /// segments. Apart from `recovered` because this is the loss that hides: the folder holds a
-        /// wav that plays, so nothing about it looks wrong until the missing track is wanted.
-        public var partial: [URL] = []
-        /// Folders closed with their audio still only in the segments: no track assembled, so there
-        /// is no wav to play and the segments are the sole copy of the meeting.
-        public var unassembled: [URL] = []
-        /// Folders the pass found interrupted and left interrupted, to try again on a later launch —
-        /// an attempt spent on audio the assembly could not place, or a cause outside the folder
-        /// (no `ffmpeg`). Apart from the three above because they are terminal and this is not: the
-        /// marker still says `recording`.
-        ///
-        /// It exists because without it such a folder is invisible to the caller — the pass returns
-        /// the same empty outcome it returns for an archive with nothing to recover, and those are
-        /// opposite answers. That ambiguity is exactly what `RecordingController.awaitRecovery()`
-        /// has to resolve.
-        public var retrying: [URL] = []
-        /// Folders the pass closed because there was nothing in them to salvage: the crash left the
-        /// marker but not one valid segment, so the meeting is gone — not in a track, not in the
-        /// segments.
-        ///
-        /// Its own list for exactly the reason `retrying` has one, and the case is not weaker.
-        /// Closing a folder is not leaving the archive as it was found, and a total loss reported in
-        /// no list at all comes back as the empty outcome of an archive with nothing to recover —
-        /// "every meeting is fine" and "a meeting was lost" answering identically.
-        public var lost: [URL] = []
-
-        /// A struct's memberwise initialiser is internal even when the struct is public, so this is
-        /// spelled out: the verdict `RecoveryOutcome(_:)` derives from these lists is a decision, and
-        /// a test in another module has to be able to hand it one.
-        public init(recovered: [URL] = [], partial: [URL] = [],
-                    unassembled: [URL] = [], retrying: [URL] = [], lost: [URL] = []) {
-            self.recovered = recovered
-            self.partial = partial
-            self.unassembled = unassembled
-            self.retrying = retrying
-            self.lost = lost
-        }
-
-        /// Whether the pass left the archive as it found it.
-        public var isEmpty: Bool {
-            recovered.isEmpty && partial.isEmpty && unassembled.isEmpty && retrying.isEmpty
-                && lost.isEmpty
-        }
-    }
-
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
     private let fileManager = FileManager.default
     private let store = SessionManifestStore()
@@ -82,10 +26,24 @@ public struct RecoveryManager {
     /// affect the others (isolated in a `do/catch`). Returns what the pass changed.
     @discardableResult
     public func recoverInterruptedSessions() -> Outcome {
-        guard let dirs = try? fileManager.contentsOfDirectory(
-            at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
-        ) else {
-            return Outcome()
+        let dirs: [URL]
+        do {
+            dirs = try fileManager.contentsOfDirectory(
+                at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            // A root that is simply not there yet is the ordinary first launch: nothing has ever been
+            // recorded, so a pass that does nothing over it is right, and saying anything would be
+            // noise. Anything else — an unmounted volume, a root the app cannot open — means the pass
+            // could not look at all, and that must not come back as the empty outcome of a clean
+            // archive. See `Outcome.unscannable`.
+            guard fileManager.fileExists(atPath: archiveRoot.path) else { return Outcome() }
+            log.error("""
+                Cannot read the archive at \(self.archiveRoot.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return Outcome(unscannable: true)
         }
 
         var outcome = Outcome()
@@ -140,16 +98,26 @@ public struct RecoveryManager {
             // as a failed repair. Left unbounded it would re-run a full concat on every launch, with
             // every `start()` waiting on it, forever.
             return retryOrCloseIncomplete(directory: dir, manifest: manifest).disposition
+        } catch SegmentAssembler.AssembleError.ffmpegNotFound {
+            // Unbounded on purpose, and caught by name rather than swept up by the `catch` below:
+            // without the binary nothing assembles for reasons outside this folder, and installing it
+            // is exactly the kind of fix a later launch is meant to pick up. The folder keeps its
+            // `recording` marker, so it is a retry like any other and is reported as one — with the
+            // one sentence (`brew install ffmpeg`) that is only true *here*.
+            log.error("Cannot recover \(dir.lastPathComponent, privacy: .public): ffmpeg not found")
+            return .retrying
         } catch {
-            // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the binary
-            // nothing assembles for reasons outside this folder, and installing it is exactly the kind
-            // of fix a later launch is meant to pick up. The folder keeps its `recording` marker, so
-            // it is a retry like any other and is reported as one.
+            // Anything unforeseen — a folder that turned unreadable, a marker write that failed after
+            // a good assemble, an `AssembleError` added later. It goes through the bound rather than
+            // returning `.retrying` directly: an unbounded retry on a cause nobody has diagnosed is a
+            // full `ffmpeg` re-attempt on every launch, forever, under a notification blaming a
+            // missing `ffmpeg` that is not missing. The bound ends it in a list whose sentence is true
+            // whatever the cause was — the audio is in the segments, and they were kept.
             log.error("""
                 Failed to recover \(dir.lastPathComponent, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
                 """)
-            return .retrying
+            return retryOrCloseIncomplete(directory: dir, manifest: manifest).disposition
         }
     }
 

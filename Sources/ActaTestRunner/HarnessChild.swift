@@ -210,6 +210,8 @@ enum HarnessChild {
             finish(.ok, "recovery: \(outcome)")
         case .incomplete:
             finish(.recoveryIncomplete, "recovery did not bring every meeting back: \(outcome)")
+        case .scanFailed:
+            finish(.recoveryScanFailed, "recovery could not read the archive at \(root.path)")
         }
     }
 
@@ -240,22 +242,22 @@ enum HarnessChild {
     // MARK: - Shared
 
     /// A `RecordingController` in a harness process: the same seams the in-process scenarios inject,
-    /// and an isolated defaults suite, so the developer's own app is never pointed at a temp
+    /// and defaults that never reach the disk, so the developer's own app is never pointed at a temp
     /// archive.
     ///
     /// Not `ControllerHarness`: that one makes a temp root of its own and wires the clock to the
     /// source for the whole run, and those are the two decisions a harness child has to make
     /// differently — the root comes from the parent, and emission stops at readiness.
     ///
-    /// The defaults suite is **named after the root, and removed by the parent**, because this
-    /// process may not live to remove it: `SIGKILL` runs no cleanup, which is the whole point of the
-    /// signal. A name minted here would be one the crashed child alone ever knew — an unreachable
-    /// persistent domain per crash run, accumulating in the developer's home forever.
+    /// The settings are **`VolatileDefaults`, not a suite**, and that is what makes the crash path
+    /// leave nothing behind: `SIGKILL` runs no cleanup, so a persistent domain this process named
+    /// would outlive it with nobody left to remove it. There is nothing to clean up if nothing is
+    /// ever written — and nothing needs to be, because the recorder and the recoverer are told the
+    /// archive by `--root`, not by defaults.
     private static func makeController(root: URL, source: FakeCaptureSource,
                                        clock: TestClock) -> RecordingController {
         let archiveRoot = Harness.archiveRoot(in: root)
-        let defaults = UserDefaults(suiteName: Harness.defaultsSuiteName(in: root))!
-        let settingsStore = SettingsStore(defaults: defaults)
+        let settingsStore = SettingsStore(defaults: VolatileDefaults.make())
         settingsStore.save(RecordingSettings(archivePath: archiveRoot.path,
                                              segmentSeconds: testSegmentSeconds,
                                              deleteSegmentsAfterAssembly: false))

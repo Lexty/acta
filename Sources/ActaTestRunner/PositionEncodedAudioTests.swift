@@ -78,6 +78,22 @@ func aSamplesValueIsDecidedByItsPosition() {
 }
 
 @Test
+func strideAndItsInverseAreActuallyInverses() {
+    // `strideInverse` is a hardcoded table, and `classify` is built on the identity it claims: the
+    // inverse is what turns a value delta back into a frame delta, so a stale entry makes every
+    // derived shift wrong. Nothing else here would say so — a wrong inverse is rejected by
+    // `shiftHolds` and reports as `wrongValue`, which reads as "the oracle is broken" rather than
+    // "the table is stale". Asserted over `allCases`, so a third track cannot be added without one.
+    for track in Track.allCases {
+        let product = (PositionEncodedAudio.stride(for: track)
+            * PositionEncodedAudio.strideInverse(for: track)) & 0xFFFF
+        let inverse = PositionEncodedAudio.strideInverse(for: track)
+        #expect(product == 1,
+                "\(track): \(PositionEncodedAudio.stride(for: track)) is not inverted by \(inverse)")
+    }
+}
+
+@Test
 func theEncodingWrapsRatherThanSaturating() {
     // 16 bits cannot hold a whole track, so the value wraps — and the wrap is part of the contract,
     // not an accident: the oracle's guarantee is stated in terms of it.

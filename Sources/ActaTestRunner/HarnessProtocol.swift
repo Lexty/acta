@@ -110,7 +110,16 @@ enum Harness {
             return .malformed("\(rootOption) requires a directory, got \(path)")
         }
         let root = URL(fileURLWithPath: path, isDirectory: true)
-        guard flag == childFlag else { return .harness(.recover(root: root)) }
+        guard flag == childFlag else {
+            // A fault only recover mode was asked for is a fault nothing will ever inject: recover
+            // mode drives no capture. Rejecting it rather than returning before the option is read is
+            // the same rule `anUnparseableDropIsMalformed` states — a fault the parent writes and the
+            // child does not honour must not parse, or the negative control quietly runs healthy.
+            guard !arguments.contains(dropOption) else {
+                return .malformed("\(recoverFlag) does not take \(dropOption)")
+            }
+            return .harness(.recover(root: root))
+        }
 
         guard let text = value(of: dropOption, in: arguments) else {
             return .harness(.record(root: root))
@@ -165,16 +174,6 @@ enum Harness {
         root.appendingPathComponent("ready.json.partial")
     }
 
-    /// The `UserDefaults` suite the child keeps its settings in — part of the contract, not a detail
-    /// of the child, because **the parent is what removes it**.
-    ///
-    /// A `SIGKILL`ed child runs no cleanup, so a name it minted for itself would be known to nobody
-    /// once it dies: one orphaned persistent domain per crash run, in the developer's home, forever.
-    /// Derived from the working root instead, which the parent made and which is unique per run.
-    static func defaultsSuiteName(in root: URL) -> String {
-        "acta-harness-defaults-\(root.lastPathComponent)"
-    }
-
     /// The parent's request for a graceful stop, renamed into place for the same reason.
     static func stopFile(in root: URL) -> URL { root.appendingPathComponent("stop") }
     static func stopStagingFile(in root: URL) -> URL { root.appendingPathComponent("stop.partial") }
@@ -216,6 +215,11 @@ enum Harness {
         case stopFailed = 72
         /// Recovery ran and left audio outside a track.
         case recoveryIncomplete = 67
+        /// Recovery could not read the archive at all. Its own code rather than `recoveryIncomplete`:
+        /// that one means the pass looked and found audio it could not place, this one means it never
+        /// looked, and a harness that cannot tell those apart is asserting through the ambiguity the
+        /// verdict exists to resolve.
+        case recoveryScanFailed = 73
         /// Recovery did not finish inside `recoveryTimeoutSeconds`.
         case recoveryTimedOut = 68
         /// `onLaunch()` started no pass at all — the seam returned `nil`.
