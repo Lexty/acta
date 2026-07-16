@@ -35,9 +35,9 @@ public struct RecoveryManager {
         } catch {
             // A root that is simply not there yet is the ordinary first launch: nothing has ever been
             // recorded, so a pass that does nothing over it is right, and saying anything would be
-            // noise. Anything else — an unmounted volume, a root the app cannot open — means the pass
-            // could not look at all, and that must not come back as the empty outcome of a clean
-            // archive. See `Outcome.unscannable`.
+            // noise. Anything else — a root the app has lost the right to open, a file standing where
+            // the directory should be — means the pass could not look at all, and that must not come
+            // back as the empty outcome of a clean archive. See `Outcome.unscannable`.
             guard fileManager.fileExists(atPath: archiveRoot.path) else { return Outcome() }
             log.error("""
                 Cannot read the archive at \(self.archiveRoot.path, privacy: .public): \
@@ -264,7 +264,7 @@ public struct RecoveryManager {
     private enum EmptyOutcome {
         /// The marker did not land, so the folder is not closed and a later launch will see it again.
         case retrying
-        /// Closed over tracks that are all present: a clean stop whose marker write failed.
+        /// Closed over at least one track: a clean stop whose marker write failed.
         case closedWithTracks
         /// Closed over nothing at all — the meeting is gone.
         case lost

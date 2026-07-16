@@ -9,8 +9,8 @@ import ActaRuntime
 
 /// An archive the pass cannot read at all, against the one it merely has nothing to do over. These
 /// are opposite answers that used to be the same empty `Outcome`: the pass reported "nothing to
-/// recover" — exit `0`, no banner — for a root on an unmounted volume or one the app can no longer
-/// open, vouching for interrupted meetings it never saw.
+/// recover" — exit `0`, no banner — for a root the app can no longer open, vouching for interrupted
+/// meetings it never saw.
 ///
 /// The distinction is existence, not readability: a root that is simply not there yet is an ordinary
 /// first launch, and reporting *that* would put a banner in front of every new user.

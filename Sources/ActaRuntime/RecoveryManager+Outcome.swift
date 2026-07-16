@@ -47,8 +47,9 @@ extension RecoveryManager {
         /// Not a list, because there is nothing to list: the failure is the whole answer.
         ///
         /// Its own signal for the reason `retrying` and `lost` have their own lists, and the case is
-        /// the strongest of the three. An archive on an unmounted volume, or one the app has lost the
-        /// right to open, answers `contentsOfDirectory` with an error — and reporting *that* as the
+        /// the strongest of the three. An archive the app has lost the right to open, or a path with a
+        /// file where the directory belongs, answers `contentsOfDirectory` with an error — and
+        /// reporting *that* as the
         /// empty outcome is the "nothing to recover" of a clean archive: the pass vouching for every
         /// meeting at the one moment it could not check a single one. A root that does not exist yet
         /// is deliberately **not** this — no recording has ever been made, so doing nothing over it is

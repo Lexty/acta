@@ -262,8 +262,8 @@ func artifactFingerprint(of directory: URL) throws -> [String: String] {
 ///
 /// "Assembled track", defined structurally — an `AVAsset` with an audio track, a positive duration
 /// and more than a bare header — reusing the pipeline tests' own `isRealAudioFile`. Not frame-level
-/// fidelity: the deterministic audio oracle is parked, so this is the floor. "Two paths exist" is
-/// what it exists to refuse.
+/// fidelity: that is `PositionEncodedAudio`'s oracle, which the crash harness drives over the
+/// recovered tracks. This is the floor — "two paths exist" is what it exists to refuse.
 @available(macOS 15.0, *)
 func bothTracksAssembled(in directory: URL) async -> Bool {
     for name in [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName] {

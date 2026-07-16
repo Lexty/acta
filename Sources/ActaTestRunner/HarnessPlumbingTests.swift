@@ -75,6 +75,12 @@ extension HarnessTests {
             #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.childFlag,
                                                    Harness.rootOption, "/tmp/x", Harness.dropOption, "4096"])
                     == .malformed("\(Harness.dropOption) requires <frames>@<bufferIndex>, got 4096"))
+            // The quietest shape of the same drop, and the one that reads as absence: nothing follows
+            // the option, so the value lookup answers exactly as it does for a command line that never
+            // mentioned a fault at all.
+            #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.childFlag,
+                                                   Harness.rootOption, "/tmp/x", Harness.dropOption])
+                    == .malformed("\(Harness.dropOption) requires <frames>@<bufferIndex>"))
             // A hole at buffer zero is not a hole — the indices have not advanced yet.
             #expect(Harness.Fault.parse("4096@0") == nil)
             #expect(Harness.Fault.parse("4096@1") == Harness.Fault(frames: 4096, bufferIndex: 1))

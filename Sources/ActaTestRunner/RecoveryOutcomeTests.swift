@@ -82,7 +82,7 @@ func aDeferredFolderIsIncompleteNotRecovered() {
 
 /// The pass that never looked. Its five lists are empty for the opposite reason an untouched
 /// archive's are, and reading them at face value is the pass swearing every meeting is fine at the
-/// one moment it could not check a single one — an unmounted volume, a folder the app cannot open.
+/// one moment it could not check a single one — an archive root the app cannot open.
 /// `.nothingToRecover` exits zero, so without this the recoverer reports success over an archive it
 /// could not read.
 @Test("A pass that could not read the archive is not a pass that found nothing")

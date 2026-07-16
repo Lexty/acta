@@ -122,6 +122,14 @@ enum Harness {
         }
 
         guard let text = value(of: dropOption, in: arguments) else {
+            // A bare `--harness-drop` with nothing after it is the silent drop in its quietest form:
+            // `value(of:)` cannot tell "the option is absent" from "the option is last", so without
+            // this the negative control's own command line parses as a *healthy* record run. Same rule
+            // as recover mode one branch up — the option's presence, not its readability, is what
+            // decides that a fault was asked for.
+            guard !arguments.contains(dropOption) else {
+                return .malformed("\(dropOption) requires <frames>@<bufferIndex>")
+            }
             return .harness(.record(root: root))
         }
         guard let fault = Fault.parse(text) else {

@@ -135,7 +135,7 @@ segment — terminal, and total data loss, which must never come back as success
 and either makes the verdict `.incomplete`.
 
 **A sixth signal, `unscannable`, is not a list**, and it closes the same ambiguity one level up: the
-scan's *own* failure. An archive root on an unmounted volume or behind a lost permission fails
+scan's *own* failure. An archive root behind a lost permission fails
 `contentsOfDirectory`, and returning the empty `Outcome` for that is the pass vouching for every
 meeting at the one moment it checked none — `.nothingToRecover`, exit `0`, no banner. It maps to its
 own verdict (`.scanFailed`, `Exit.recoveryScanFailed` = 73) and its own sentence, because "I could not

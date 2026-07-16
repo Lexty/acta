@@ -274,8 +274,8 @@ enum HarnessChild {
     /// test into something diagnosable.
     ///
     /// Nothing is torn down here, and nothing needs to be: the working directory belongs to the
-    /// parent and the defaults suite is named so the parent can remove it. The crash path would reach
-    /// none of it anyway.
+    /// parent and the defaults never leave this process (`VolatileDefaults`). The crash path would
+    /// reach none of it anyway.
     private static func finish(_ code: Harness.Exit, _ reason: String) -> Never {
         FileHandle.standardError.write(Data("harness: \(reason)\n".utf8))
         exit(code.rawValue)
