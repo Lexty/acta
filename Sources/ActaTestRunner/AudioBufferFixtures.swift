@@ -1,3 +1,4 @@
+import ActaKit
 import AVFoundation
 import CoreMedia
 import Foundation
@@ -44,9 +45,68 @@ struct FixtureAudioFormat {
 /// fixture buffer would be a use-after-free the moment it left this scope.
 func makeAudioSampleBuffer(pts: CMTime, frames: AVAudioFrameCount,
                            format: FixtureAudioFormat) -> CMSampleBuffer? {
+    makeSampleBuffer(pts: pts, frames: frames, format: format, fill: nil)
+}
+
+/// Build one PCM audio `CMSampleBuffer` whose samples encode their own position
+/// (`PositionEncodedAudio`), so a frame that goes missing downstream can be named.
+///
+/// A separate function rather than a flag on `makeAudioSampleBuffer`, deliberately: that one's
+/// buffers are silence and fixtures elsewhere rest on the samples being zero, so filling them
+/// globally would quietly rewrite what those tests mean.
+///
+/// `startFrame` is this buffer's first frame counted from the **start of the track**, not from the
+/// start of the buffer — the caller keeps that running count, because position within the track is
+/// the entire content of the encoding.
+func makePositionEncodedSampleBuffer(track: Track, startFrame: Int, pts: CMTime,
+                                     frames: AVAudioFrameCount,
+                                     format: FixtureAudioFormat = .stereo48k) -> CMSampleBuffer? {
+    makeSampleBuffer(pts: pts, frames: frames, format: format) { pcm in
+        fillPositionEncoded(pcm, track: track, startFrame: startFrame)
+    }
+}
+
+/// Write `sample(track, startFrame + n, channel)` into every slot of `pcm`.
+///
+/// Both `AudioBufferList` shapes are handled, because `FixtureAudioFormat` offers both and a
+/// generator that silently mis-filled the non-interleaved one would encode garbage rather than
+/// positions: interleaved keeps both channels in one buffer, frame-major, so a channel's samples sit
+/// `channelCount` apart; non-interleaved gives each channel a buffer of its own.
+func fillPositionEncoded(_ pcm: AVAudioPCMBuffer, track: Track, startFrame: Int) {
+    guard let channelData = pcm.int16ChannelData else { return }
+    let channelCount = Int(pcm.format.channelCount)
+    let frames = Int(pcm.frameLength)
+
+    if pcm.format.isInterleaved {
+        let base = channelData[0]
+        for frame in 0..<frames {
+            for channel in 0..<channelCount {
+                base[frame * channelCount + channel] =
+                    PositionEncodedAudio.sample(track: track, frameIndex: startFrame + frame,
+                                                channel: channel)
+            }
+        }
+    } else {
+        for channel in 0..<channelCount {
+            let base = channelData[channel]
+            for frame in 0..<frames {
+                base[frame] = PositionEncodedAudio.sample(track: track,
+                                                          frameIndex: startFrame + frame,
+                                                          channel: channel)
+            }
+        }
+    }
+}
+
+/// The `CMSampleBuffer` plumbing both generators share: format description, timing, and the copy
+/// into a block buffer. `fill` sees the PCM buffer after `frameLength` is set and before the copy;
+/// `nil` leaves the freshly allocated (zeroed) samples alone, which is what makes silence silence.
+private func makeSampleBuffer(pts: CMTime, frames: AVAudioFrameCount, format: FixtureAudioFormat,
+                              fill: ((AVAudioPCMBuffer) -> Void)?) -> CMSampleBuffer? {
     guard let avFormat = format.avFormat,
           let pcm = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: frames) else { return nil }
     pcm.frameLength = frames
+    fill?(pcm)
 
     var asbd = avFormat.streamDescription.pointee
     var formatDescription: CMAudioFormatDescription?
