@@ -9,9 +9,18 @@ import os
 /// `ActaKit` (`MeetingArchive`/`MeetingInfo`, covered by unit tests); this file only touches disk.
 public struct MeetingStore {
     /// One entry in the archive listing — the folder + the parsed session marker (if any).
-    public struct Recording {
+    ///
+    /// `Equatable`/`Sendable` because the listing travels inside `ControlState`, which is compared for
+    /// distinctness and crosses an `AsyncStream`. Both are plain value semantics over a `URL` and a
+    /// `SessionManifest`; nothing here is derived from the file system at compare time.
+    public struct Recording: Equatable, Sendable {
         public var directory: URL
         public var manifest: SessionManifest?
+
+        public init(directory: URL, manifest: SessionManifest? = nil) {
+            self.directory = directory
+            self.manifest = manifest
+        }
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "MeetingStore")

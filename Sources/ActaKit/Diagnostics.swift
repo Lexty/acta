@@ -6,7 +6,9 @@ import Foundation
 /// `crash-safe-recording` skill, SPEC §7). The type and its text stay in `ActaKit` as pure logic:
 /// the reason is determined by `SelfDiagnosis.diagnose`, while the runtime (`SelfCheck`) only
 /// collects a state snapshot and shows `userMessage` in the menu bar.
-public enum StartupFailure: Error, Equatable, Sendable {
+/// `CaseIterable` so that a reverse lookup over `userMessage` (`ControlState`'s classification of the
+/// controller's single untyped `errorMessage`) enumerates the closed set rather than restating it.
+public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
     /// No TCC permission for screen recording (required even for an audio-only `SCStream` capture).
     case noScreenRecordingPermission
     /// No TCC permission for the microphone.

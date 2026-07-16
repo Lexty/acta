@@ -8,7 +8,7 @@ import Foundation
 @available(macOS 15.0, *)
 extension RecordingController {
     /// Recording phase for the status indicator.
-    public enum Phase: Equatable {
+    public enum Phase: Equatable, Sendable {
         case idle
         case recording
         /// Capture has already stopped and segments are being assembled (`ffmpeg`) — seconds, and
