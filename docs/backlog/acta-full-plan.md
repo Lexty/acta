@@ -13,6 +13,23 @@
 
 ---
 
+## Microphone leak fallback: separately-owned AVCaptureSession (parked until the live matrix rules)
+
+`docs/plans/2026-07-16-microphone-release-on-stop.md` applies the cheap mitigation first — disable SCK
+`captureMicrophone` via `updateConfiguration` before `stopCapture()`. If the live matrix in that plan
+shows even one stuck indicator/attribution, the mitigation is insufficient and the fix here is
+promoted: capture the microphone through a **separately-owned `AVCaptureSession`**
+(`AVCaptureDeviceInput` + `AVCaptureAudioDataOutput`) instead of SCK's `captureMicrophone`, with SCK
+kept for system audio only (`capturesAudio = true`, `captureMicrophone = false`). `AVCaptureSession.stopRunning()`
+is a documented synchronous teardown, giving a lifecycle contract SCK's mic path currently lacks. The
+real work is clock-domain alignment: preserve each buffer's host-time presentation timestamp and align
+the two sources on a common timeline — they do not start simultaneously — and run `startRunning()`/`stopRunning()`
+on a dedicated serial queue, never main. Also a human task, independent of which fix wins: file
+Feedback Assistant describing the macOS 26 SCK `captureMicrophone` teardown defect with the reproducer
+and the exact OS build.
+
+---
+
 ## The real capture source's failed-start path is not unit-tested (low)
 
 `SCKCaptureSource.start()` maps any raw ScreenCaptureKit failure to `StartupFailure.streamNotStarted`.
