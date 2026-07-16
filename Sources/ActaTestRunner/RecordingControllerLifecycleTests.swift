@@ -115,6 +115,12 @@ struct RecordingControllerLifecycleTests {
         // than silently inheriting this meeting's name.
         #expect(harness.controller.title.isEmpty,
                 "a saved recording left its title in the field — the next recording would inherit it")
+        // The elapsed counter is reset, not merely stopped. Only the reset is asserted: the value
+        // *during* the recording comes from real wall-clock ticks a second apart, and a fixture-sized
+        // recording is milliseconds long, so anything but 0 here would be a timing race. What matters
+        // is that the menu is not left counting up under a finished recording.
+        #expect(harness.controller.elapsedSeconds == 0,
+                "a saved recording left the elapsed counter running: \(harness.controller.elapsedSeconds)")
         // `info.md`, not only `session.json`: the marker is what recovery reads, but this is what the
         // menu renders and what survives as the meeting's own record. A save that patches one and not
         // the other leaves the archive describing a recording that never finished.
@@ -156,6 +162,11 @@ struct RecordingControllerLifecycleTests {
         #expect(!harness.controller.isBusy, "a start that never recorded left the controller busy forever")
         #expect(!harness.controller.hasWorkInFlight)
         #expect(log.phases == [.idle, .error], "the published phase sequence was \(log.phases)")
+        // The asymmetry against a saved recording, which clears the field: a *failed* start keeps the
+        // title the user typed, so granting the permission and clicking Start again does not make them
+        // retype it. Unfrozen, a lifecycle refactor could flip this either way in silence.
+        #expect(harness.controller.title == "Phantom meeting",
+                "a denied start threw away the title the user had typed")
 
         // The worst kind of leak: a Mac pinned awake by a recording that never started, with nothing
         // in the UI to explain it.
@@ -178,6 +189,7 @@ struct RecordingControllerLifecycleTests {
         defer { harness.tearDown() }
         let log = ControllerStateLog(harness.controller)
 
+        harness.controller.title = "Stalled sync"
         harness.controller.start()
         #expect(await waitUntilOnMain { harness.controller.phase == .recording }, "the start never reached `.recording`")
         let directory = try #require(harness.meetingDirectory)
@@ -206,6 +218,12 @@ struct RecordingControllerLifecycleTests {
         let assembled = await bothTracksAssembled(in: directory)
         #expect(assembled, "the audio recorded before the stall was lost")
         #expect(try readSessionManifest(in: directory).status == .done)
+        // The stall path stops the timer and resets the counter just as a clean stop does — an error
+        // banner over a menu still counting up is the one thing the watchdog exists to prevent.
+        #expect(harness.controller.elapsedSeconds == 0,
+                "the watchdog gave up but left the elapsed counter running: \(harness.controller.elapsedSeconds)")
+        // And, like the denied start and unlike a saved recording, it keeps the typed title.
+        #expect(harness.controller.title == "Stalled sync", "a fatal stall threw away the title the user had typed")
 
         // `.error` is not a latch: the guard reads `isBusy`, which the finished assembly has dropped,
         // so the user is allowed to try again. With both tracks still dead it fails the same way —

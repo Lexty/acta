@@ -26,7 +26,6 @@ final class ControllerHarness {
     /// The archive root the controller writes meetings into.
     let root: URL
     let source: FakeCaptureSource
-    let permissions: FakePermissions
     let clock: TestClock
     let wakeLock: CountingWakeLock
     let controller: RecordingController
@@ -44,7 +43,6 @@ final class ControllerHarness {
         self.source = source
         self.clock = clock
         self.wakeLock = wakeLock
-        self.permissions = permissions
         self.root = root
 
         // An isolated defaults suite: the settings are real `SettingsStore` state, and writing them
@@ -128,14 +126,18 @@ final class ControllerStateLog {
 
     init(_ controller: RecordingController) {
         record(controller)
-        controller.$phase.sink { phase in
+        // `[weak self]` throughout: the sinks are stored in `self.cancellables`, so capturing `self`
+        // strongly would cycle (log → cancellables → closure → log) and pin the controller with it —
+        // a log outliving `tearDown()` would go on reading a controller whose archive is gone.
+        controller.$phase.sink { [weak self] phase in
             // `@Published` publishes from the setter, and every one of the controller's setters runs
             // on the main actor — so this callback does too.
-            MainActor.assumeIsolated { self.phases.append(phase) }
+            MainActor.assumeIsolated { self?.phases.append(phase) }
         }.store(in: &cancellables)
 
-        controller.objectWillChange.sink { _ in
+        controller.objectWillChange.sink { [weak self, weak controller] _ in
             MainActor.assumeIsolated {
+                guard let self, let controller else { return }
                 // Two reads per change, because neither alone is enough.
                 //
                 // `objectWillChange` fires *before* the change lands, so this synchronous read sees
@@ -147,7 +149,10 @@ final class ControllerStateLog {
                 self.record(controller)
                 // And deferred by one turn, for the state *this* change settles into — the last
                 // change of all has no later fire to report it.
-                Task<Void, Never> { @MainActor in self.record(controller) }
+                Task<Void, Never> { @MainActor [weak self, weak controller] in
+                    guard let self, let controller else { return }
+                    self.record(controller)
+                }
             }
         }.store(in: &cancellables)
     }
@@ -191,7 +196,7 @@ func waitUntilOnMain(timeout: Double = 10.0, _ condition: () -> Bool) async -> B
 ///   number written here — and every millisecond it overruns turns the absence into a vacuous pass.
 ///   Three times the observed pass, floored at 500 ms so a suspiciously fast first pass cannot
 ///   shrink the window to nothing.
-func waitOutARecoveryPass(observedPass: Double = 0) async {
+func waitOutARecoveryPass(observedPass: Double) async {
     let wait = max(0.5, observedPass * 3)
     try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
 }
@@ -224,8 +229,11 @@ func placeInterruptedMeeting(in root: URL, named name: String) throws -> URL {
     try makeRecording(in: directory, systemSegments: 2, micSegments: 2)
 
     let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    // `testSegmentSeconds`, not a constant of its own: recovery's duration fallback multiplies this
+    // field by the segment count, so a fixture whose manifest disagrees with the settings the harness
+    // records under describes a recording the harness could not have produced.
     let manifest = SessionManifest(status: .recording, startedAt: startedAt,
-                                   segmentSeconds: 15, segmentCount: 2)
+                                   segmentSeconds: testSegmentSeconds, segmentCount: 2)
     try manifest.encoded().write(to: directory.appendingPathComponent(SessionManifest.fileName))
     try MeetingInfo(title: name, date: startedAt, source: "Slack",
                     durationSeconds: 0, status: .recording)
