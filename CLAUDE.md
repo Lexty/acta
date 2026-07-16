@@ -119,7 +119,8 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
 **One seam is deliberately not in `RecordingDependencies`**, and the rule above does not cover it:
 `RecordingController.awaitRecovery()` (`RecordingController+Recovery.swift`) is a **completion** seam,
 not an injection point — it returns the verdict of the pass `onLaunch()` already started
-(`RecoveryOutcome`: `.nothingToRecover` / `.recovered(count:)` / `.incomplete(partial:unassembled:retrying:)`).
+(`RecoveryOutcome`: `.nothingToRecover` / `.recovered(count:)` /
+`.incomplete(partial:unassembled:retrying:lost:)`).
 The disk cannot answer that question: a pass still running and a pass that finished but could not
 assemble both leave `session.json` at `recording`, so polling can only bound the ambiguity, never
 resolve it — and the crash harness's recoverer has to tell "recovery worked" from "recovery gave up"

@@ -94,52 +94,63 @@ public struct RecoveryManager {
             guard isDir, let manifest = store.read(from: dir), Recovery.needsRecovery(manifest) else {
                 continue
             }
-            do {
-                try recover(directory: dir, manifest: manifest)
-                outcome.recovered.append(dir)
-            } catch SegmentAssembler.AssembleError.noSegments {
-                // There is nothing to salvage and never will be: the crash managed to create the
-                // marker, but not a single valid segment was left. Leaving `recording` would doom
-                // the folder to a futile assembly on every launch and an eternal "not finished" in
-                // the list with no way to clear it. Not `recovered` either — there was nothing to
-                // recover, and there is no reason to lie in the notification — but `lost`, and not
-                // silence: the pass closed a meeting that is gone, which is the opposite of the
-                // empty outcome an untouched archive returns.
-                //
-                // `segmentsUnrepairable` deliberately does not come here: there the segments *do*
-                // hold audio, so it gets its own bounded retry below.
-                closeEmpty(directory: dir, manifest: manifest)
-                outcome.lost.append(dir)
-            } catch SegmentAssembler.AssembleError.segmentsUnrepairable,
-                    SegmentAssembler.AssembleError.concatFailed {
-                // The segments hold audio that never reached a final file — the repair could not
-                // place it, or `ffmpeg` refused to concat it. Either way the segments are its only
-                // copy, so retry on a later launch — but not forever; see `retryOrCloseIncomplete`.
-                //
-                // `concatFailed` belongs here and not in the generic `catch` below: `-xerror` is
-                // what turned it from a failure `ffmpeg` used to swallow (exit 0, short file) into a
-                // live one, and its usual causes — segments `-c copy` cannot splice, a torn file —
-                // are as permanent as a failed repair. Left unbounded it would re-run a full concat
-                // on every launch, with every `start()` waiting on it, forever.
-                switch retryOrCloseIncomplete(directory: dir, manifest: manifest) {
-                case .retrying: outcome.retrying.append(dir)
-                case .closedWithTracks: outcome.partial.append(dir)
-                case .closedWithoutTracks: outcome.unassembled.append(dir)
-                }
-            } catch {
-                // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the
-                // binary nothing assembles for reasons outside this folder, and installing it is
-                // exactly the kind of fix a later launch is meant to pick up. The folder keeps its
-                // `recording` marker, so it is a retry like any other and is reported as one.
-                outcome.retrying.append(dir)
-                let name = dir.lastPathComponent
-                log.error("""
-                    Failed to recover \(name, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
+            switch disposition(of: dir, manifest: manifest) {
+            case .recovered: outcome.recovered.append(dir)
+            case .partial: outcome.partial.append(dir)
+            case .unassembled: outcome.unassembled.append(dir)
+            case .retrying: outcome.retrying.append(dir)
+            case .lost: outcome.lost.append(dir)
             }
         }
         return outcome
+    }
+
+    /// Which of `Outcome`'s five lists a folder belongs in — the whole decision for one folder, in one
+    /// place, so the scan above only files the answer and every path out of here produces one.
+    private enum Disposition {
+        case recovered, partial, unassembled, retrying, lost
+    }
+
+    /// Act on one interrupted folder and say what became of it. An error here does not affect the
+    /// other folders: every failure is turned into a `Disposition` rather than propagated.
+    private func disposition(of dir: URL, manifest: SessionManifest) -> Disposition {
+        do {
+            try recover(directory: dir, manifest: manifest)
+            return .recovered
+        } catch SegmentAssembler.AssembleError.noSegments {
+            // No segment survived to assemble. That is *usually* a crash that left the marker and
+            // nothing else — the meeting is gone, and closing the folder is the only way out of a
+            // futile assembly on every launch. But it is not always: a clean stop assembles the tracks
+            // and *then* deletes the segments, so a marker write that failed after that leaves this
+            // same shape with the whole meeting sitting next to it. Only `closeEmpty` can tell those
+            // apart — it is the code that looks — so it decides.
+            //
+            // `segmentsUnrepairable` deliberately does not come here: there the segments *do* hold
+            // audio, so it gets its own bounded retry below.
+            return closeEmpty(directory: dir, manifest: manifest).disposition
+        } catch SegmentAssembler.AssembleError.segmentsUnrepairable,
+                SegmentAssembler.AssembleError.concatFailed {
+            // The segments hold audio that never reached a final file — the repair could not place
+            // it, or `ffmpeg` refused to concat it. Either way the segments are its only copy, so
+            // retry on a later launch — but not forever; see `retryOrCloseIncomplete`.
+            //
+            // `concatFailed` belongs here and not in the generic `catch` below: `-xerror` is what
+            // turned it from a failure `ffmpeg` used to swallow (exit 0, short file) into a live one,
+            // and its usual causes — segments `-c copy` cannot splice, a torn file — are as permanent
+            // as a failed repair. Left unbounded it would re-run a full concat on every launch, with
+            // every `start()` waiting on it, forever.
+            return retryOrCloseIncomplete(directory: dir, manifest: manifest).disposition
+        } catch {
+            // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the binary
+            // nothing assembles for reasons outside this folder, and installing it is exactly the kind
+            // of fix a later launch is meant to pick up. The folder keeps its `recording` marker, so
+            // it is a retry like any other and is reported as one.
+            log.error("""
+                Failed to recover \(dir.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return .retrying
+        }
     }
 
     /// Recover a single folder: assemble the surviving segments, mark it `recovered`.
@@ -176,6 +187,14 @@ public struct RecoveryManager {
         case closedWithTracks
         /// The attempts ran out and no track assembled: the meeting survives only as segments.
         case closedWithoutTracks
+
+        var disposition: Disposition {
+            switch self {
+            case .retrying: return .retrying
+            case .closedWithTracks: return .partial
+            case .closedWithoutTracks: return .unassembled
+            }
+        }
     }
 
     /// A folder whose segments still hold audio the assembly could not place — a failed repair, or a
@@ -273,33 +292,60 @@ public struct RecoveryManager {
             .filter { fileManager.fileExists(atPath: $0.path) }
     }
 
-    /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a
-    /// terminal status, so the next launch will not touch it again. We do not delete the folder
-    /// itself: `info.md` with the meeting's title and time is the only trace that a recording was
-    /// even attempted, and the decision to erase it stays with the user.
-    private func closeEmpty(directory: URL, manifest: SessionManifest) {
+    /// What a pass over a folder with no segments decided.
+    private enum EmptyOutcome {
+        /// The marker did not land, so the folder is not closed and a later launch will see it again.
+        case retrying
+        /// Closed over tracks that are all present: a clean stop whose marker write failed.
+        case closedWithTracks
+        /// Closed over nothing at all — the meeting is gone.
+        case lost
+
+        /// `closedWithTracks` is `recovered` and not `partial`: nothing was left behind. The folder
+        /// held no segments to begin with, so there is no audio outside the tracks that are there —
+        /// unlike the give-up path, where `partial` marks audio still stranded in the segments.
+        var disposition: Disposition {
+            switch self {
+            case .retrying: return .retrying
+            case .closedWithTracks: return .recovered
+            case .lost: return .lost
+            }
+        }
+    }
+
+    /// Close the marker of a folder with no segments: `recovered` with zero segments is a terminal
+    /// status, so the next launch will not touch it again. We do not delete the folder itself:
+    /// `info.md` with the meeting's title and time is the only trace that a recording was even
+    /// attempted, and the decision to erase it stays with the user.
+    ///
+    /// Returns which list the caller must file the folder under, because that verdict cannot be read
+    /// off the exception: "no segments" is not "no audio". A clean stop assembles the tracks and
+    /// *then* deletes the segments, so a marker write that failed after that (a full disk, a
+    /// transient I/O error — `RecordingSession.stop` swallows it) leaves this shape with two whole
+    /// wavs next to it. Reporting that as `lost` — "total data loss, which must never come back as
+    /// success" — would be the exact opposite of what is on the disk. The tracks are the evidence, so
+    /// the code that measures them is the code that decides.
+    private func closeEmpty(directory: URL, manifest: SessionManifest) -> EmptyOutcome {
+        let tracks = assembledTracks(in: directory)
         log.error("""
-            Nothing to recover (no valid segments): \
-            \(directory.lastPathComponent, privacy: .public)
+            Nothing to assemble (no valid segments), \(tracks.count, privacy: .public) track(s) \
+            present: \(directory.lastPathComponent, privacy: .public)
             """)
         var updated = manifest
         updated.status = .recovered
         updated.segmentCount = 0
         // Same rule as the give-up path: the marker is what makes this terminal, so if it did not
-        // land the folder is still `recording` and `info.md` must not say otherwise.
-        guard writeMarker(updated, to: directory) else { return }
-        // "No segments" is not "no audio": a clean stop assembles the tracks and *then* deletes the
-        // segments, so a marker write that failed after that (a full disk, a transient I/O error —
-        // `RecordingSession.stop` swallows it) leaves exactly this shape, with two whole wavs next to
-        // it. Writing a flat zero here would then overwrite the real duration `performStop` had
-        // already recorded — an hour-long meeting reading `00:00:00` in the one file that is meant to
-        // outlive the app (SPEC §6). So measure what is on disk, as the give-up path does, and fall
-        // back to zero only when there genuinely is nothing to measure.
-        let duration = assembledTracks(in: directory)
-            .compactMap { SegmentAssembler.measuredDuration(of: $0) }
-            .max()
+        // land the folder is still `recording`, `info.md` must not say otherwise, and the caller must
+        // not describe it as closed.
+        guard writeMarker(updated, to: directory) else { return .retrying }
+        // Writing a flat zero would overwrite the real duration `performStop` had already recorded —
+        // an hour-long meeting reading `00:00:00` in the one file meant to outlive the app (SPEC §6).
+        // So measure what is on disk, as the give-up path does, and fall back to zero only when there
+        // genuinely is nothing to measure.
+        let duration = tracks.compactMap { SegmentAssembler.measuredDuration(of: $0) }.max()
         updateInfo(in: directory, status: updated.status,
                    durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0)
+        return tracks.isEmpty ? .lost : .closedWithTracks
     }
 
     /// Persist the marker, logging a failure instead of swallowing it. `false` = the marker on disk

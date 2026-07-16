@@ -52,8 +52,8 @@ enum Harness {
     /// have advanced" means: a hole at the very start of a track is not a hole, it is a track that
     /// begins late.
     struct Fault: Equatable {
-        var frames: Int
-        var bufferIndex: Int
+        let frames: Int
+        let bufferIndex: Int
 
         /// The exclusive ceiling on a hole's width — half the encoding's 65536-frame wrap, so that a
         /// loss can never be arithmetically confused with a repetition. Enforced rather than merely
@@ -61,13 +61,26 @@ enum Harness {
         /// control that quietly runs a *healthy* child is a rubber stamp.
         static let maxFrames = 32_768
 
+        /// The only way to make one, so the bounds hold wherever a fault comes from.
+        ///
+        /// A memberwise initialiser would leave them enforced on the command-line path alone — and
+        /// the one fault that matters most, the negative control's, is built in Swift and would skip
+        /// every check the parser makes. The rubber stamp `maxFrames` exists to prevent is exactly
+        /// what that would allow back in.
+        init?(frames: Int, bufferIndex: Int) {
+            guard frames > 0, frames < Self.maxFrames, bufferIndex > 0 else { return nil }
+            self.frames = frames
+            self.bufferIndex = bufferIndex
+        }
+
         /// `<frames>@<bufferIndex>`, the form the option takes on the command line.
         var argument: String { "\(frames)@\(bufferIndex)" }
 
         static func parse(_ text: String) -> Fault? {
             let parts = text.split(separator: "@")
-            guard parts.count == 2, let frames = Int(parts[0]), let index = Int(parts[1]),
-                  frames > 0, frames < maxFrames, index > 0 else { return nil }
+            guard parts.count == 2, let frames = Int(parts[0]), let index = Int(parts[1]) else {
+                return nil
+            }
             return Fault(frames: frames, bufferIndex: index)
         }
     }

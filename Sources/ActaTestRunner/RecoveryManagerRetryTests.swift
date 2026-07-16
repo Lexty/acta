@@ -290,7 +290,14 @@ func closingAFolderWithNoSegmentsKeepsTheDurationOfTheTracksThatExist() throws {
                      frames: 96_000) // 2 s @ 48 kHz
         try writeInterruptedMarker(in: directory, title: "Sync", segmentCount: 4)
 
-        RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+        let outcome = RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+
+        // Reported as recovered, and that is the whole point: every track the meeting has is on disk
+        // and plays. `lost` means "total data loss, which must never come back as success" — filing
+        // this folder there would make `RecoveryOutcome` say the exact opposite of what the disk holds,
+        // and the harness's recoverer would exit `recoveryIncomplete` over an intact archive.
+        #expect(outcome.recovered.map(\.lastPathComponent) == [directory.lastPathComponent])
+        #expect(outcome.lost.isEmpty)
 
         let manifest = try readManifest(in: directory)
         #expect(manifest.status == .recovered) // still terminal: there is nothing left to assemble
@@ -298,6 +305,36 @@ func closingAFolderWithNoSegmentsKeepsTheDurationOfTheTracksThatExist() throws {
         #expect(info.contains("status: recovered"))
         // Measured off the track on disk, not assumed to be zero because the segments are gone.
         #expect(info.contains("duration: \"\(MeetingInfo.formatDuration(seconds: 2))\""))
+    }
+}
+
+/// The one folder that genuinely *is* gone: the crash wrote the marker and nothing else — no segment,
+/// no track. It has to reach `lost`, and `lost` alone.
+///
+/// This is the case the list was introduced for, and the case with the most to lose from silence. A
+/// folder the pass closed but filed nowhere comes back as the empty outcome of an archive with nothing
+/// to recover: `RecoveryOutcome` reads `.nothingToRecover`, the harness's recoverer exits `0`, and a
+/// meeting that was destroyed reports as success — the one answer that must never be given.
+@Test
+func recoveryReportsAFolderThatTheCrashLeftEmptyAsLost() throws {
+    try withRecordingDirectory { root in
+        let directory = root.appendingPathComponent("2026-07-15-1600-onboarding", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // The marker and `info.md`, and that is all the crash managed: no segments, no tracks.
+        try makeRecording(in: directory, systemSegments: nil, micSegments: nil)
+        try writeInterruptedMarker(in: directory, title: "Onboarding", segmentCount: 0)
+
+        let manager = RecoveryManager(archiveRoot: root)
+        let outcome = manager.recoverInterruptedSessions()
+
+        #expect(outcome.lost.map(\.lastPathComponent) == [directory.lastPathComponent])
+        #expect(outcome.recovered.isEmpty && outcome.partial.isEmpty)
+        #expect(outcome.unassembled.isEmpty && outcome.retrying.isEmpty)
+        // Reported, not silent — the pass changed the archive, and `isEmpty` is what says so.
+        #expect(!outcome.isEmpty)
+        // Closed for good: a folder with nothing in it must not be re-assembled on every launch.
+        #expect(try readManifest(in: directory).status == .recovered)
+        #expect(manager.recoverInterruptedSessions().isEmpty)
     }
 }
 

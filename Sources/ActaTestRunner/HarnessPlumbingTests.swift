@@ -142,8 +142,11 @@ extension HarnessTests {
                     "the round trip took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
         }
 
-        /// The negative half of the readiness contract: a child whose start is rejected must give up and
-        /// say so, not sit there until the parent's timeout turns a rejection into a hang.
+        /// Recover mode's floor: an archive with no meeting in it at all must be a clean, quick
+        /// success. It is the one case the crash tests cannot reach — they always hand recovery a
+        /// folder to act on — and the case every `guard` in the scan walks through first, so a pass
+        /// that threw, hung or exited non-zero on an empty directory would break the harness before
+        /// any real crash got near it.
         @Test("Recover mode over an archive that was never recorded into finds nothing")
         @available(macOS 15.0, *)
         func recoverModeOverAnEmptyArchiveSucceeds() async throws {

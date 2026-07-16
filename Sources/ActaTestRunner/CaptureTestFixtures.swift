@@ -75,7 +75,12 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     /// One second of 48 kHz audio per buffer, so a buffer's presentation timestamp advances by a
     /// second — enough for a handful of them to cross a segment boundary without a test having to
     /// fabricate a gap in the media timeline. Three per batch per track.
-    private let framesPerBuffer: AVAudioFrameCount = 48_000
+    ///
+    /// Not private: a `Harness.Fault` is placed by buffer index, so the frame it lands on is this
+    /// number times that index. The negative control asserts that exact frame, and a copy of `48_000`
+    /// written in the test would turn a tuning change here into an oracle that appears to mislocate
+    /// the hole rather than a constant that drifted.
+    static let framesPerBuffer: AVAudioFrameCount = 48_000
     private let batchSize = 3
 
     // MARK: Script
@@ -225,7 +230,7 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
             (count ?? batchSize,
              (silentUntilRestart || frozen) ? [] : Track.allCases.filter { !silencedTracks.contains($0) },
              format,
-             framesPerBuffer,
+             Self.framesPerBuffer,
              positionEncoded)
         }
         guard size > 0 else { return }

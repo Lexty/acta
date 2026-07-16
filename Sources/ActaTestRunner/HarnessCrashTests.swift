@@ -26,7 +26,13 @@ extension HarnessTests {
         /// cold `AVAssetWriter`, real finalisation and a real `ffmpeg` concat on a loaded machine are
         /// not quick — but asserted, because a harness whose failure mode is "never returns" is not a
         /// test.
-        private static let wallClockBudgetSeconds = 180.0
+        ///
+        /// **Derived from the waits it bounds, never restated as a number.** A run that spends every
+        /// second the harness itself allows — the parent's readiness wait, then recovery's — is slow,
+        /// not broken; a budget under that sum would fail a load-delayed success and point the message
+        /// at the harness instead of at the machine. The margin covers the two spawns and the kill.
+        private static let wallClockBudgetSeconds =
+            Harness.readinessWaitSeconds + Harness.recoveryTimeoutSeconds + 30.0
 
         @Test("A SIGKILLed recording is recovered by a fresh process, frame for frame")
         @available(macOS 15.0, *)
@@ -128,9 +134,10 @@ struct CrashRun {
     /// 4096 frames because the encoding wraps at 65536: a hole that size is unambiguously a loss,
     /// whereas one of 48000 (a whole buffer) is arithmetically indistinguishable from a 17536-frame
     /// repetition. See `Harness.Fault`.
-    static let fault = Harness.Fault(frames: 4096, bufferIndex: 1)
-    /// Where that hole lands in the output: the buffer at index 1 begins one buffer in.
-    static let faultFrame = 48_000
+    static let fault = Harness.Fault(frames: 4096, bufferIndex: 1)!
+    /// Where that hole lands in the output — derived from the source's own buffer size, because the
+    /// fault is placed by buffer index and this is the frame that index means.
+    static let faultFrame = fault.bufferIndex * Int(FakeCaptureSource.framesPerBuffer)
 
     /// Run the whole thing, or fail trying.
     static func stage(label: String, fault: Harness.Fault?) async throws -> CrashRun {
@@ -174,6 +181,16 @@ struct CrashRun {
         let closed = Dictionary(uniqueKeysWithValues: Track.allCases.map {
             ($0, closedSegmentFrames(in: meeting, track: $0))
         })
+        // The prefix has to be a real number, and this is what says so. It is the sole lower bound
+        // both tests rest on: at zero, `frames > closedFrames` weakens to "at least one frame came
+        // back" and `low...high` to "any length at all" — a harness that still passes while proving
+        // almost nothing. Readiness already guarantees a finalised segment per track, so a zero here
+        // means the measurement broke (a header format change, a moved directory), not that the run
+        // was unlucky — and a broken oracle must fail loudly rather than quietly rubber-stamp.
+        for (track, frames) in closed where frames <= 0 {
+            child.tearDown()
+            throw HarnessRunError.closedPrefixEmpty(track: track)
+        }
 
         // Recovery, in a process that shares nothing with the one that died — no in-memory state
         // survived it, which is exactly the point. Required to succeed before anything is inspected:
@@ -226,6 +243,7 @@ struct CrashRun {
         case notKilled(HarnessProcess.Termination, String)
         case recoveryFailed(String)
         case boundsInverted(track: Track, closed: Int, emitted: Int)
+        case closedPrefixEmpty(track: Track)
     }
 }
 
