@@ -100,6 +100,21 @@ come from the real bundle identifier so the two flavors are distinguishable.
 
 ## Parked: the `ControlAPI` façade + characterization contract
 
+**Update 2026-07-16 — the characterization half is promoted, the façade half stays parked.** External
+review of a combined "boundary + typed errors + state stream + UI migration" task confirmed it
+mis-models the state (one lifecycle enum cannot represent capture-live-while-idle, an archive error
+coexisting with recording, a fatal stall whose assembly still runs) and hides two or three tasks under
+"no behaviour change". So it was split: **freeze the behaviour first**, then build the boundary against
+that frozen contract. The characterization task is now
+`docs/plans/2026-07-16-lifecycle-characterization.md` (Codex-approved over four rounds; drives the real
+pipeline through `RecordingController`, adds no production API). **Still parked here:** the observable
+`ControlAPI` boundary itself — a typed lifecycle+notice state model (not a single enum), typed error
+categories on the `errorMessage` string paths, one state stream the UI and tests share, the UI migrated
+to consume it, and a health/recovery signal that needs new plumbing through `SelfCheck`. Promote that
+only after the characterization contract lands, and let the contract catch any behaviour drift.
+
+The original review notes below still apply to the parked façade half:
+
 Pulled OUT of an overnight plan on 2026-07-15 after external review — it contained a criterion no
 autonomous agent could honestly satisfy. Fix these **before** promoting it.
 
