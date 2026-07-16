@@ -54,7 +54,14 @@ Consequences to keep in mind:
   `swiftpm-macos-app-bundle`. **Rely on them and on the official docs — do not invent APIs.**
 
 ## Commands
-- Build: `bash Scripts/bundle.sh` (SwiftPM → `.app` + ad-hoc codesign; there is NO full Xcode)
+- Build: `bash Scripts/bundle.sh` (SwiftPM → `.app` + codesign; there is NO full Xcode). Signs with a
+  local self-signed identity so the **designated requirement is stable across rebuilds** and a TCC
+  grant survives a rebuild — ad-hoc pins the requirement to the cdhash, which changes every build.
+  `bundle.sh` runs `Scripts/setup-signing.sh` automatically on first use (idempotent, non-interactive,
+  no GUI or login-keychain password; the private key is generated locally and never committed).
+  ⚠️ Switching an already-granted app from the old ad-hoc signature to the certificate changes its
+  requirement **once**, so both flavors must be granted one final time after their first
+  certificate-signed build; from then on rebuilds keep the grant.
 - Compile: `swift build -c release`
 - Tests: `bash Scripts/test.sh` (real run via `ActaTestRunner`; exits non-zero on the first failure).
   **Needs `ffmpeg`** — `SegmentAssemblerTests` shells out to it for real; without it the assembly

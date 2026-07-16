@@ -6,11 +6,17 @@
 #   stable -> Acta.app      / dev.personal.acta      / archive ~/Acta
 #   dev    -> Acta Dev.app  / dev.personal.acta-dev  / archive ~/Acta-dev
 #
-# Why the identities differ: TCC binds a permission to the bundle identity, and an ad-hoc signature
-# has no stable Team ID, so the cdhash changes on every rebuild. With one shared identity, rebuilding
-# the experimental build revokes Screen Recording from the working one. Separate bundle IDs keep the
-# stable app's grant intact no matter how often dev is rebuilt. Separate archives keep an
-# experimental build from ever writing into real recordings.
+# Why the identities differ: TCC binds a permission to the app's designated requirement. Both flavors
+# are signed with the same local certificate (see Scripts/setup-signing.sh) but with different bundle
+# identifiers, so their requirements differ — Screen Recording granted to one is never shared with or
+# revoked by the other. Separate archives likewise keep an experimental build from ever writing into
+# real recordings.
+#
+# Why a certificate and not ad-hoc: an ad-hoc signature (codesign -s -) pins the requirement to the
+# binary's cdhash, which changes on every rebuild, so macOS revokes the grant every single build. The
+# self-signed certificate gives each flavor a STABLE requirement (identifier + certificate leaf), so a
+# rebuild keeps its grant. Switching an already-granted app from ad-hoc to the certificate changes its
+# requirement once, so it must be granted one final time after the first certificate-signed build.
 #
 # Usage: bundle.sh [stable|dev]      (default: dev — the safe default; stable is the deliberate act)
 set -euo pipefail
@@ -89,12 +95,31 @@ PB=/usr/libexec/PlistBuddy
 "$PB" -c "Add :ActaBuildRevision string $GIT_DESC" "$APP_DIR/Contents/Info.plist" 2>/dev/null \
   || "$PB" -c "Set :ActaBuildRevision $GIT_DESC" "$APP_DIR/Contents/Info.plist"
 
-echo "==> ad-hoc codesign (identifier=$BUNDLE_ID)"
-codesign --force --sign - \
+# Sign with the local self-signed identity so the designated requirement is stable across rebuilds
+# (a TCC grant then survives a rebuild). setup-signing.sh is idempotent and non-interactive, so on a
+# fresh machine the first build creates the identity with no prompt.
+KEYCHAIN="$HOME/Library/Keychains/acta-codesign.keychain-db"
+IDENTITY_CN="Acta Local Signing"
+if ! security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY_CN"; then
+  echo "==> no local signing identity yet — running one-time setup"
+  bash "$ROOT/Scripts/setup-signing.sh"
+fi
+security unlock-keychain -p "" "$KEYCHAIN"
+IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | grep "$IDENTITY_CN" | grep -oE '[0-9A-F]{40}' | head -1)"
+if [[ -z "$IDENTITY" ]]; then
+  echo "error: could not resolve the '$IDENTITY_CN' signing identity" >&2
+  exit 1
+fi
+
+echo "==> codesign (identity=$IDENTITY_CN, identifier=$BUNDLE_ID)"
+codesign --force --sign "$IDENTITY" \
   --identifier "$BUNDLE_ID" \
   --entitlements "$ROOT/Resources/Acta.entitlements" \
+  --keychain "$KEYCHAIN" \
   "$APP_DIR"
 
 echo "==> done: $APP_DIR"
 echo "    flavor=$FLAVOR  bundle=$BUNDLE_ID  revision=$GIT_DESC"
 codesign --verify --verbose=2 "$APP_DIR" || true
+echo "==> designated requirement (stable across rebuilds):"
+codesign -d --requirements - "$APP_DIR" 2>&1 | grep designated || true
