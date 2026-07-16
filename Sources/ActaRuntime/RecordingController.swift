@@ -75,10 +75,10 @@ public final class RecordingController: ObservableObject {
     /// menu is first opened, and `MenuContent` shows that same state.
     public static let shared = RecordingController()
 
-    /// The default `makeSession` is the shipped wiring — real capture, real TCC, real time, via
-    /// `RecordingSession`'s own `RecordingDependencies.live` default.
+    /// The default `makeSession` is `liveSessionFactory` — the shipped wiring, named there rather than
+    /// written inline here so that a test can assert what production gets.
     public init(settingsStore: SettingsStore = SettingsStore(),
-                makeSession: @escaping SessionFactory = { RecordingSession(directory: $0, settings: $1) }) {
+                makeSession: @escaping SessionFactory = RecordingController.liveSessionFactory) {
         self.settingsStore = settingsStore
         self.makeSession = makeSession
         self.settings = settingsStore.load()

@@ -231,6 +231,16 @@ final class FakePermissions: PermissionChecking, @unchecked Sendable {
     var screenRequestCount: Int { withLock { screenRequests } }
     var micRequestCount: Int { withLock { micRequests } }
 
+    /// The user taking a permission away in System Settings while the app is running. Without these,
+    /// an answer is fixed at construction and `SelfCheck`'s whole permission-diagnosis branch is
+    /// unreachable: `AudioRecorder` rejects a start that has no permissions, so the only way into that
+    /// code is a permission that disappears *after* the start.
+    func revokeScreenRecording() { withLock { screenGranted = false } }
+
+    /// The microphone answer going back to "never asked" — a TCC reset (`tccutil`, "Reset Location &
+    /// Privacy") mid-run. Rare, but it is what makes the two request flags observably independent.
+    func resetMicrophone() { withLock { micStatus = .notDetermined } }
+
     var hasScreenRecording: Bool { withLock { screenGranted } }
 
     @discardableResult

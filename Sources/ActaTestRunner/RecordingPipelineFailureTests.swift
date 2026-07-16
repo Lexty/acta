@@ -271,8 +271,11 @@ struct RecordingPipelineFailureTests {
         source.silence(.mic)
         try await session.start(onStall: { stalls.record($0) })
 
-        // Give the watchdog several ticks to overreact, if it is going to.
-        _ = await waitUntil(timeout: 0.5) { clock.sleepCount > 6 }
+        // Give the watchdog several ticks to overreact, if it is going to. The result is asserted and
+        // not discarded: if the ticks never happen, the watchdog never got the chance to misbehave and
+        // the expectations below would pass having proven nothing.
+        let ticked = await waitUntil(timeout: 0.5) { clock.sleepCount > 6 }
+        #expect(ticked, "the watchdog never ticked — the silence below was never actually watched")
         #expect(stalls.reported.isEmpty, "a silent microphone was reported as a failure: \(stalls.reported)")
         #expect(source.startCount == 1, "a silent microphone triggered a pointless stream restart")
 
@@ -283,5 +286,95 @@ struct RecordingPipelineFailureTests {
         // error the user is shown.
         let systemSegments = segmentFiles(in: directory, track: SegmentLayout.systemDirName)
         #expect(!systemSegments.isEmpty, "the live system track recorded nothing while the mic was silent")
+    }
+
+    @Test
+    @available(macOS 15.0, *)
+    func aPermissionRevokedDuringTheStartupProbeIsDiagnosedRatherThanRestartedAround() async {
+        let directory = makeTemporaryDirectory("pipeline-revoked-screen")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let source = FakeCaptureSource()
+        let permissions = FakePermissions(screenGranted: true, grantsOnRequest: false)
+        let clock = TestClock()
+        // The user opens System Settings and takes screen recording away while the probe is running.
+        // This is the *only* way into `SelfCheck`'s permission diagnosis: `AudioRecorder` rejects a
+        // start whose permissions are already missing, so everything below it is only reachable by a
+        // permission that disappears after the start was allowed through.
+        clock.onSleep { _ in permissions.revokeScreenRecording() }
+
+        let session = RecordingSession(directory: directory, settings: makeSettings(),
+                                       wakeLock: CountingWakeLock().makeWakeLock(),
+                                       dependencies: makeDependencies(source: source,
+                                                                      permissions: permissions,
+                                                                      clock: clock))
+
+        // Not `.noData`: a revoked permission is why the buffers stopped, and telling the user to
+        // "check your audio device" would send them looking in the wrong place entirely.
+        await #expect(throws: StartupFailure.noScreenRecordingPermission) {
+            try await session.start()
+        }
+        #expect(permissions.screenRequestCount == 1,
+                "the revoked permission was never requested, or the dialog was shown more than once")
+        // A permission is not healed by restarting the stream — the restart budget must stay untouched.
+        #expect(source.startCount == 1, "a revoked permission was answered with a pointless restart")
+    }
+
+    @Test
+    @available(macOS 15.0, *)
+    func eachPermissionDialogIsTrackedSeparatelyWhenBothGoMissingAtOnce() async throws {
+        let directory = makeTemporaryDirectory("pipeline-both-revoked")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let source = FakeCaptureSource()
+        // Both permissions vanish inside the probe window — screen revoked, the microphone reset to
+        // "never asked" — and the user grants both when asked.
+        let permissions = FakePermissions(screenGranted: true, grantsOnRequest: true)
+        let clock = TestClock()
+        let firstSleep = OnceFlag()
+        clock.onSleep { _ in
+            if firstSleep.takeIfFirst() {
+                permissions.revokeScreenRecording()
+                permissions.resetMicrophone()
+                // Deliberately no batch on this tick. `SelfDiagnosis` clears a snapshot whose data is
+                // flowing *before* it looks at the permissions — a live recording is fine whatever TCC
+                // now says — so a probe window with buffers in it never reaches the dialogs at all.
+                return
+            }
+            source.emitBatch()
+        }
+
+        let session = RecordingSession(directory: directory, settings: makeSettings(),
+                                       wakeLock: CountingWakeLock().makeWakeLock(),
+                                       dependencies: makeDependencies(source: source,
+                                                                      permissions: permissions,
+                                                                      clock: clock))
+
+        try await session.start()
+        _ = await session.stop()
+
+        // The point of this test, and the reason the flags are per-permission rather than one shared
+        // `Bool`: with a single flag, requesting screen recording marks *both* as asked, the
+        // microphone dialog is never shown, and the user is told to grant a permission nobody ever put
+        // a dialog in front of them for.
+        #expect(permissions.screenRequestCount == 1,
+                "the screen dialog was shown \(permissions.screenRequestCount) times, expected exactly one")
+        #expect(permissions.micRequestCount == 1,
+                "the microphone dialog was never shown — a screen request suppressed it")
+    }
+}
+
+/// A one-shot latch for the `onSleep` handlers below: the clock's callback is `@Sendable` and fires on
+/// whatever task is sleeping, so "do this on the first tick only" needs real synchronization.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func takeIfFirst() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
     }
 }

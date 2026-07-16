@@ -23,4 +23,16 @@ extension RecordingController {
     /// display or an audio device: the fake goes into the *session's* dependencies, and everything
     /// the controller does around it stays the shipped code.
     public typealias SessionFactory = @MainActor (URL, RecordingSettings) -> RecordingSession
+
+    /// The shipped way to build a session — real capture, real TCC, real time, via
+    /// `RecordingSession`'s own `RecordingDependencies.live` default.
+    ///
+    /// A named value rather than an inline default argument, for the reason `RecordingDependencies`
+    /// spells out: "the app still gets the real thing" is a claim a refactor breaks silently, and a
+    /// default argument states it in a form no test can reach — you cannot ask `init` what it *would*
+    /// have passed. As a value, `RecordingControllerTests` can call it and check what comes back.
+    @MainActor
+    public static let liveSessionFactory: SessionFactory = { directory, settings in
+        RecordingSession(directory: directory, settings: settings)
+    }
 }

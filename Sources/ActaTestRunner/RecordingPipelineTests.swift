@@ -215,4 +215,22 @@ struct RecordingDependenciesTests {
         let second = RecordingDependencies.live.makeSource()
         #expect(first !== second)
     }
+
+    @Test
+    @MainActor
+    @available(macOS 15.0, *)
+    func theLiveSessionFactoryBuildsARealSessionForTheFolderItIsGiven() {
+        // The other half of the same claim, one level up: `RecordingDependencies.live` is only what
+        // the app records with if the controller actually reaches for it. Swap the factory default to
+        // a fake and every controller test goes greener while the shipped app records nothing.
+        //
+        // The directory is what is asserted because it is the one thing a session exposes, and it is
+        // also the part that matters: a factory that ignored it would record every meeting into the
+        // same folder.
+        let directory = makeTemporaryDirectory("live-session-factory")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let session = RecordingController.liveSessionFactory(directory, .default)
+        #expect(session.directory == directory)
+    }
 }
