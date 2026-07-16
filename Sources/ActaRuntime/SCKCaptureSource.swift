@@ -25,14 +25,22 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     private let micQueue = DispatchQueue(label: "dev.personal.acta.audio.mic")
     private let screenQueue = DispatchQueue(label: "dev.personal.acta.audio.screen")
 
-    // The current stream under a lock: `start()` sets it and `stop()` clears it (the Swift
-    // concurrency pool), while the `didStopWithError` delegate does so from its own ScreenCaptureKit
-    // queue; and the self-diagnosis reads it through `isStreaming` from a third one. Without the lock
+    // The current stream under a lock: `start()` sets it and `stop()` takes it (the Swift concurrency
+    // pool), while the `didStopWithError` delegate clears it from its own ScreenCaptureKit queue; and
+    // the self-diagnosis reads it through `isStreaming` from a third one. Without the lock
     // this is a race for the reference: releasing the old stream in parallel with storing a new one
     // corrupts the retain count, and an unsynchronized read in the `===` check could see a stale
     // value and clear an already-restarted stream.
     private let streamLock = NSLock()
     private var currentStream: SCStream?
+    /// Streams that are no longer current but are still owed a microphone teardown. `didStopWithError`
+    /// drops a dead stream to keep `isStreaming` honest, but under this file's own premise — the tap
+    /// outlives `stopCapture()` and even the process — dropping the reference does **not** release the
+    /// microphone. Without this slot the watchdog path leaks a tap per restart: the stream errors out,
+    /// `restart()` calls `stop()`, `stop()` finds nothing to disable, and `start()` opens a second
+    /// mic-on stream. An array rather than one slot so a second error can never overwrite a pending
+    /// teardown, even though today's single-stream-at-a-time invariant makes that unreachable.
+    private var streamsAwaitingTeardown: [SCStream] = []
 
     // The handler is installed before `start()` and read from both sample-handler queues; the lock
     // is what makes that publication safe rather than merely likely. It also guards `isStopped`,
@@ -51,10 +59,36 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
 
     /// Clear the stream only if it is still the very same one — the check and the clearing happen
     /// under a single lock, otherwise a restart with its new stream could slip in between them.
+    ///
+    /// The cleared stream is handed to `streamsAwaitingTeardown` rather than simply dropped: it is dead
+    /// as far as `isStreaming` is concerned, but its microphone tap is not, and only `stop()` can
+    /// dismantle that.
     private func clearStream(ifIdentical stream: SCStream) {
         streamLock.lock()
-        if currentStream === stream { currentStream = nil }
+        if currentStream === stream {
+            currentStream = nil
+            streamsAwaitingTeardown.append(stream)
+        }
         streamLock.unlock()
+    }
+
+    /// Take every stream this source still owes a microphone teardown — the current one plus anything
+    /// `didStopWithError` set aside — and disown them all in one acquisition.
+    ///
+    /// Taking and clearing under a single lock is what the old `activeStream = nil` could not do across
+    /// the teardown's two suspension points: a restart storing a new stream mid-teardown would have had
+    /// its stream cleared out from under it. The returned array is what keeps each stream alive through
+    /// the awaits that follow.
+    private func takeStreamsForTeardown() -> [SCStream] {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        var streams = streamsAwaitingTeardown
+        streamsAwaitingTeardown.removeAll()
+        if let currentStream {
+            streams.append(currentStream)
+            self.currentStream = nil
+        }
+        return streams
     }
 
     /// Whether an `SCStream` is currently up (for the self-diagnosis snapshot).
@@ -204,19 +238,18 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// precisely the tail-loss `isFinished` describes, and it used to be prevented by finalizing
     /// *on* these queues.
     ///
-    /// Between the two steps sits the microphone teardown: the mic is disabled on the live stream and
-    /// awaited **before** `stopCapture()`, and the stream is released **last** so it stays alive
-    /// through both calls (see `disableMicrophone(on:)`). `isStreaming` therefore reads `true` slightly
-    /// longer than it used to — harmless, because `AudioRecorder` serializes `stop()` against
-    /// start/restart and the self-check.
+    /// Between the two steps sits the microphone teardown: for **every** stream still owed one — the
+    /// current stream and any that `didStopWithError` set aside — the mic is disabled on the stream and
+    /// awaited **before** its `stopCapture()` (see `disableMicrophone(on:)`). The array returned by
+    /// `takeStreamsForTeardown()` retains each stream across both awaits, so none is released until its
+    /// teardown has run.
     public func stop() async {
         // Gate first, before touching the stream: everything below is asynchronous, and every moment
         // the gate is open past this point is a moment a straggler can reach a writer being finalized.
         setStopped(true)
-        if let stream = activeStream {
+        for stream in takeStreamsForTeardown() {
             await disableMicrophone(on: stream)
             await stopCapture(stream)
-            activeStream = nil
         }
         // Unconditional, including the no-stream path: `didStopWithError` clears the stream from its
         // own queue while leaving the gate open, so a delivery that observed the open gate can be in

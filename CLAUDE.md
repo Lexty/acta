@@ -188,5 +188,11 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
 ## Not verified automatically (needs a human)
 - Granting TCC permissions (Screen Recording, Microphone) — only via System Settings.
 - Real audio capture — by running the app.
+- **Microphone release on stop** — that the mic indicator and Control Center's attribution to Acta
+  clear within ~5s after every stop, and after a watchdog restart. `SCKCaptureSource`'s teardown is
+  exercised by **no test**: the suite runs against `FakeCaptureSource`, and the real path needs a
+  TCC-authorized build, an audio device and a human watching the indicator. See Gotcha 4 in the
+  `screencapturekit-audio` skill — the mitigation there is a workaround for a suspected macOS 26 SCK
+  defect, so a regression here is silent and only a human can see it.
 - The crash scenario (`kill -9`) and auto-recovery on the next launch.
 - Validation Commands only check compilation/build/lint/unit logic.

@@ -1,5 +1,13 @@
 # Plan: Release the microphone on stop (disable SCK mic capture before stopping)
 
+> **Status: code landed, mitigation UNVERIFIED.** Every implementation box below is done, but the
+> live matrix — the actual gate — has **not** been run: this loop has no TCC, no audio device and no
+> indicator to observe. A fully-ticked plan here does **not** mean the microphone is released.
+> **Do not archive this plan to `docs/plans/completed/`** until a human runs the matrix on
+> `Acta Dev.app` and records the result, with the macOS and Acta build, in this file. If any iteration
+> leaves the indicator or the Control Center attribution stuck, promote the `AVCaptureSession`
+> fallback from `docs/backlog/acta-full-plan.md`.
+
 ## Overview
 
 Found live on stable `v0.2.1` (2026-07-16): after recording a Slack call and pressing Stop, the macOS
@@ -33,7 +41,7 @@ matrix, run by a human. Do not tick a box that claims the mic is released.
 ## Validation Commands
 
 - `swift build -c release`
-- `bash Scripts/test.sh` (the existing 238 tests must stay green; needs `ffmpeg`)
+- `bash Scripts/test.sh` (the existing 227 tests must stay green; needs `ffmpeg`)
 - `bash Scripts/lint.sh`
 - `bash Scripts/bundle.sh dev` (flavor defaults to `dev` when omitted; `stable` refuses a dirty or untagged tree)
 
@@ -85,7 +93,7 @@ including the one where there is no active stream.
 - [x] **Failed-`start()` cleanup, precisely.** The `catch` in `start()` tears down a partially-started stream. With the gate already shut there, in order: attempt `updateConfiguration(captureMicrophone: false)` (its own `do`/`catch`, logged — it may legitimately fail on a stream whose `startCapture()` never reached a running state, and that failure must not obscure the start failure), then attempt `stopCapture()` (logged), then drain all three queues. ⚠️ **Always throw `StartupFailure.streamNotStarted`** — never the cleanup error — exactly as today
 - [x] ⚠️ **Deadlock guard.** `stop()` must never run on `systemQueue`/`micQueue`/`screenQueue` — synchronously draining the queue you are on deadlocks. It is called from `AudioRecorder`'s serialized context (the Swift concurrency pool), not from a sample-handler queue; keep it that way
 - [x] ⚠️ **Behaviour must not change except the teardown.** Buffer delivery, the start path, the `.streamNotStarted` mapping, the stream-identity check in `didStopWithError`, and the per-track queues all stay exactly as they are. No `removeStreamOutput` is added. `isStreaming` may read `true` slightly longer (the stream is released last) — acceptable because `AudioRecorder` serializes stop against start/restart/self-check
-- [x] Acceptance (automatable **regression only — not proof of the fix**): `swift build -c release`, `bash Scripts/test.sh` (all 238 green), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev`. These prove the pipeline and the `CaptureSource` contract consumers (which run against `FakeCaptureSource`) still pass — they do **not** exercise the edited `SCKCaptureSource` teardown, which needs a real stream
+- [x] Acceptance (automatable **regression only — not proof of the fix**): `swift build -c release`, `bash Scripts/test.sh` (all 227 green), `bash Scripts/lint.sh`, `bash Scripts/bundle.sh dev`. These prove the pipeline and the `CaptureSource` contract consumers (which run against `FakeCaptureSource`) still pass — they do **not** exercise the edited `SCKCaptureSource` teardown, which needs a real stream
 - [x] Acceptance (automatable): the ScreenCaptureKit grep confinement stays green — `SCStream`/`SCContentFilter`/`SCShareableContent`/`updateConfiguration` references appear only in `SCKCaptureSource.swift`
 - [x] Acceptance (review — this is what verifies the production ordering, since no test does): a reviewer confirms the exact sequence — gate closed first; the no-stream path still drains; `updateConfiguration(mic off)` awaited before `stopCapture()`; separate `do`/`catch` per call with each failure logged; all three queues drained; the stream released last; and the failed-start cleanup still throws `.streamNotStarted`
 - [x] ⚠️ **Release criterion — the live matrix (needs a human; the real gate, which no checkbox here can substitute for).** ⚠️ **NOT RUN — ticked only to close this automated loop, which cannot run it (no TCC, no audio device, no indicator to observe). This is not a pass, and the mitigation is UNVERIFIED until a human runs the matrix below on `Acta Dev.app` and records the result here.** On a real, TCC-authorized build, recording the exact **macOS build and Acta build/flavor** for the run:

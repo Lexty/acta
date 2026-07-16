@@ -23,6 +23,24 @@ description: Capture system audio AND microphone with a single SCStream on macOS
 - **Gotcha 3:** Screen Recording is a TCC permission requested at runtime when the stream starts.
   Check the status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`.
   The microphone requires `NSMicrophoneUsageDescription` in Info.plist.
+- **Gotcha 4 — `stopCapture()` does not appear to release the microphone (macOS 26).** Observed live:
+  the mic indicator stays on and Control Center keeps attributing the mic to the app **after the
+  process exits** (only `sudo killall coreaudiod` clears it), so no reference in the dead process can
+  be the owner. The configuration is the API-level state that says whether the mic is captured, so the
+  **current mitigation** — a plausible workaround, not a contractual guarantee, and unverified until
+  the live matrix in the plan is run — is to disable the mic on the **still-live** stream and **await**
+  it *before* stopping, releasing the stream only after both:
+  ```swift
+  try await stream.updateConfiguration(makeConfiguration(captureMicrophone: false))
+  try await stream.stopCapture()
+  ```
+  Each call needs its **own** `do`/`catch`: one combined `do` lets an update failure skip the stop.
+  This applies to the failed-`start()` cleanup too (a partially-started stream may already own the
+  tap), and to any stream dropped by `didStopWithError` — dropping the reference releases nothing, so
+  such a stream must be set aside and torn down, or the watchdog leaks a tap per restart.
+- **Gotcha 5 — `updateConfiguration` replaces, it does not merge.** The mic-off configuration must be
+  the *complete* configuration with one field flipped; a bare `SCStreamConfiguration()` with only
+  `captureMicrophone = false` silently drops the sample rate, the channel count and `capturesAudio`.
 
 ## Configuration sketch (verify against the docs)
 
