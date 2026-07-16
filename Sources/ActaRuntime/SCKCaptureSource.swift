@@ -100,15 +100,23 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// `wasLive` distinguishes the two, and governs **only the log level** of a failed teardown: on a
     /// live stream a failure is a real one and the mitigation just lost, while on a set-aside stream it
     /// is the expected outcome (see `streamsAwaitingTeardown`). The teardown itself is identical.
+    ///
+    /// **The live stream comes first, and the order is load-bearing.** `stop()` walks this array
+    /// sequentially, awaiting two ScreenCaptureKit calls per entry; the live stream's teardown is the
+    /// only one that is the mitigation as designed, and the set-aside ones are expected to fail. Tearing
+    /// the dead streams down first would delay the one teardown that matters behind calls this file
+    /// already argues do nothing — and if one of them ever blocks instead of throwing, the microphone
+    /// would never be disabled at all, which is the whole point of this type.
     private func takeStreamsForTeardown() -> [(stream: SCStream, wasLive: Bool)] {
         streamLock.lock()
         defer { streamLock.unlock() }
-        var streams = streamsAwaitingTeardown.map { (stream: $0, wasLive: false) }
-        streamsAwaitingTeardown.removeAll()
+        var streams: [(stream: SCStream, wasLive: Bool)] = []
         if let currentStream {
             streams.append((stream: currentStream, wasLive: true))
             self.currentStream = nil
         }
+        streams.append(contentsOf: streamsAwaitingTeardown.map { (stream: $0, wasLive: false) })
+        streamsAwaitingTeardown.removeAll()
         return streams
     }
 
@@ -193,10 +201,13 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
             // already own the microphone tap, and nothing else will ever stop this stream. The mic-off
             // update may legitimately fail on a stream whose `startCapture()` never reached a running
             // state — `disableMicrophone` logs that and moves on, so the cleanup failure never
-            // obscures the start failure below.
+            // obscures the start failure below. Hence `.info`, for the same reason the set-aside
+            // streams use it: here a failed teardown is the *expected* outcome, and logging it at
+            // `.error` would bracket the real start error just logged above with noise, on the exact
+            // channel this bug was diagnosed from.
             if let created {
-                await disableMicrophone(on: created)
-                await stopCapture(created)
+                await disableMicrophone(on: created, level: .info)
+                await stopCapture(created, level: .info)
             }
             drainSampleHandlerQueues()
             throw StartupFailure.streamNotStarted
