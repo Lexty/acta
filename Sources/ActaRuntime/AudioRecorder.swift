@@ -25,6 +25,7 @@ public final class AudioRecorder: @unchecked Sendable {
     private let directory: URL
 
     private let source: CaptureSource
+    private let permissions: PermissionChecking
 
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
@@ -102,11 +103,14 @@ public final class AudioRecorder: @unchecked Sendable {
     /// - Parameter directory: the recording folder; segments are written into its `system/` and
     ///   `mic/` subdirectories.
     /// - Parameter source: where the buffers come from; the real ScreenCaptureKit capture by default.
+    /// - Parameter permissions: who answers the TCC questions; the real system calls by default.
     public init(directory: URL,
                 segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds),
-                source: CaptureSource = SCKCaptureSource()) {
+                source: CaptureSource = SCKCaptureSource(),
+                permissions: PermissionChecking = SystemPermissions()) {
         self.directory = directory
         self.source = source
+        self.permissions = permissions
         self.systemWriter = SegmentWriter(
             directory: directory.appendingPathComponent(SegmentLayout.systemDirName),
             segmentSeconds: segmentSeconds
@@ -146,21 +150,22 @@ public final class AudioRecorder: @unchecked Sendable {
     /// This stays here rather than in the source: the source produces buffers, it does not decide
     /// whether it is allowed to. Every restart re-checks, because `restart()` ends in `start()`.
     ///
-    /// On its first call `CGRequestScreenCaptureAccess` shows the dialog, but the permission only
-    /// applies to the next launch of the process — so here we still fail with a hint saying "grant
-    /// the permission and restart Acta".
+    /// The first screen-recording request shows the dialog, but the permission it grants only applies
+    /// to the **next launch** of the process (see `SystemPermissions`) — so even a user who agrees
+    /// cannot record now, and this start still fails, with a hint saying "grant the permission and
+    /// restart Acta".
     private func requestPermissionsIfNeeded() async throws {
-        if !Permissions.hasScreenRecording {
-            Permissions.requestScreenRecording()
-            guard Permissions.hasScreenRecording else {
+        if !permissions.hasScreenRecording {
+            permissions.requestScreenRecording()
+            guard permissions.hasScreenRecording else {
                 log.error("No Screen Recording permission — start rejected")
                 throw StartupFailure.noScreenRecordingPermission
             }
         }
-        if Permissions.microphoneStatus == .notDetermined {
-            _ = await Permissions.requestMicrophone()
+        if permissions.microphoneStatus == .notDetermined {
+            _ = await permissions.requestMicrophone()
         }
-        guard Permissions.hasMicrophone else {
+        guard permissions.hasMicrophone else {
             log.error("No Microphone permission — start rejected")
             throw StartupFailure.noMicrophonePermission
         }

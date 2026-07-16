@@ -16,20 +16,17 @@ import os
 /// manually.
 @available(macOS 15.0, *)
 final class SelfCheck: @unchecked Sendable {
-    /// How many times to try restarting the stream before giving up with a clear error.
-    static let maxRestartAttempts = 3
-    /// Startup observation window, s — the first buffers must arrive within it.
-    static let startupProbeSeconds = 2.0
-    /// Watchdog threshold, s: if buffers stop growing for longer, we consider the stream stalled.
-    static let watchdogStallSeconds = 6.0
-    /// Watchdog polling period, s.
-    static let watchdogTickSeconds = 1.0
-
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "SelfCheck")
     private let recorder: AudioRecorder
+    private let permissions: PermissionChecking
+    private let clock: SelfCheckClock
 
-    init(recorder: AudioRecorder) {
+    init(recorder: AudioRecorder,
+         permissions: PermissionChecking = SystemPermissions(),
+         clock: SelfCheckClock = SystemClock()) {
         self.recorder = recorder
+        self.permissions = permissions
+        self.clock = clock
     }
 
     /// A snapshot of the recorder's counters — the baseline for deltas over the observation window.
@@ -73,7 +70,7 @@ final class SelfCheck: @unchecked Sendable {
     /// After the start, make sure data is flowing; on failure — self-healing. Returns `nil` on
     /// success, or the reason for the failure (its `userMessage` text is shown in the UI).
     func verifyStartAndHeal() async -> StartupFailure? {
-        var attemptsLeft = Self.maxRestartAttempts
+        var attemptsLeft = SelfCheckTuning.maxRestartAttempts
         // Show the TCC dialog at most once per check: after a denial it will not appear again
         // anyway, and without this the healing loop would spin for nothing.
         var permissionRequested = false
@@ -88,8 +85,8 @@ final class SelfCheck: @unchecked Sendable {
 
             let delta = await probeDataFlow(from: counters())
             let snapshot = SelfDiagnosis.Snapshot(
-                hasScreenRecording: Permissions.hasScreenRecording,
-                hasMicrophone: Permissions.hasMicrophone,
+                hasScreenRecording: permissions.hasScreenRecording,
+                hasMicrophone: permissions.hasMicrophone,
                 streamStarted: recorder.isStreaming,
                 bufferCount: delta.received,
                 writtenBufferCount: delta.written,
@@ -140,21 +137,21 @@ final class SelfCheck: @unchecked Sendable {
     /// Check both permissions, showing the system dialog if needed (once per check).
     /// Returns the reason for the failure if a permission is still missing, otherwise `nil`.
     private func missingPermission(alreadyRequested: inout Bool) async -> StartupFailure? {
-        if !Permissions.hasScreenRecording {
+        if !permissions.hasScreenRecording {
             if !alreadyRequested {
                 alreadyRequested = true
-                Permissions.requestScreenRecording()
+                permissions.requestScreenRecording()
             }
             // The screen recording permission only applies to the next launch of the process, so
             // even after the user agrees in the dialog this recording cannot start — show a hint.
-            guard Permissions.hasScreenRecording else { return .noScreenRecordingPermission }
+            guard permissions.hasScreenRecording else { return .noScreenRecordingPermission }
         }
-        if !Permissions.hasMicrophone {
-            if !alreadyRequested, Permissions.microphoneStatus == .notDetermined {
+        if !permissions.hasMicrophone {
+            if !alreadyRequested, permissions.microphoneStatus == .notDetermined {
                 alreadyRequested = true
-                _ = await Permissions.requestMicrophone()
+                _ = await permissions.requestMicrophone()
             }
-            guard Permissions.hasMicrophone else { return .noMicrophonePermission }
+            guard permissions.hasMicrophone else { return .noMicrophonePermission }
         }
         return nil
     }
@@ -166,7 +163,7 @@ final class SelfCheck: @unchecked Sendable {
     /// might not have started writing yet — and a dead track would be indistinguishable from a
     /// merely slow one.
     private func probeDataFlow(from baseline: Counters) async -> Counters {
-        try? await Task.sleep(nanoseconds: UInt64(Self.startupProbeSeconds * 1_000_000_000))
+        await clock.sleep(for: SelfCheckTuning.startupProbeSeconds)
         return counters().delta(from: baseline)
     }
 
@@ -191,28 +188,27 @@ final class SelfCheck: @unchecked Sendable {
         // meeting!).
         var trackers = makeWatchdogs(from: counters(includingBytes: false))
         var receivedAtWindowStart = trackers.received
-        var restartsLeft = Self.maxRestartAttempts
+        var restartsLeft = SelfCheckTuning.maxRestartAttempts
         /// Counters right after the last restart: growth relative to them tells whether it helped.
         var countersAfterRestart = Counters(system: TrackFlow(), mic: TrackFlow(), bytes: 0)
         // The reason for the last failed restart: it cannot be reconstructed from the counters
         // later, and it is exactly what the user must be told — not a guess like "no data / disk is
         // not being written".
         var restartFailure: StartupFailure?
-        let tickNanos = UInt64(Self.watchdogTickSeconds * 1_000_000_000)
 
         watch: while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: tickNanos)
+            await clock.sleep(for: SelfCheckTuning.watchdogTickSeconds)
             if Task.isCancelled { break }
 
             let now = counters(includingBytes: false)
-            let time = Self.monotonicSeconds()
+            let time = clock.now
             // The restart healed the flow — give the attempt budget back. Otherwise three attempts
             // would be a quota for the whole recording: an hour-long meeting with rare failures,
             // each successfully healed, would be cut off at the fourth one. The limit must catch a
             // hopeless stream (consecutive failed restarts), not the sum of long-fixed glitches.
-            if restartsLeft < Self.maxRestartAttempts,
+            if restartsLeft < SelfCheckTuning.maxRestartAttempts,
                SelfDiagnosis.restartHealed(now.flows, since: countersAfterRestart.flows) {
-                restartsLeft = Self.maxRestartAttempts
+                restartsLeft = SelfCheckTuning.maxRestartAttempts
                 restartFailure = nil
             }
             let stalled = trackers.flow.observe(bufferCount: now.written, at: time)
@@ -305,11 +301,6 @@ final class SelfCheck: @unchecked Sendable {
     }
 
     private func makeWatchdogs(from now: Counters) -> Watchdogs {
-        Watchdogs(from: now, threshold: Self.watchdogStallSeconds, startTime: Self.monotonicSeconds())
-    }
-
-    /// Monotonic time in seconds (unaffected by system clock changes) — for the watchdog.
-    private static func monotonicSeconds() -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        Watchdogs(from: now, threshold: SelfCheckTuning.watchdogStallSeconds, startTime: clock.now)
     }
 }

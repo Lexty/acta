@@ -23,8 +23,15 @@ public final class RecordingController: ObservableObject {
         case error
     }
 
+    /// How a session is built for a start. Injected so that the controller's own responsibilities —
+    /// notably cleaning up the folder a failed start left behind — can be driven without TCC, a
+    /// display or an audio device: the fake goes into the *session's* dependencies, and everything
+    /// the controller does around it stays the shipped code.
+    public typealias SessionFactory = @MainActor (URL, RecordingSettings) -> RecordingSession
+
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecordingController")
     private let settingsStore: SettingsStore
+    private let makeSession: SessionFactory
 
     /// Current recording settings (edited in the "Settings" section, saved on change).
     @Published public var settings: RecordingSettings
@@ -83,9 +90,16 @@ public final class RecordingController: ObservableObject {
     /// menu is first opened, and `MenuContent` shows that same state.
     public static let shared = RecordingController()
 
-    public init(settingsStore: SettingsStore = SettingsStore()) {
+    public init(settingsStore: SettingsStore = SettingsStore(),
+                makeSession: @escaping SessionFactory = RecordingController.liveSession) {
         self.settingsStore = settingsStore
+        self.makeSession = makeSession
         self.settings = settingsStore.load()
+    }
+
+    /// The shipped session wiring — real capture, real TCC, real time (`RecordingDependencies.live`).
+    public static func liveSession(directory: URL, settings: RecordingSettings) -> RecordingSession {
+        RecordingSession(directory: directory, settings: settings)
     }
 
     /// Whether a recording is in progress right now.
@@ -200,7 +214,7 @@ public final class RecordingController: ObservableObject {
                 .createMeetingDirectory(title: title)
             createdDirectory = directory
             let startedAt = Date()
-            let session = RecordingSession(directory: directory, settings: currentSettings)
+            let session = makeSession(directory, currentSettings)
             // Write a preliminary info.md (recording): if the process is killed, the folder already
             // has metadata; on a clean stop we rewrite it with status done and the duration.
             try? store.writeInfo(

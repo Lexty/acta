@@ -54,17 +54,27 @@ public final class RecordingSession: @unchecked Sendable {
     /// that never started would *write* a marker rather than find one — see `stop()`.
     private var didStart = false
 
+    /// - Parameter dependencies: capture, permissions and time. This is the **composition root**: the
+    ///   same `PermissionChecking` instance goes to both consumers below — `AudioRecorder`, which
+    ///   rejects a start without a permission, and `SelfCheck`, which diagnoses one that is missing or
+    ///   was revoked mid-recording. The session itself asks no permission questions.
     public init(directory: URL,
                 settings: RecordingSettings = .default,
-                wakeLock: DisplayWakeLock = DisplayWakeLock()) {
+                wakeLock: DisplayWakeLock = DisplayWakeLock(),
+                dependencies: RecordingDependencies = .live) {
         self.directory = directory
         self.wakeLock = wakeLock
         let settings = settings.normalized()
         self.settings = settings
         self.segmentSeconds = settings.segmentSeconds
-        let recorder = AudioRecorder(directory: directory, segmentSeconds: Double(settings.segmentSeconds))
+        let permissions = dependencies.makePermissions()
+        let recorder = AudioRecorder(directory: directory,
+                                     segmentSeconds: Double(settings.segmentSeconds),
+                                     source: dependencies.makeSource(),
+                                     permissions: permissions)
         self.recorder = recorder
-        self.selfCheck = SelfCheck(recorder: recorder)
+        self.selfCheck = SelfCheck(recorder: recorder, permissions: permissions,
+                                   clock: dependencies.makeClock())
     }
 
     /// Start: create the folder, write `session.json` (`recording`), launch the capture and the
