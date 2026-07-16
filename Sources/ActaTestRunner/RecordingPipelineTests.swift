@@ -49,17 +49,21 @@ struct RecordingPipelineTests {
                                                                       permissions: permissions,
                                                                       clock: clock))
 
-        let began = Date()
         try await session.start()
-        let startSeconds = Date().timeIntervalSince(began)
         // Snapshotted the instant the start is confirmed, before the watchdog has had a chance to do
         // anything: "start() exactly once" is a claim about the clean start path.
         let startsAtConfirm = source.startCount
         let stopsAtConfirm = source.stopCount
+        let sleepsAtConfirm = clock.sleepCount
         let result = await session.stop()
 
-        #expect(startSeconds < clockWiredWallClockBound,
-                "a confirmed start took \(startSeconds) s of real time — the injected clock is not wired")
+        // The injected clock, asserted directly rather than through wall-clock time. The startup probe
+        // waits on `clock.sleep`, so a confirmed start leaves at least one wait on it; a clock that was
+        // not wired would sleep on real time instead and leave this at zero. Wall-clock timing cannot
+        // decide this — under parallel load the real `AVAssetWriter` setup alone can outlast any bound
+        // short of the 2 s real probe, which is exactly the flake this replaces.
+        #expect(sleepsAtConfirm >= 1,
+                "start confirmed with \(sleepsAtConfirm) injected-clock waits; 0 means the probe slept on real time")
         #expect(startsAtConfirm == 1, "a clean start brought the source up \(startsAtConfirm) times, not once")
         #expect(stopsAtConfirm == 0, "a clean start stopped the source before it ever recorded")
         // The source is asked nothing about permissions; it is asked to capture. The prompting is

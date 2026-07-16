@@ -7,11 +7,6 @@ import Foundation
 // here rather than in either suite because both drive the same pipeline and must describe it the
 // same way — a second copy of `makeSettings` is how two suites quietly start testing two setups.
 
-/// The wall-clock ceiling for a scenario that spends virtual seconds. The real code sleeps 2 s on
-/// the startup probe alone, and the give-up path spends four of them — so a run anywhere near this
-/// bound means the clock is not actually wired and the tests are waiting on real time.
-let clockWiredWallClockBound = 1.5
-
 /// Segment length for these tests: the shortest `RecordingSettings` allows. Combined with buffers a
 /// second long, a couple of batches cross a boundary — which is the point.
 let testSegmentSeconds = RecordingSettings.minSegmentSeconds

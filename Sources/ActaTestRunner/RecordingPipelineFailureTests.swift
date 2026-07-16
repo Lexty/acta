@@ -126,11 +126,9 @@ struct RecordingPipelineFailureTests {
                                                                       permissions: permissions,
                                                                       clock: clock))
 
-        let began = Date()
         await #expect(throws: StartupFailure.noData) {
             try await session.start()
         }
-        let seconds = Date().timeIntervalSince(began)
 
         // The budget, spent exactly: one start to open the recording, then `maxRestartAttempts`
         // stop/start pairs, because there is no `restart()` on the source — restart is
@@ -143,9 +141,13 @@ struct RecordingPipelineFailureTests {
         #expect(permissions.screenRequestCount == 0, "a granted permission was requested during healing")
         #expect(permissions.micRequestCount == 0, "a granted permission was requested during healing")
         #expect(activity.endCount == 1, "a start that never became a recording leaked the display assertion")
-        // Four startup probes of 2 s each in real time would be eight seconds.
-        #expect(seconds < clockWiredWallClockBound,
-                "giving up took \(seconds) s of real time — the injected clock is not wired")
+        // The waits were virtual, asserted directly. Each healing attempt runs a startup probe that
+        // waits on `clock.sleep`, so giving up after `maxRestartAttempts` restarts spends at least that
+        // many waits on the injected clock; an unwired clock would sleep on real time and leave this at
+        // zero. The exact restart count is already pinned by `startCount`/`stopCount` above — this only
+        // has to prove those waits never touched the wall clock, which wall-clock timing cannot do.
+        #expect(clock.sleepCount >= SelfCheckTuning.maxRestartAttempts,
+                "gave up after \(clock.sleepCount) clock waits, under its \(SelfCheckTuning.maxRestartAttempts) restarts — not wired")
     }
 
     @Test
@@ -169,19 +171,18 @@ struct RecordingPipelineFailureTests {
 
         // The stream dies without saying so: buffers simply stop. Only a restart brings it back,
         // which is what the watchdog is for — and the segments already on disk must survive it.
-        let began = Date()
         source.goSilentUntilRestart()
         let restarted = await waitUntil { source.startCount >= 2 }
-        let seconds = Date().timeIntervalSince(began)
 
         #expect(restarted, "the watchdog never restarted a stream that stopped delivering")
         #expect(source.startCount == 2, "the watchdog restarted more than once after the stream recovered")
         #expect(source.stopCount == 1, "the restart did not stop the dead stream first")
-        // The stall threshold is six virtual seconds and the tick is one; in real time the whole
-        // detection is milliseconds. Anything near this bound means the watchdog is waiting on the
-        // wall clock.
-        #expect(seconds < clockWiredWallClockBound,
-                "the watchdog took \(seconds) s of real time to notice the stall — the clock is not wired")
+        // The stall is detected across virtual seconds: the watchdog ticks on `clock.sleep`, so a
+        // restart cannot happen without waits on the injected clock. A clock left unwired would watch
+        // real time and leave this at zero — which wall-clock timing could never tell apart from a
+        // fast machine.
+        #expect(clock.sleepCount >= 1,
+                "the watchdog restarted with no injected-clock waits — it is watching real time")
 
         let result = await session.stop()
         let assembled = try #require(result, "the recording did not survive the watchdog's restart")
@@ -223,9 +224,7 @@ struct RecordingPipelineFailureTests {
         source.silence(.system)
         source.silence(.mic)
 
-        let began = Date()
         let gaveUp = await waitUntil { stalls.count > 0 }
-        let seconds = Date().timeIntervalSince(began)
 
         #expect(gaveUp, "the watchdog never gave up on a stream that stopped delivering for good")
         // `.noData` and not `.diskWriteFailed`: nothing is arriving to be written. The distinction is
@@ -236,8 +235,8 @@ struct RecordingPipelineFailureTests {
         // comes up and delivers nothing.
         #expect(source.startCount == 1 + SelfCheckTuning.maxRestartAttempts,
                 "the watchdog spent \(source.startCount - 1) restarts, not \(SelfCheckTuning.maxRestartAttempts)")
-        #expect(seconds < clockWiredWallClockBound,
-                "giving up took \(seconds) s of real time — the injected clock is not wired")
+        #expect(clock.sleepCount >= SelfCheckTuning.maxRestartAttempts,
+                "gave up after \(clock.sleepCount) clock waits, under \(SelfCheckTuning.maxRestartAttempts) restarts — not wired")
 
         // The audio recorded before the stall is not collateral: it must still assemble.
         let result = await session.stop()
