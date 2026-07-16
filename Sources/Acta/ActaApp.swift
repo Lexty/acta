@@ -10,14 +10,27 @@ struct ActaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra(AppInfo.name, systemImage: "waveform") {
+        MenuBarExtra {
             if #available(macOS 15.0, *) {
                 MenuContent()
             } else {
                 UnsupportedContent()
             }
+        } label: {
+            menuBarLabel
         }
         .menuBarExtraStyle(.window)
+    }
+
+    /// What shows in the menu bar. The dev build adds a visible "DEV" tag next to the waveform so two
+    /// flavors running at once are never confused; stable keeps the bare icon it always had.
+    @ViewBuilder
+    private var menuBarLabel: some View {
+        if BuildFlavor.current == .dev {
+            Label("DEV", systemImage: "waveform")
+        } else {
+            Image(systemName: "waveform")
+        }
     }
 }
 
@@ -56,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct UnsupportedContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppInfo.name).font(.headline)
+            Text(BuildFlavor.current.appDisplayName).font(.headline)
             Text("macOS 15 or later is required.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -120,8 +133,12 @@ struct MenuContent: View {
             Image(systemName: statusIcon)
                 .foregroundStyle(statusColor)
             VStack(alignment: .leading, spacing: 1) {
-                Text(AppInfo.name).font(.headline)
+                Text(BuildFlavor.current.appDisplayName).font(.headline)
                 Text(statusText).font(.caption).foregroundStyle(.secondary)
+                if BuildFlavor.current == .dev {
+                    // Which build is this? With two apps installed it is worth knowing at a glance.
+                    Text(BuildFlavor.revision).font(.caption2).foregroundStyle(.tertiary)
+                }
             }
             Spacer()
             if controller.isRecording {

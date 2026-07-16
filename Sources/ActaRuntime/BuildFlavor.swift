@@ -11,17 +11,26 @@ import Foundation
 /// Read from the `ActaBuildFlavor` key that `bundle.sh` stamps into `Info.plist`. Running outside a
 /// bundle (tests, `swift run`) has no plist, so the fallback is `.dev`: the safe answer, since it
 /// keeps such a run away from `~/Acta`.
-enum BuildFlavor: String {
+public enum BuildFlavor: String {
     case stable
     case dev
 
-    static var current: BuildFlavor {
+    public static var current: BuildFlavor {
         guard let raw = Bundle.main.object(forInfoDictionaryKey: "ActaBuildFlavor") as? String,
               let flavor = BuildFlavor(rawValue: raw)
         else {
             return .dev
         }
         return flavor
+    }
+
+    /// The name shown in the menu bar and panel header. The dev build carries a visible suffix so two
+    /// flavors running side by side are never confused — the whole reason the split exists.
+    public var appDisplayName: String {
+        switch self {
+        case .stable: return AppInfo.name
+        case .dev: return "\(AppInfo.name) Dev"
+        }
     }
 
     /// The default archive folder under the home directory when no explicit path is set.
@@ -45,7 +54,7 @@ enum BuildFlavor: String {
 
     /// The build this binary was made from (`git describe`), stamped by `bundle.sh`.
     /// With two apps installed, "which build produced this recording?" needs an answer.
-    static var revision: String {
+    public static var revision: String {
         Bundle.main.object(forInfoDictionaryKey: "ActaBuildRevision") as? String ?? "unknown"
     }
 }
