@@ -34,14 +34,7 @@ final class ControllerHarness {
     private let suiteName: String
     private let defaults: UserDefaults
 
-    /// - Parameter emitDuringProbe: whether the source delivers audio while the self-diagnosis is
-    ///   watching. `true` is a start that succeeds; `false` is one the probe refuses, because a
-    ///   source that comes up and never delivers is the "mute recording" the diagnosis exists to
-    ///   catch. A scenario that needs its own `onSleep` (to sample the probe window, or to break
-    ///   something inside it) overrides the handler — the last one set wins.
-    init(label: String,
-         permissions: FakePermissions = FakePermissions(),
-         emitDuringProbe: Bool = true) {
+    init(label: String, permissions: FakePermissions = FakePermissions()) {
         // Bound to locals first: the session factory below is a closure, and `self` cannot be
         // captured until every stored property is initialized — `controller` is the last of them.
         let source = FakeCaptureSource()
@@ -63,11 +56,11 @@ final class ControllerHarness {
                                              segmentSeconds: testSegmentSeconds,
                                              deleteSegmentsAfterAssembly: false))
 
-        if emitDuringProbe {
-            // Every wait the self-diagnosis takes is a wait during which, in production, audio would
-            // be arriving — so that is what the fake does here.
-            clock.onSleep { _ in source.emitBatch() }
-        }
+        // Every wait the self-diagnosis takes is a wait during which, in production, audio would be
+        // arriving — so that is what the fake does here. A scenario that needs its own `onSleep` (to
+        // sample the probe window, or to break something inside it) overrides the handler — the last
+        // one set wins.
+        clock.onSleep { _ in source.emitBatch() }
 
         controller = RecordingController(settingsStore: settingsStore) { directory, settings in
             RecordingSession(directory: directory, settings: settings,
@@ -113,12 +106,16 @@ final class ControllerHarness {
 @available(macOS 15.0, *)
 final class ControllerStateLog {
     /// The public derivations, as the menu would render them at one instant.
+    ///
+    /// No `hasWorkInFlight`: it is defined as `{ isBusy }` — the same expression, not merely the same
+    /// value today — so a snapshot could never show the two disagreeing. That the quit path and the
+    /// UI read the same thing is worth freezing, but at the live controller, which is where the
+    /// scenarios assert it.
     struct Snapshot: Equatable {
         var phase: RecordingController.Phase
         var isRecording: Bool
         var isSaving: Bool
         var isBusy: Bool
-        var hasWorkInFlight: Bool
     }
 
     /// Every value `phase` took, in order, starting with the one in place at subscription.
@@ -139,12 +136,18 @@ final class ControllerStateLog {
 
         controller.objectWillChange.sink { _ in
             MainActor.assumeIsolated {
-                // `objectWillChange` fires *before* the change lands, so reading here would record
-                // the state that is being replaced. The read is deferred by one main-actor turn,
-                // which is where the settled value is. Typed explicitly: `Task`'s initializers are
-                // ambiguous for a body this short.
-                let deferred: Task<Void, Never> = Task { @MainActor in self.record(controller) }
-                _ = deferred
+                // Two reads per change, because neither alone is enough.
+                //
+                // `objectWillChange` fires *before* the change lands, so this synchronous read sees
+                // the state the *previous* change settled into. That is what makes a window that
+                // opens at one change and closes at a later one observable **deterministically**:
+                // `handleFatalStall` sets `isStopping`, `phase`, `errorMessage` and `elapsedSeconds`
+                // in one main-actor turn, so the fires after `phase = .error` report the parked
+                // `.error`-while-saving state with no scheduling involved.
+                self.record(controller)
+                // And deferred by one turn, for the state *this* change settles into — the last
+                // change of all has no later fire to report it.
+                Task<Void, Never> { @MainActor in self.record(controller) }
             }
         }.store(in: &cancellables)
     }
@@ -153,8 +156,7 @@ final class ControllerStateLog {
         let snapshot = Snapshot(phase: controller.phase,
                                 isRecording: controller.isRecording,
                                 isSaving: controller.isSaving,
-                                isBusy: controller.isBusy,
-                                hasWorkInFlight: controller.hasWorkInFlight)
+                                isBusy: controller.isBusy)
         if snapshots.last != snapshot { snapshots.append(snapshot) }
     }
 }
@@ -182,8 +184,16 @@ func waitUntilOnMain(timeout: Double = 10.0, _ condition: () -> Bool) async -> B
 /// Used only where a scenario asserts an **absence** (the second `onLaunch` recovering nothing,
 /// `onAppear` recovering nothing). An absence asserted instantly asserts nothing at all: the pass
 /// would simply not have started yet, and the guard could be gone without the test noticing.
-func waitOutARecoveryPass() async {
-    try? await Task.sleep(nanoseconds: 500_000_000)
+///
+/// - Parameter observedPass: how long a real pass took *in this scenario, on this machine*, when the
+///   scenario has one to measure. A constant cannot do this job: the same suite allows a pass 20 s,
+///   which is the admission that a cold `ffmpeg` on a loaded machine takes far longer than any
+///   number written here — and every millisecond it overruns turns the absence into a vacuous pass.
+///   Three times the observed pass, floored at 500 ms so a suspiciously fast first pass cannot
+///   shrink the window to nothing.
+func waitOutARecoveryPass(observedPass: Double = 0) async {
+    let wait = max(0.5, observedPass * 3)
+    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
 }
 
 // MARK: - Observations from a `@Sendable` callback

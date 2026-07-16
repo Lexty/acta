@@ -142,10 +142,14 @@ struct RecordingControllerGuardTests {
         defer { harness.tearDown() }
 
         let interrupted = try placeInterruptedMeeting(in: harness.root, named: "2026-07-15-1200-standup")
+        // Timed, because the absence asserted below is only worth something if the wait behind it is
+        // longer than a pass actually takes here — see `waitOutARecoveryPass`.
+        let firstPassBegan = Date()
         harness.controller.onLaunch()
 
         #expect(await waitUntilOnMain(timeout: 20) { !harness.controller.recoveredBanner.isEmpty },
                 "the launch never recovered the interrupted recording")
+        let firstPass = Date().timeIntervalSince(firstPassBegan)
         // `recovered`, not `done`: a folder rescued from a crash is marked apart from one that
         // stopped cleanly, and that distinction is what stops the next launch from assembling it
         // again. `Recovery.needsRecovery` reads only `recording` as interrupted.
@@ -161,7 +165,7 @@ struct RecordingControllerGuardTests {
         // second launch is a no-op" is deliberately not asserted about notifications.
         let second = try placeInterruptedMeeting(in: harness.root, named: "2026-07-15-1300-planning")
         harness.controller.onLaunch()
-        await waitOutARecoveryPass()
+        await waitOutARecoveryPass(observedPass: firstPass)
 
         #expect(try readSessionManifest(in: second).status == .recording,
                 "a second onLaunch ran recovery again — the once-per-launch guard is gone")
@@ -215,5 +219,15 @@ struct RecordingControllerGuardTests {
         #expect(try readSessionManifest(in: interrupted).status == .recording,
                 "onAppear ran recovery — recovery belongs to onLaunch")
         #expect(harness.controller.recoveredBanner.isEmpty, "onAppear announced a recovery it must not have run")
+
+        // The control the absence above needs. This scenario has no pass of its own to time, so the
+        // wait alone could be reporting "recovery had not got going yet" as "recovery did not run".
+        // The same folder, the same harness: `onLaunch` recovers it. So the folder really was
+        // recoverable and a pass really is observable here — which is what makes the absence the
+        // guard's doing rather than the clock's.
+        harness.controller.onLaunch()
+        #expect(await waitUntilOnMain(timeout: 20) { !harness.controller.recoveredBanner.isEmpty },
+                "onLaunch did not recover the folder onAppear left alone — the absence above proved nothing")
+        #expect(try readSessionManifest(in: interrupted).status == .recovered)
     }
 }

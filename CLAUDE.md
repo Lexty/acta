@@ -147,6 +147,24 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
   startup probe, the watchdog's restart and its give-up — runs with no TCC prompt, no display, no
   audio device and no wall-clock waiting (`RecordingPipelineTests`, `RecordingPipelineFailureTests`).
   Only **real ScreenCaptureKit capture and the UI** are still manual.
+  **The controller's lifecycle above that pipeline is frozen as a characterization contract**:
+  `RecordingController` is driven through the operations the UI calls (`start`, `stop`, `stopAndWait`,
+  `onLaunch`, `onAppear`) over a temp archive with the same seams injected
+  (`RecordingControllerLifecycleTests`, `RecordingControllerGuardTests`, fixtures in
+  `ControllerTestSupport`). It records the lifecycle **as it is**, not as it should be: the capture is
+  already live while `phase == .idle` during the probe, `phase` stays `.error` while the assembly is
+  still writing, `start()` clears both banners, `.error` is not a latch. ⚠️ Those assertions **are the
+  contract, not bugs to fix** — they exist to catch the next refactor (the `ControlAPI` boundary,
+  parked in `docs/backlog/`). Assert only through the public surface: `isStopping` is
+  `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
+  computed properties with no publisher, so `$phase` is subscribed while the flags are **sampled**
+  around `objectWillChange` — synchronously (which settles the *previous* change, and is what makes a
+  transient window deterministic) and again deferred by one turn (for the last change, which no later
+  fire reports). Never construct `RecordingController.shared` in a test: it reaches for the real
+  `~/Acta`, real TCC and real time. Three behaviours are real but cannot be induced through today's
+  public surface and are deliberately uncharacterized rather than faked (listed at the top of
+  `RecordingControllerLifecycleTests`): a controller-level assembly failure, `openArchive()` failing,
+  and `suggestedTitle`. Each needs a seam a plan must add first.
   The fake is only worth something if it behaves like the real source, so the `CaptureSource`
   contract is itself asserted (`CaptureSourceContractTests`) — per-track serial queues, a delivery
   gate, a draining `stop()`. A guarantee the fake makes and `SCKCaptureSource` does not is a bug in

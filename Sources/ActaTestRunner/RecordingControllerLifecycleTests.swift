@@ -38,8 +38,12 @@ import Testing
 //   deterministically observable, so no scenario asserts it.
 //
 // `.serialized` for the reason the pipeline suites are: these drive real `AVAssetWriter`s and a real
-// `ffmpeg` while polling for background work to finish. Run in parallel they contend for the same
-// cores, and the timeouts would measure the machine's load instead of the code.
+// `ffmpeg` while polling for background work to finish, so running them against each other would
+// have them contend for the same cores. Note what the trait does **not** buy — it serializes the
+// tests *within* this suite only, and swift-testing still runs this suite alongside the other
+// capture-backed ones. So no assertion here may rest on wall-clock duration: the timeouts are
+// deadlock guards, the waits are asserted through the injected clock's count, and the one place an
+// absence needs real time derives its wait from a pass it measured (`waitOutARecoveryPass`).
 @Suite(.serialized)
 struct RecordingControllerLifecycleTests {
     // MARK: - Success
@@ -107,6 +111,17 @@ struct RecordingControllerLifecycleTests {
         #expect(log.snapshots.contains { $0.isSaving && !$0.isRecording },
                 "the UI never rendered `Saving…`: \(log.snapshots)")
         #expect(try readSessionManifest(in: directory).status == .done)
+        // The title field is cleared by a successful save, so the next recording starts blank rather
+        // than silently inheriting this meeting's name.
+        #expect(harness.controller.title.isEmpty,
+                "a saved recording left its title in the field — the next recording would inherit it")
+        // `info.md`, not only `session.json`: the marker is what recovery reads, but this is what the
+        // menu renders and what survives as the meeting's own record. A save that patches one and not
+        // the other leaves the archive describing a recording that never finished.
+        let info = try String(contentsOf: directory.appendingPathComponent(MeetingArchive.infoFileName),
+                              encoding: .utf8)
+        #expect(info.contains("status: done"), "the saved recording's info.md does not say `done`: \(info)")
+        #expect(info.contains("Weekly sync"), "the saved recording's info.md lost the title it was given")
         let assembled = await bothTracksAssembled(in: directory)
         #expect(assembled, "the recording did not leave two playable tracks behind")
         // The waits were virtual, asserted through the clock's own count. Wall-clock timing cannot
@@ -181,7 +196,7 @@ struct RecordingControllerLifecycleTests {
         // and its `ffmpeg` assembly are still running. A single lifecycle enum cannot say both, and
         // `isBusy`/`isSaving` are the only public things that say the work is in flight — drop them
         // in a refactor and "Quit" stops waiting for an assembly that is still writing the file.
-        #expect(log.snapshots.contains { $0.phase == .error && $0.isBusy && $0.isSaving && $0.hasWorkInFlight },
+        #expect(log.snapshots.contains { $0.phase == .error && $0.isBusy && $0.isSaving },
                 "the assembly still running after the stall was invisible on the public surface: \(log.snapshots)")
 
         // The completion, not merely the error: the audio recorded before the stall is not collateral.

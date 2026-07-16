@@ -30,7 +30,7 @@ crash harness is the plan after it. Both stay in `docs/backlog/acta-full-plan.md
 ## Validation Commands
 
 - `swift build -c release`
-- `bash Scripts/test.sh` (the existing 223 tests **plus** the new characterization scenarios; needs `ffmpeg`)
+- `bash Scripts/test.sh` (the existing **214** tests **plus** the 12 new characterization scenarios = **226**; needs `ffmpeg`)
 - `bash Scripts/lint.sh`
 - `bash Scripts/bundle.sh dev` (flavor defaults to `dev` when omitted; `stable` refuses a dirty or untagged tree)
 
