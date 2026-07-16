@@ -132,6 +132,42 @@ struct RecordingControllerGuardTests {
         #expect(meetingFolders(in: harness.root).isEmpty, "the retried start left a phantom folder behind")
     }
 
+    // MARK: - The saving window
+
+    @Test
+    @MainActor
+    @available(macOS 15.0, *)
+    func aSecondStopInsideTheSavingWindowDoesNotRunASecondAssembly() async throws {
+        let harness = ControllerHarness(label: "controller-double-stop-while-saving")
+        defer { harness.tearDown() }
+
+        harness.controller.start()
+        #expect(await waitUntilOnMain { harness.controller.phase == .recording })
+
+        harness.controller.stop()
+        // The window the other stop scenarios cannot reach: `phase` leaves `.recording` only inside
+        // `performStop`, so synchronously after `stop()` returns it still reads `.recording` and the
+        // first clause of the guard would wave a second click straight through. Only `isStopping`
+        // stands between this and a second assembly of the same folder — two `ffmpeg` processes
+        // writing the same wav and list files, up to losing the recording.
+        #expect(harness.controller.phase == .recording)
+        harness.controller.stop()
+        await harness.controller.stopAndWait()
+
+        #expect(harness.source.stopCount == 1,
+                "a second stop inside the saving window reached the capture source again: \(harness.source.stopCount) stops")
+        #expect(meetingFolders(in: harness.root).count == 1)
+        #expect(harness.controller.phase == .idle,
+                "the recording did not survive a second stop inside the saving window")
+
+        // The audio itself, not merely the bookkeeping: a second `ffmpeg` over the same folder is how
+        // a recording that was already safe gets destroyed.
+        let directory = try #require(harness.meetingDirectory)
+        #expect(try readSessionManifest(in: directory).status == .done)
+        let assembled = await bothTracksAssembled(in: directory)
+        #expect(assembled, "a second stop inside the saving window lost the recording")
+    }
+
     // MARK: - Launch and menu
 
     @Test
@@ -201,6 +237,27 @@ struct RecordingControllerGuardTests {
     @MainActor
     @available(macOS 15.0, *)
     func onAppearRefreshesTheListAndDoesNotRunRecovery() async throws {
+        // The pass this scenario's absence is measured against, timed on a sibling harness over the
+        // same fixture. It has to come from somewhere: a constant cannot bound a pass whose real cost
+        // is `ffmpeg` over a folder, and under load a 500 ms floor is shorter than the very thing
+        // whose absence is being asserted — the absence then reports "recovery had not got going yet"
+        // as "recovery did not run", and an `onAppear` that ran recovery would sail through.
+        //
+        // A sibling rather than this harness's own `onLaunch`, so that `onAppear` stays the first
+        // operation the controller under test performs. That ordering is the scenario: `runRecovery`
+        // carries no guard of its own — `didRunRecovery` sits in `onLaunch` — so an `onAppear` that
+        // reached for recovery directly would be caught here, and only while no launch has yet taken
+        // the guard.
+        let control = ControllerHarness(label: "controller-on-appear-control")
+        defer { control.tearDown() }
+        let controlFolder = try placeInterruptedMeeting(in: control.root, named: "2026-07-15-1400-retro")
+        let passBegan = Date()
+        control.controller.onLaunch()
+        #expect(await waitUntilOnMain(timeout: 20) { !control.controller.recoveredBanner.isEmpty },
+                "the control never recovered — the absence below would prove nothing")
+        let observedPass = Date().timeIntervalSince(passBegan)
+        #expect(try readSessionManifest(in: controlFolder).status == .recovered)
+
         let harness = ControllerHarness(label: "controller-on-appear")
         defer { harness.tearDown() }
 
@@ -215,19 +272,9 @@ struct RecordingControllerGuardTests {
         // hand the live folder — whose marker reads `recording` — to a recovery pass that would
         // assemble it on the fly. `suggestedTitle` is deliberately not asserted (see the gaps
         // documented in `RecordingControllerLifecycleTests`).
-        await waitOutARecoveryPass()
+        await waitOutARecoveryPass(observedPass: observedPass)
         #expect(try readSessionManifest(in: interrupted).status == .recording,
                 "onAppear ran recovery — recovery belongs to onLaunch")
         #expect(harness.controller.recoveredBanner.isEmpty, "onAppear announced a recovery it must not have run")
-
-        // The control the absence above needs. This scenario has no pass of its own to time, so the
-        // wait alone could be reporting "recovery had not got going yet" as "recovery did not run".
-        // The same folder, the same harness: `onLaunch` recovers it. So the folder really was
-        // recoverable and a pass really is observable here — which is what makes the absence the
-        // guard's doing rather than the clock's.
-        harness.controller.onLaunch()
-        #expect(await waitUntilOnMain(timeout: 20) { !harness.controller.recoveredBanner.isEmpty },
-                "onLaunch did not recover the folder onAppear left alone — the absence above proved nothing")
-        #expect(try readSessionManifest(in: interrupted).status == .recovered)
     }
 }
