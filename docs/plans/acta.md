@@ -16,23 +16,27 @@ already has `mlx_whisper` set up locally).
    (re-request permissions, restart the stream, clear error).
 
 **Read `SPEC.md` before every task** (decisions, API coordinates, Xcode-free build recipe,
-crash-safety approach). The `.claude/skills/crash-safe-recording` skill is mandatory for Tasks 2–4.
+crash-safety approach), and honour every requirement in `CLAUDE.md` — including the skills it already
+mandates. Task-specific on top of that: **`.claude/skills/screencapturekit-audio`** is the API Task A
+moves behind a protocol, and **`.claude/skills/crash-safe-recording`** covers the segmentation and
+recovery semantics around it. ⚠️ Neither skill documents the callback-queue and drain semantics —
+those live only in Task A below, which is exactly why that task spells them out.
 
 **Language: English only** across UI, code, docs and git — see `CLAUDE.md`.
 
 Environment: Apple M3, macOS 26.2, Swift 6.3.3, CLT only (no full Xcode), SwiftPM. `ffmpeg` present.
 
-**Definition of Done (v1):** start/stop recording from the menu bar; participant audio and microphone
-written as separate streaming tracks; on a forced process kill/restart the already written segments
-survive and are finalised automatically on the next launch; a failed start is diagnosed and
-healed/reported; everything builds without full Xcode.
+**Already shipped and verified live (`v0.1.0`) — context, not a goal:** start/stop from the menu bar;
+two separate streaming tracks; `kill -9`/restart leaves the written segments recoverable and they are
+finalised on the next launch; a failed start is diagnosed and reported; the display is held awake for
+the duration of a recording; the mix is out of the pipeline. **Do not re-implement any of it.**
 
 ## Validation Commands
 - `swift build -c release`
 - `swift test` (under CLT-only this ONLY COMPILES the tests — there is no `xctest` host utility)
 - `bash Scripts/test.sh` (real unit-test run via the executable runner; fails on error)
 - `bash Scripts/lint.sh`
-- `bash Scripts/bundle.sh dev` (flavor is required; `stable` refuses a dirty or untagged tree by design)
+- `bash Scripts/bundle.sh dev` (flavor is explicit here; it defaults to `dev` when omitted, and `stable` refuses a dirty or untagged tree by design)
 
 ## Scope of this plan
 
@@ -41,9 +45,10 @@ healed/reported; everything builds without full Xcode.
 display-sleep timeout; the mix dropped from the pipeline). That history lives in
 `docs/plans/completed/acta.md`.
 
-**Why these two.** Every criterion that matters is still `manual test (skipped - not automatable)`,
-because `RecordingSession.start()` checks real TCC, creates a real `SCStream` and waits for real
-buffers. A façade + characterization task was pulled from an overnight run for exactly that reason —
+**Why these two.** The project already has real automated coverage — 193 tests, including the pure
+diagnosis, recovery and layout logic. What stays unreachable is narrow and precise: **a successful,
+capture-backed recording and the watchdog/restart paths behind it**, because `RecordingSession.start()`
+checks real TCC, creates a real `SCStream` and waits for real buffers. A façade + characterization task was pulled from an overnight run for exactly that reason —
 it needed a *successful* recording to be reachable, and it is not. These two tasks make it reachable
 in-process, and nothing else.
 
@@ -59,9 +64,10 @@ the `v0.1.0` tag), and the dev build is a separate app with its own identity and
 **Why.** `AudioRecorder` **is** the ScreenCaptureKit integration: declared
 `NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable`, owning `currentStream: SCStream?`
 and building the content filter and configuration itself. Nothing can be injected, so `start()`
-cannot be reached without real TCC, a real display and real buffers — which is why every criterion
-that matters is still `manual test (skipped - not automatable)`. This task moves the capture behind a
-protocol and nothing else.
+cannot be reached without real TCC, a real display and real buffers — which is why **a successful,
+capture-backed recording and the watchdog/restart paths behind it** are the one area still stuck at
+`manual test (skipped - not automatable)`, while the pure logic around them is well covered. This task
+moves the capture behind a protocol and nothing else.
 
 🪤 **Mechanical — but "mechanical" here means *behaviour-preserving*, not textual.** Extracting the
 conformances forces a few ownership decisions (below); make exactly those and no others. The fake,
