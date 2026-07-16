@@ -93,6 +93,10 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// the caller cannot tell "the stream did not come up" (healed by a restart) from other failures,
     /// and the self-healing (`SelfCheck`) would not spend its attempts (Task 4).
     public func start() async throws {
+        // Declared outside the `do`, so the catch can still reach a stream that `startCapture()`
+        // brought partway up before throwing. Assigning `activeStream` only after a successful start
+        // would otherwise orphan it: `stop()` finds `nil` and never calls `stopCapture()` on it.
+        var created: SCStream?
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false,
                                                                                onScreenWindowsOnly: false)
@@ -100,6 +104,7 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let stream = SCStream(filter: filter, configuration: makeConfiguration(), delegate: self)
+            created = stream
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: micQueue)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
@@ -110,6 +115,14 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
             log.info("Capture started")
         } catch {
             log.error("Stream creation failed: \(error.localizedDescription, privacy: .public)")
+            // Both halves matter, and neither is optional. The gate: it was opened above before
+            // `startCapture()`, and a failed start must leave it shut — otherwise a buffer from a
+            // stream that reported failure still reaches `AudioRecorder`, and on the `restart()` path
+            // it lands in a writer being finalized, which is the tail-loss the gate exists to
+            // prevent. The teardown: the stream never became `activeStream`, so nothing else will
+            // ever stop it.
+            setStopped(true)
+            if let created { try? await created.stopCapture() }
             throw StartupFailure.streamNotStarted
         }
     }

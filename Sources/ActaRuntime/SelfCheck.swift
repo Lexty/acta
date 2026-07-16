@@ -21,9 +21,12 @@ final class SelfCheck: @unchecked Sendable {
     private let permissions: PermissionChecking
     private let clock: SelfCheckClock
 
+    /// No defaults on purpose: the shipped wiring is claimed once, in `RecordingDependencies.live`,
+    /// where a test can assert it. A default here would be a second, unreachable claim about the
+    /// same thing.
     init(recorder: AudioRecorder,
-         permissions: PermissionChecking = SystemPermissions(),
-         clock: SelfCheckClock = SystemClock()) {
+         permissions: PermissionChecking,
+         clock: SelfCheckClock) {
         self.recorder = recorder
         self.permissions = permissions
         self.clock = clock
@@ -71,14 +74,17 @@ final class SelfCheck: @unchecked Sendable {
     /// success, or the reason for the failure (its `userMessage` text is shown in the UI).
     func verifyStartAndHeal() async -> StartupFailure? {
         var attemptsLeft = SelfCheckTuning.maxRestartAttempts
-        // Show the TCC dialog at most once per check: after a denial it will not appear again
-        // anyway, and without this the healing loop would spin for nothing.
-        var permissionRequested = false
+        // Show each TCC dialog at most once per check: after a denial it will not appear again
+        // anyway, and without this the healing loop would spin for nothing. One flag **per
+        // permission**, not one for both: a single flag means requesting screen recording suppresses
+        // the microphone dialog, and the user is then told to grant a permission nobody ever asked
+        // them for.
+        var requested = RequestedPermissions()
         while true {
             // Permissions are a precondition: without screen recording there will be no system
             // audio, without the microphone only half the meeting gets recorded. Restarting the
             // stream here is pointless.
-            if let missing = await missingPermission(alreadyRequested: &permissionRequested) {
+            if let missing = await missingPermission(alreadyRequested: &requested) {
                 log.error("Self-diagnosis: \(missing.userMessage, privacy: .public)")
                 return missing
             }
@@ -134,12 +140,19 @@ final class SelfCheck: @unchecked Sendable {
         }
     }
 
-    /// Check both permissions, showing the system dialog if needed (once per check).
+    /// Which dialogs this check has already put in front of the user. Tracked per permission: the
+    /// two are independent, and a grant of one says nothing about the other.
+    private struct RequestedPermissions {
+        var screen = false
+        var microphone = false
+    }
+
+    /// Check both permissions, showing each system dialog if needed (once per check).
     /// Returns the reason for the failure if a permission is still missing, otherwise `nil`.
-    private func missingPermission(alreadyRequested: inout Bool) async -> StartupFailure? {
+    private func missingPermission(alreadyRequested: inout RequestedPermissions) async -> StartupFailure? {
         if !permissions.hasScreenRecording {
-            if !alreadyRequested {
-                alreadyRequested = true
+            if !alreadyRequested.screen {
+                alreadyRequested.screen = true
                 permissions.requestScreenRecording()
             }
             // The screen recording permission only applies to the next launch of the process, so
@@ -147,8 +160,8 @@ final class SelfCheck: @unchecked Sendable {
             guard permissions.hasScreenRecording else { return .noScreenRecordingPermission }
         }
         if !permissions.hasMicrophone {
-            if !alreadyRequested, permissions.microphoneStatus == .notDetermined {
-                alreadyRequested = true
+            if !alreadyRequested.microphone, permissions.microphoneStatus == .notDetermined {
+                alreadyRequested.microphone = true
                 _ = await permissions.requestMicrophone()
             }
             guard permissions.hasMicrophone else { return .noMicrophonePermission }

@@ -37,7 +37,10 @@ func recordingSessionIsReachableFromTests() {
 @available(macOS 15.0, *)
 func audioRecorderIsReachableFromTests() {
     withTemporaryDirectory { directory in
-        let recorder = AudioRecorder(directory: directory, segmentSeconds: 15)
+        // The fakes, not the real capture: this asserts what `init` does to the file system, and a
+        // real `SCKCaptureSource` would only make that non-deterministic.
+        let recorder = AudioRecorder(directory: directory, segmentSeconds: 15,
+                                     source: FakeCaptureSource(), permissions: FakePermissions())
         // Constructed but never started: no stream, no buffers, no segments yet.
         #expect(!recorder.isStreaming)
         #expect(recorder.receivedBufferCounts == (system: 0, mic: 0))

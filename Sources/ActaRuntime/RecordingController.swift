@@ -12,22 +12,7 @@ import os
 @available(macOS 15.0, *)
 @MainActor
 public final class RecordingController: ObservableObject {
-    /// Recording phase for the status indicator.
-    public enum Phase: Equatable {
-        case idle
-        case recording
-        /// Capture has already stopped and segments are being assembled (`ffmpeg`) — seconds, and
-        /// for an hour-long meeting tens of seconds. A separate phase, because showing "Recording"
-        /// all that time would be a lie: nothing is being written to the files any more.
-        case saving
-        case error
-    }
-
-    /// How a session is built for a start. Injected so that the controller's own responsibilities —
-    /// notably cleaning up the folder a failed start left behind — can be driven without TCC, a
-    /// display or an audio device: the fake goes into the *session's* dependencies, and everything
-    /// the controller does around it stays the shipped code.
-    public typealias SessionFactory = @MainActor (URL, RecordingSettings) -> RecordingSession
+    // `Phase` and `SessionFactory` are declared in `RecordingController+Types.swift`.
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecordingController")
     private let settingsStore: SettingsStore
@@ -90,16 +75,13 @@ public final class RecordingController: ObservableObject {
     /// menu is first opened, and `MenuContent` shows that same state.
     public static let shared = RecordingController()
 
+    /// The default `makeSession` is the shipped wiring — real capture, real TCC, real time, via
+    /// `RecordingSession`'s own `RecordingDependencies.live` default.
     public init(settingsStore: SettingsStore = SettingsStore(),
-                makeSession: @escaping SessionFactory = RecordingController.liveSession) {
+                makeSession: @escaping SessionFactory = { RecordingSession(directory: $0, settings: $1) }) {
         self.settingsStore = settingsStore
         self.makeSession = makeSession
         self.settings = settingsStore.load()
-    }
-
-    /// The shipped session wiring — real capture, real TCC, real time (`RecordingDependencies.live`).
-    public static func liveSession(directory: URL, settings: RecordingSettings) -> RecordingSession {
-        RecordingSession(directory: directory, settings: settings)
     }
 
     /// Whether a recording is in progress right now.

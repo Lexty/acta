@@ -74,15 +74,21 @@ Consequences to keep in mind:
 ## Project structure
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`. Anything worth testing goes here. One deliberate exception, **predating
+  `SessionManifest`, `SelfCheckTuning`. Anything worth testing goes here — including **constants a
+  test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`): `SelfCheck` is internal
+  to `ActaRuntime`, and a threshold written once in the runtime and again in the test asserts only
+  that the test agrees with itself. One deliberate exception, **predating
   `ActaRuntime`**, from when a test could reach nothing else: `SegmentRepair` touches the FS, but it
   is the code that rescues crashed audio. That rationale has expired — since `ActaRuntime` exists,
   I/O-touching code that needs a test belongs there, not here. Do not cite `SegmentRepair` as
   precedent for adding I/O to `ActaKit`.
 - `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
   `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
-  `MeetingStore`, `DisplayWakeLock` — `SCStream`, FS, `powerd` and process I/O. Kept thin; decisions
-  are delegated to ActaKit.
+  `MeetingStore`, `DisplayWakeLock`, plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
+  `PermissionChecking`/`SystemPermissions`, `SelfCheckClock`/`SystemClock`, `RecordingDependencies`
+  — FS, `powerd` and process I/O. Kept thin; decisions are delegated to ActaKit.
+  **`SCStream` no longer permeates the target**: it lives *only* in `SCKCaptureSource`, behind the
+  `CaptureSource` protocol. `AudioRecorder` sees `(Track, CMSampleBuffer)` and nothing more.
   It is a **library**, not part of the executable, because **SwiftPM cannot import an executable
   target**: while this code lived in `Sources/Acta`, nothing above pure logic could be reached from a
   test at all. A library target may import AppKit/SwiftUI, so the AppKit-touching types live here too.
@@ -95,6 +101,13 @@ Consequences to keep in mind:
 
 The rule: a new behaviour worth testing gets its decision in ActaKit as a pure function, its I/O in
 ActaRuntime, and its test in ActaTestRunner.
+
+**New seams go into `RecordingDependencies`, never into a default argument.** `.live` is the shipped
+wiring written once, as a value a test can assert against; a default argument is the same claim in a
+form no test can reach — you cannot ask a function what it *would* have passed. Its members are
+factories because a `CaptureSource` is stateful and belongs to exactly one recording.
+`RecordingSession` is the **composition root** (it hands the one `PermissionChecking` instance to
+both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission questions itself.
 
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).
@@ -117,11 +130,28 @@ ActaRuntime, and its test in ActaTestRunner.
   recovery, the "data is not flowing" detector). Live audio capture and UI are still tested manually,
   but "only `ActaKit` is reachable" is no longer true: since Task 11 the runner imports `ActaRuntime`
   and constructs `RecordingController`/`RecordingSession`/`AudioRecorder`/`RecoveryManager` for real.
-  Nothing starts **capture** — but the I/O below capture is tested for real: `SegmentAssemblerTests`
-  writes fixture PCM WAV segments into a temp directory and drives `SegmentAssembler.assemble`
-  end-to-end through the segment plan, the header repair, a real `ffmpeg` and the segment deletion.
-  Anything that takes a *directory* rather than an `SCStream` is automatable that way — prefer
-  fixture bytes to a fake. (The fakes and seams for capture itself are still backlog work.)
+  The I/O below capture is tested for real: `SegmentAssemblerTests` writes fixture PCM WAV segments
+  into a temp directory and drives `SegmentAssembler.assemble` end-to-end through the segment plan,
+  the header repair, a real `ffmpeg` and the segment deletion. Where a *directory* is the input,
+  prefer fixture bytes to a fake.
+  **The capture seam has landed, so the pipeline itself is driven in-process too**: a scripted
+  `FakeCaptureSource` feeds real `CMSampleBuffer`s through `AudioRecorder` → `SegmentWriter` →
+  assembly, with `PermissionChecking` and `SelfCheckClock` injected, so a full recording — the
+  startup probe, the watchdog's restart and its give-up — runs with no TCC prompt, no display, no
+  audio device and no wall-clock waiting (`RecordingPipelineTests`, `RecordingPipelineFailureTests`).
+  Only **real ScreenCaptureKit capture and the UI** are still manual.
+  The fake is only worth something if it behaves like the real source, so the `CaptureSource`
+  contract is itself asserted (`CaptureSourceContractTests`) — per-track serial queues, a delivery
+  gate, a draining `stop()`. A guarantee the fake makes and `SCKCaptureSource` does not is a bug in
+  the fake. Where the real source cannot answer (it needs a live `SCStream`), **skip visibly** with
+  `.enabled(if:)` — a bare `return` reports as a pass and hides that nothing ran.
+- **Two confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
+  ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
+  `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,
+  `CGRequestScreenCaptureAccess`, `AVCaptureDevice`) only in `SystemPermissions.swift`. That is what
+  makes the fakes answer the questions production actually asks instead of bypassing them. Match type
+  references, not prose — doc comments legitimately name `SCStream`. Never contort code to satisfy
+  the grep; move the comment instead.
 - A test may shell out to a system tool (`/usr/bin/pmset`) when only the OS can answer the question.
   Two rules learned the hard way: **scope the query to the runner's own pid** — `pmset -g assertions`
   is machine-wide, so a real recording would otherwise fail the suite — and mark such a suite

@@ -102,12 +102,16 @@ public final class AudioRecorder: @unchecked Sendable {
 
     /// - Parameter directory: the recording folder; segments are written into its `system/` and
     ///   `mic/` subdirectories.
-    /// - Parameter source: where the buffers come from; the real ScreenCaptureKit capture by default.
-    /// - Parameter permissions: who answers the TCC questions; the real system calls by default.
+    /// - Parameter source: where the buffers come from.
+    /// - Parameter permissions: who answers the TCC questions.
+    ///
+    /// Neither has a default: what production passes is claimed once, in `RecordingDependencies.live`,
+    /// where a test can assert it. A default argument here would restate that claim in a form no test
+    /// can reach — you cannot ask a function what it *would* have passed.
     public init(directory: URL,
                 segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds),
-                source: CaptureSource = SCKCaptureSource(),
-                permissions: PermissionChecking = SystemPermissions()) {
+                source: CaptureSource,
+                permissions: PermissionChecking) {
         self.directory = directory
         self.source = source
         self.permissions = permissions

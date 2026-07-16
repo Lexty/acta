@@ -40,12 +40,32 @@ func assertCaptureSourceBaseContract(_ source: CaptureSource, label: String) asy
 /// A `start()` that cannot bring capture up must surface as `.streamNotStarted` — the one failure
 /// `SelfCheck` spends its restart attempts on. Any other error, raw or mapped, silently turns a
 /// healable failure into a fatal one.
+///
+/// It must also leave the delivery gate shut. Both implementations open the gate *before* the call
+/// that can fail (a start must never drop the first buffer), so "the start threw" and "nothing can
+/// arrive" are two separate claims — and a buffer from a stream that reported failure would land in
+/// a writer that `AudioRecorder.restart()` is concurrently finalizing.
 @available(macOS 15.0, *)
 func assertFailedStartContract(_ source: CaptureSource, label: String) async {
+    let delivered = Delivered()
+    source.setBufferHandler { _, _ in delivered.record() }
     await #expect(throws: StartupFailure.streamNotStarted, "\(label): a failed start did not map to .streamNotStarted") {
         try await source.start()
     }
     #expect(source.isStreaming == false, "\(label): isStreaming stayed true after a failed start()")
+    // Give a straggler from a partially-started stream every chance to appear; none may.
+    try? await Task.sleep(nanoseconds: 20_000_000)
+    #expect(delivered.count == 0, "\(label): a failed start() delivered a buffer — the gate was left open")
+}
+
+/// A thread-safe delivery counter: the handler runs on the source's own queues, so the test's
+/// bookkeeping needs its own lock.
+private final class Delivered: @unchecked Sendable {
+    private let lock = NSLock()
+    private var delivered = 0
+
+    func record() { lock.lock(); delivered += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return delivered }
 }
 
 // MARK: - Against the fake: the whole contract
@@ -213,15 +233,20 @@ struct SCKCaptureSourceContractTests {
         await assertCaptureSourceBaseContract(SCKCaptureSource(), label: "SCKCaptureSource")
     }
 
-    @Test
+    // Gated on the permission, and read with the preflight call, which does not prompt. Without
+    // screen-recording access `SCShareableContent` cannot hand back a display, so the real start
+    // takes exactly the failure path this asserts. With access granted it would instead bring a real
+    // capture up — which is a live recording, not a unit test, and not something this runner should
+    // start behind the user's back.
+    //
+    // A trait and not an early `return`: the runner grants itself screen recording on any machine
+    // where Acta is actually developed, so a bare `return` would report this as passed on exactly
+    // the machine that matters, having asserted nothing. `.enabled(if:)` makes swift-testing say it
+    // was skipped.
+    @Test(.enabled(if: !SystemPermissions().hasScreenRecording,
+                   "needs screen recording denied: with it granted, start() would begin a live capture"))
     @available(macOS 15.0, *)
     func aStartThatCannotReachADisplayMapsToStreamNotStarted() async {
-        // Gated on the permission, and read with the preflight call, which does not prompt. Without
-        // screen-recording access `SCShareableContent` cannot hand back a display, so the real start
-        // takes exactly the failure path this asserts. With access granted it would instead bring a
-        // real capture up — which is a live recording, not a unit test, and not something this runner
-        // should start behind the user's back.
-        guard !SystemPermissions().hasScreenRecording else { return }
         await assertFailedStartContract(SCKCaptureSource(), label: "SCKCaptureSource")
     }
 }

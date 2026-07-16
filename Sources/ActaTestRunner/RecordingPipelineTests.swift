@@ -11,53 +11,10 @@ import Testing
 // while the pure logic around it was covered twice over.
 //
 // The protocols are not the deliverable; these tests are.
-
-/// The wall-clock ceiling for a scenario that spends virtual seconds. The real code sleeps 2 s on
-/// the startup probe alone, and the give-up path spends four of them — so a run anywhere near this
-/// bound means the clock is not actually wired and the tests are waiting on real time.
-private let clockWiredWallClockBound = 1.5
-
-/// Segment length for these tests: the shortest `RecordingSettings` allows. Combined with buffers a
-/// second long, a couple of batches cross a boundary — which is the point.
-private let testSegmentSeconds = RecordingSettings.minSegmentSeconds
-
-@available(macOS 15.0, *)
-private func makeSettings(deleteSegments: Bool = false) -> RecordingSettings {
-    RecordingSettings(archivePath: "", segmentSeconds: testSegmentSeconds,
-                      deleteSegmentsAfterAssembly: deleteSegments)
-}
-
-@available(macOS 15.0, *)
-private func makeDependencies(source: FakeCaptureSource,
-                              permissions: FakePermissions,
-                              clock: TestClock) -> RecordingDependencies {
-    RecordingDependencies(makeSource: { source }, makePermissions: { permissions }, makeClock: { clock })
-}
-
-/// The session marker as it stands on disk.
-private func readManifest(in directory: URL) throws -> SessionManifest {
-    let data = try Data(contentsOf: directory.appendingPathComponent(SessionManifest.fileName))
-    return try SessionManifest.decode(from: data)
-}
-
-/// The meeting folders sitting in an archive root — the subdirectories, and nothing else.
-private func meetingFolders(in root: URL) -> [String] {
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-    return names.filter { name in
-        var isDirectory: ObjCBool = false
-        let exists = FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path,
-                                                    isDirectory: &isDirectory)
-        return exists && isDirectory.boolValue
-    }
-}
-
-/// The segment files of one track, in order.
-private func segmentFiles(in directory: URL, track: String) -> [URL] {
-    let trackDir = directory.appendingPathComponent(track)
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: trackDir.path)) ?? []
-    return SegmentLayout.orderedSegments(fromFileNames: names)
-        .map { trackDir.appendingPathComponent($0.fileName) }
-}
+//
+// The success path lives here; the failure paths — denied permissions, a source that never delivers,
+// the watchdog — are in `RecordingPipelineFailureTests.swift`. Their shared fixtures are in
+// `PipelineTestSupport.swift`.
 
 // `.serialized`: these tests drive real `AVAssetWriter`s and a real `ffmpeg`, and the suite asserts
 // wall-clock bounds to prove the injected clock is wired. Run in parallel with each other they
@@ -119,7 +76,9 @@ struct RecordingPipelineTests {
             // segment would prove only "a file exists", while rotation and finalisation (which is
             // what crash safety *is*) only happen once the media timeline crosses `segmentSeconds`.
             #expect(segments.count >= 2, "\(track): \(segments.count) segment(s) — no segment boundary was crossed")
-            for segment in segments.dropLast() {
+            // Every segment, the last one included: `stop()` has returned, and `SegmentWriter.finish()`
+            // waits on its pending writes, so there is no segment still open to excuse.
+            for segment in segments {
                 let valid = await isRealAudioFile(segment)
                 #expect(valid, "\(segment.lastPathComponent): a finalized segment is not playable audio")
             }
@@ -132,7 +91,7 @@ struct RecordingPipelineTests {
             #expect(valid, "\(name): the assembled track is not playable audio")
         }
 
-        let manifest = try readManifest(in: directory)
+        let manifest = try readSessionManifest(in: directory)
         #expect(manifest.status == .done)
         #expect(manifest.segmentCount > 0, "session.json still claims nothing was recorded")
     }
@@ -164,132 +123,14 @@ struct RecordingPipelineTests {
 
         for track in [SegmentLayout.systemDirName, SegmentLayout.micDirName] {
             let segments = segmentFiles(in: directory, track: track)
+            // At least one segment, and *every* one of them playable. `dropLast()` here would have
+            // made the single-segment case assert nothing at all — which is precisely the case a
+            // broken format hint produces: one unplayable stub.
             #expect(!segments.isEmpty, "\(track): a non-interleaved buffer never reached a segment")
-            for segment in segments.dropLast() {
+            for segment in segments {
                 let valid = await isRealAudioFile(segment)
                 #expect(valid, "\(segment.lastPathComponent): a non-interleaved buffer produced an unplayable segment")
             }
-        }
-    }
-
-    // MARK: - Failure paths
-
-    @Test
-    @available(macOS 15.0, *)
-    func screenRecordingDeniedRejectsTheStartAndLeavesNoWakeLockHeld() async {
-        let directory = makeTemporaryDirectory("pipeline-denied")
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let source = FakeCaptureSource()
-        // Denied, and the dialog does not change the user's mind — the same shape as a permission
-        // the user has already refused.
-        let permissions = FakePermissions(screenGranted: false, grantsOnRequest: false)
-        let clock = TestClock()
-        let activity = CountingWakeLock()
-
-        let session = RecordingSession(directory: directory, settings: makeSettings(),
-                                       wakeLock: activity.makeWakeLock(),
-                                       dependencies: makeDependencies(source: source,
-                                                                      permissions: permissions,
-                                                                      clock: clock))
-
-        await #expect(throws: StartupFailure.noScreenRecordingPermission) {
-            try await session.start()
-        }
-
-        // A permission is not healed by restarting the stream, so the capture must never have been
-        // brought up at all.
-        #expect(source.startCount == 0, "the capture was started despite a missing permission")
-        #expect(permissions.screenRequestCount == 1, "the missing permission was never actually requested")
-        // The worst kind of leak: a Mac pinned awake by a recording that never started, with nothing
-        // in the UI to explain it.
-        #expect(activity.beginCount == 1, "start() never took the display assertion")
-        #expect(activity.endCount == 1, "a start rejected for a missing permission leaked the display assertion")
-    }
-
-    @Test
-    @available(macOS 15.0, *)
-    func aSourceThatNeverDeliversIsRestartedAndThenGivenUpOn() async {
-        let directory = makeTemporaryDirectory("pipeline-nodata")
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let source = FakeCaptureSource()
-        // The stream comes up and stays up; it simply never produces a buffer. Nothing to hear, and
-        // no error to go on — exactly the "mute recording" the self-diagnosis exists to refuse.
-        source.setEmitOnStart(false)
-        let permissions = FakePermissions()
-        let clock = TestClock()
-        let activity = CountingWakeLock()
-
-        let session = RecordingSession(directory: directory, settings: makeSettings(),
-                                       wakeLock: activity.makeWakeLock(),
-                                       dependencies: makeDependencies(source: source,
-                                                                      permissions: permissions,
-                                                                      clock: clock))
-
-        let began = Date()
-        await #expect(throws: StartupFailure.noData) {
-            try await session.start()
-        }
-        let seconds = Date().timeIntervalSince(began)
-
-        // The budget, spent exactly: one start to open the recording, then `maxRestartAttempts`
-        // stop/start pairs, because there is no `restart()` on the source — restart is
-        // `AudioRecorder` composing stop → finalize both writers → start. The final stop is the
-        // session giving up and tearing the capture down.
-        #expect(source.startCount == 1 + SelfCheckTuning.maxRestartAttempts,
-                "the healing spent \(source.startCount - 1) restarts, not \(SelfCheckTuning.maxRestartAttempts)")
-        #expect(source.stopCount == SelfCheckTuning.maxRestartAttempts + 1,
-                "every restart must stop the source first, and the give-up must stop it once more")
-        #expect(permissions.screenRequestCount == 0, "a granted permission was requested during healing")
-        #expect(permissions.micRequestCount == 0, "a granted permission was requested during healing")
-        #expect(activity.endCount == 1, "a start that never became a recording leaked the display assertion")
-        // Four startup probes of 2 s each in real time would be eight seconds.
-        #expect(seconds < clockWiredWallClockBound,
-                "giving up took \(seconds) s of real time — the injected clock is not wired")
-    }
-
-    @Test
-    @available(macOS 15.0, *)
-    func aStreamThatDiesMidRecordingIsRestartedByTheWatchdog() async throws {
-        let directory = makeTemporaryDirectory("pipeline-watchdog")
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let source = FakeCaptureSource()
-        let permissions = FakePermissions()
-        let clock = TestClock()
-        clock.onSleep { _ in source.emitBatch() }
-
-        let session = RecordingSession(directory: directory, settings: makeSettings(),
-                                       wakeLock: CountingWakeLock().makeWakeLock(),
-                                       dependencies: makeDependencies(source: source,
-                                                                      permissions: permissions,
-                                                                      clock: clock))
-        try await session.start()
-        #expect(source.startCount == 1)
-
-        // The stream dies without saying so: buffers simply stop. Only a restart brings it back,
-        // which is what the watchdog is for — and the segments already on disk must survive it.
-        let began = Date()
-        source.goSilentUntilRestart()
-        let restarted = await waitUntil { source.startCount >= 2 }
-        let seconds = Date().timeIntervalSince(began)
-
-        #expect(restarted, "the watchdog never restarted a stream that stopped delivering")
-        #expect(source.startCount == 2, "the watchdog restarted more than once after the stream recovered")
-        #expect(source.stopCount == 1, "the restart did not stop the dead stream first")
-        // The stall threshold is six virtual seconds and the tick is one; in real time the whole
-        // detection is milliseconds. Anything near this bound means the watchdog is waiting on the
-        // wall clock.
-        #expect(seconds < clockWiredWallClockBound,
-                "the watchdog took \(seconds) s of real time to notice the stall — the clock is not wired")
-
-        let result = await session.stop()
-        let assembled = try #require(result, "the recording did not survive the watchdog's restart")
-        #expect(try #require(assembled.durationSeconds) > 0)
-        for name in [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName] {
-            let valid = await isRealAudioFile(directory.appendingPathComponent(name))
-            #expect(valid, "\(name): the track assembled after a restart is not playable audio")
         }
     }
 }
@@ -313,7 +154,9 @@ struct FailedStartCleanupThroughControllerTests {
         let root = makeTemporaryDirectory("controller-archive")
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let defaults = UserDefaults(suiteName: "acta-test-\(UUID().uuidString)")!
+        let suiteName = "acta-test-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let settingsStore = SettingsStore(defaults: defaults)
         settingsStore.save(RecordingSettings(archivePath: root.path, segmentSeconds: testSegmentSeconds))
 

@@ -43,34 +43,31 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     private var nextFrame: [Track: Int64] = [.system: 0, .mic: 0]
     private var starts = 0
     private var stops = 0
-    private var failingStarts: Set<Int> = []
+    private var failEveryStart = false
     /// Stands in for `SCKCaptureSource`'s `currentStream`: every successful `start()` mints a new
     /// identity, and `stop()` drops it. It exists so the identity guarantee is testable — a delayed
     /// failure from a stream that a restart has already replaced must not take the replacement down
     /// with it.
     private var currentStream = 0
     private var format: FixtureAudioFormat = .stereo48k
-    private var framesPerBuffer: AVAudioFrameCount = 48_000
-    private var batchSize = 3
     private var emitOnStart = true
+
+    /// One second of 48 kHz audio per buffer, so a buffer's presentation timestamp advances by a
+    /// second — enough for a handful of them to cross a segment boundary without a test having to
+    /// fabricate a gap in the media timeline. Three per batch per track.
+    private let framesPerBuffer: AVAudioFrameCount = 48_000
+    private let batchSize = 3
 
     // MARK: Script
 
-    /// Fail the `start()` calls with these 1-based attempt numbers with `.streamNotStarted`.
-    func failStarts(_ attempts: Set<Int>) { withLock { failingStarts = attempts } }
-    /// Fail every `start()`.
-    func failAllStarts() { withLock { failingStarts = Set(1...64) } }
-    /// How many buffers per track a batch carries.
-    func setBatchSize(_ size: Int) { withLock { batchSize = size } }
+    /// Every `start()` fails with `.streamNotStarted`.
+    func failAllStarts() { withLock { failEveryStart = true } }
     /// Whether `start()` emits a batch of its own.
     func setEmitOnStart(_ emit: Bool) { withLock { emitOnStart = emit } }
     /// The audio format of the emitted buffers.
     func setFormat(_ newFormat: FixtureAudioFormat) { withLock { format = newFormat } }
-    /// Frames per emitted buffer. The default is one second of 48 kHz audio, so a buffer's
-    /// presentation timestamp advances by a second — enough for a handful of them to cross a segment
-    /// boundary without a test having to fabricate a gap in the media timeline.
-    func setFramesPerBuffer(_ frames: AVAudioFrameCount) { withLock { framesPerBuffer = frames } }
-    /// This track stops producing audio; the other one carries on.
+    /// This track stops producing audio; the other one carries on. A restart does not heal it — a
+    /// dead capture device stays dead, which is what tells this apart from `goSilentUntilRestart()`.
     func silence(_ track: Track) { withLock { _ = silencedTracks.insert(track) } }
 
     /// The stream dies: nothing is delivered until it is brought back up. A restart is exactly what
@@ -85,12 +82,14 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     /// long returned — the real source's `didStopWithError`. It kills that stream and only that one:
     /// a straggler from a stream a restart already replaced must leave the replacement alone,
     /// exactly as `clearStream(ifIdentical:)` guarantees.
+    /// The gate is deliberately left open, exactly as `SCKCaptureSource.stream(_:didStopWithError:)`
+    /// leaves it: an asynchronous failure drops the stream so `isStreaming` stops lying, and nothing
+    /// more. Closing it here would make the fake promise a guarantee the shipped source does not.
     func failStream(_ token: Int) {
         withLock {
             guard currentStream == token else { return }
             currentStream = 0
             streaming = false
-            isStopped = true
         }
     }
 
@@ -111,11 +110,16 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     }
 
     func start() async throws {
+        // The gate stays shut on a failed start, which is what `SCKCaptureSource` guarantees too —
+        // it opens its own gate before `startCapture()` and closes it again if that throws.
         let shouldFail: Bool = withLock {
             starts += 1
-            return failingStarts.contains(starts)
+            return failEveryStart
         }
-        if shouldFail { throw StartupFailure.streamNotStarted }
+        if shouldFail {
+            withLock { isStopped = true }
+            throw StartupFailure.streamNotStarted
+        }
         let emit: Bool = withLock {
             isStopped = false
             streaming = true

@@ -42,8 +42,8 @@ struct FixtureAudioFormat {
 /// into the `AVAudioPCMBuffer` below. That is what makes it safe for the local `pcm` to die at the
 /// end of this function — with a flag that made the block buffer wrap the memory instead, every
 /// fixture buffer would be a use-after-free the moment it left this scope.
-func makeAudioSampleBuffer(pts: CMTime, frames: AVAudioFrameCount = 1_024,
-                           format: FixtureAudioFormat = .stereo48k) -> CMSampleBuffer? {
+func makeAudioSampleBuffer(pts: CMTime, frames: AVAudioFrameCount,
+                           format: FixtureAudioFormat) -> CMSampleBuffer? {
     guard let avFormat = format.avFormat,
           let pcm = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: frames) else { return nil }
     pcm.frameLength = frames
