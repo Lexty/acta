@@ -315,4 +315,64 @@ struct ControlAPITests {
         api.dismissRecoveryNotice()
         #expect(api.state.recoveryNotice == nil, "the recovery notice could not be dismissed")
     }
+
+    // MARK: - Title and settings
+
+    /// The two editable fields are read *and written* through the façade, and both reach the state the
+    /// UI renders. Asserted through `state`, not just the getter: a setter that mutated a field the
+    /// mapping never reads would leave the migrated menu editing a value it could not see.
+    @Test
+    @MainActor
+    @available(macOS 15.0, *)
+    func theTitleIsEditableThroughTheFacadeAndReachesTheState() async throws {
+        let harness = ControllerHarness(label: "api-title")
+        defer { harness.tearDown() }
+        let api = ControlAPI(controller: harness.controller)
+        defer { api.finish() }
+
+        api.title = "Board review"
+        #expect(api.title == "Board review")
+        #expect(api.state.title == "Board review")
+
+        // ⚠️ The documented quirk, frozen as a test rather than as prose: a title passed while the
+        // controller is busy still lands — the guard makes the *start* a no-op, and the mutation
+        // happened before it. Reproduced from the controller, not invented by the façade.
+        api.start(title: "First")
+        #expect(await waitUntilOnMain { OperationKind(api.state.operation) == .recording },
+                "the recording never started")
+        api.start(title: "Second")
+        #expect(api.title == "Second", "a title passed while busy no longer lands — the quirk changed")
+        #expect(OperationKind(api.state.operation) == .recording, "the busy guard let a second start through")
+
+        await api.stopAndWait()
+    }
+
+    /// `saveSettings()` is not a bare forward: it **normalises** first. A segment length outside the
+    /// allowed range is clamped, and the clamped value is what both the state and the store keep — so a
+    /// client that writes nonsense through the façade cannot park it in the UI or on disk.
+    @Test
+    @MainActor
+    @available(macOS 15.0, *)
+    func savingSettingsNormalisesThemBeforeTheyReachTheStateOrTheStore() throws {
+        let harness = ControllerHarness(label: "api-settings")
+        defer { harness.tearDown() }
+        let api = ControlAPI(controller: harness.controller)
+        defer { api.finish() }
+
+        var settings = api.settings
+        settings.segmentSeconds = RecordingSettings.maxSegmentSeconds + 600
+        settings.deleteSegmentsAfterAssembly = false
+        api.settings = settings
+
+        // Assigned but not yet saved: the controller holds the raw value, exactly as the menu's binding
+        // does while the user is still dragging the slider.
+        #expect(api.state.settings.segmentSeconds == RecordingSettings.maxSegmentSeconds + 600)
+
+        api.saveSettings()
+
+        #expect(api.settings.segmentSeconds == RecordingSettings.maxSegmentSeconds,
+                "`saveSettings()` forwarded without normalising")
+        #expect(api.state.settings.segmentSeconds == RecordingSettings.maxSegmentSeconds)
+        #expect(!api.state.settings.deleteSegmentsAfterAssembly, "an unrelated setting was lost in the save")
+    }
 }

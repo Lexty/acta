@@ -81,19 +81,31 @@ Consequences to keep in mind:
 ## Project structure
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`, `SelfCheckTuning`. Anything worth testing goes here — including **constants a
-  test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`): `SelfCheck` is internal
-  to `ActaRuntime`, and a threshold written once in the runtime and again in the test asserts only
-  that the test agrees with itself. One deliberate exception, **predating
+  `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`. Anything worth testing goes here —
+  including **constants a test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`):
+  `SelfCheck` is internal to `ActaRuntime`, and a threshold written once in the runtime and again in
+  the test asserts only that the test agrees with itself. The same rule is what puts
+  **`ControllerMessage`** here: it is the one home of every string `RecordingController` writes into
+  its untyped `errorMessage`, read by the controller that emits it *and* by `ControlState`'s reverse
+  lookup that classifies it. That cost was paid once already — while the mapping held hand-typed
+  copies, rewording a controller message left the build and all 296 tests green while
+  `ControlFailure.category` silently degraded to `.unknown` in production. One deliberate exception, **predating
   `ActaRuntime`**, from when a test could reach nothing else: `SegmentRepair` touches the FS, but it
   is the code that rescues crashed audio. That rationale has expired — since `ActaRuntime` exists,
   I/O-touching code that needs a test belongs there, not here. Do not cite `SegmentRepair` as
   precedent for adding I/O to `ActaKit`.
 - `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
   `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
-  `MeetingStore`, `DisplayWakeLock`, plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
+  `MeetingStore`, `DisplayWakeLock`, the typed boundary — `ControlAPI`/`ControlState`/
+  `ControlState+Mapping` — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
   `PermissionChecking`/`SystemPermissions`, `SelfCheckClock`/`SystemClock`, `RecordingDependencies`
   — FS, `powerd` and process I/O. Kept thin; decisions are delegated to ActaKit.
+  **A pure function may live here when its *types* cannot leave.** `ControllerSnapshot` and
+  `ControlState(from:)` have no I/O, no clock and no controller in reach — `ControlStateTests` drives
+  them with literals alone — but they name `RecordingController.Phase` and `MeetingStore.Recording`
+  and inherit the phase's macOS 15 availability, so `ActaKit` cannot hold them. The rule that binds is
+  "no I/O", not "in `ActaKit`": purity is what makes the mapping exhaustively testable, and the target
+  it sits in does not change that. Do not cite this to move I/O-touching code into `ActaKit`.
   **`SCStream` no longer permeates the target**: it lives *only* in `SCKCaptureSource`, behind the
   `CaptureSource` protocol. `AudioRecorder` sees `(Track, CMSampleBuffer)` and nothing more.
   It is a **library**, not part of the executable, because **SwiftPM cannot import an executable
@@ -201,8 +213,12 @@ reached the log while the other three reached the user.
   `ControllerTestSupport`). It records the lifecycle **as it is**, not as it should be: the capture is
   already live while `phase == .idle` during the probe, `phase` stays `.error` while the assembly is
   still writing, `start()` clears both banners, `.error` is not a latch. ⚠️ Those assertions **are the
-  contract, not bugs to fix** — they exist to catch the next refactor (the `ControlAPI` boundary,
-  parked in `docs/backlog/`). Assert only through the public surface: `isStopping` is
+  contract, not bugs to fix** — they exist to catch the next refactor, and the first one has landed:
+  the **`ControlAPI` façade** (`ControlAPI`/`ControlState`) wraps this controller *unchanged*, which is
+  what makes those frozen assertions the thing the façade is checked against. Still parked in
+  `docs/backlog/` is the **UI migration** — `ActaApp.swift` talks to `RecordingController.shared`
+  directly to this day, so the façade currently has no production caller. Assert only through the
+  public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
   computed properties with no publisher, so `$phase` is subscribed while the flags are **sampled**
   around `objectWillChange` — synchronously (which settles the *previous* change, and is what makes a
@@ -226,6 +242,12 @@ reached the log while the other three reached the user.
   harness depends on, runs no teardown at all). Nothing needs the persistence — settings are read back
   by the process that wrote them, and the harness's two processes agree on the archive through
   `--root`.
+- **`ControlAPI.shared` wraps `RecordingController.shared` — never a second controller.** The menu
+  reads the controller directly, so a façade over its own instance would record into the archive with
+  the menu showing nothing: an API-initiated recording no one on the machine can see, which the privacy
+  rule forbids. **No test can guard this** — `.shared` reaches for the real `~/Acta`, real TCC and real
+  time, so every test injects its own controller and none may touch `.shared`. It is a review-only
+  invariant.
 - **Two confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
   ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
   `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,

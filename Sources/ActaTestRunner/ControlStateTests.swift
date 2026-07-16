@@ -15,15 +15,18 @@ import Testing
 // No pipeline, no clock, no subprocess, no temp directory: if anything in this file ever needs one,
 // the mapping has stopped being pure.
 
+// The messages come from `ControllerMessage` — the type `RecordingController` itself writes from —
+// never from a copy typed out here. A copy would assert only that this file agrees with itself: it
+// would keep passing while a reworded controller message degraded to `.unknown` in production, which
+// is exactly what it did before `ControllerMessage` existed.
 @available(macOS 15.0, *)
-private let assemblyFailedMessage =
-    "Recording stopped, but the assembly failed. The segments are saved — recovery will retry on the "
-    + "next launches; if it still cannot assemble them, the raw segments are kept (see info.md)."
+private let assemblyFailedMessage = ControllerMessage.assemblyFailed.text
 
 @available(macOS 15.0, *)
-private let ffmpegMissingMessage =
-    "Recording stopped, but there is nothing to build the final file with: ffmpeg was not found (install "
-    + "it: brew install ffmpeg). The segments are saved — recovery will assemble them on the next launch."
+private let ffmpegMissingMessage = ControllerMessage.ffmpegMissing.text
+
+@available(macOS 15.0, *)
+private let startFailedMessage = ControllerMessage.startFailed(detail: "The folder could not be created.").text
 
 // MARK: - The operation, and its precedence
 
@@ -132,11 +135,10 @@ func failedStartClassifiesEveryKnownStartupFailure(_ failure: StartupFailure) {
 /// interpolates `error.localizedDescription`, hence a prefix match.
 @Test @available(macOS 15.0, *)
 func genericStartErrorClassifiesAsStartFailed() {
-    let message = "Could not start recording: The folder could not be created."
-    let state = ControlState(from: ControllerSnapshot(phase: .error, errorMessage: message))
+    let state = ControlState(from: ControllerSnapshot(phase: .error, errorMessage: startFailedMessage))
     #expect(state.operation == .idle)
     #expect(state.lifecycleFailure?.category == .startFailed)
-    #expect(state.lifecycleFailure?.displayMessage == message)
+    #expect(state.lifecycleFailure?.displayMessage == startFailedMessage)
 }
 
 /// The assembly failed with no `ffmpeg` on the machine. Un-inducible in-process — the controller-level
@@ -168,13 +170,31 @@ func unrecognisedMessageIsAFailureOfUnknownCategory() {
     #expect(state.notice == nil)
 }
 
+/// The closed set, swept: **every** message production can write is classified as something, and never
+/// as `.unknown`. This is the test that fails when a new `ControllerMessage` case is added and
+/// `category(of:)` is not taught about it — without it, the new message degrades to `.unknown` in
+/// production while `displayMessage` keeps working, so nothing user-visible breaks and no other test
+/// notices. `.archiveOpenFailed` is a notice rather than a failure, hence the two branches.
+@Test(arguments: ControllerMessage.allMessages) @available(macOS 15.0, *)
+func everyProductionMessageIsClassified(_ message: ControllerMessage) {
+    let state = ControlState(from: ControllerSnapshot(phase: .error, errorMessage: message.text))
+    if case .archiveOpenFailed = message {
+        #expect(state.notice?.category == .archiveOpenFailed)
+        #expect(state.lifecycleFailure == nil)
+    } else {
+        #expect(state.lifecycleFailure?.category != .unknown,
+                "\(message) is not recognised by the reverse lookup")
+        #expect(state.notice == nil)
+    }
+}
+
 // MARK: - The notice, and the last-write rule it proves
 
 /// `openArchive()` failing mid-recording: a notice, and the operation is untouched. The controller
 /// deliberately never moves `phase` here, and neither may the mapping.
 @Test @available(macOS 15.0, *)
 func archiveOpenFailureIsANoticeAndLeavesTheOperationAlone() {
-    let message = "Could not open the archive: The folder does not exist."
+    let message = ControllerMessage.archiveOpenFailed(detail: "The folder does not exist.").text
     let state = ControlState(from: ControllerSnapshot(phase: .recording, errorMessage: message,
                                                       elapsedSeconds: 7))
     #expect(state.operation == .recording(elapsedSeconds: 7))
@@ -189,7 +209,7 @@ func archiveOpenFailureIsANoticeAndLeavesTheOperationAlone() {
 /// from the controller and classifying by phase would attach the Finder message to the recording.
 @Test @available(macOS 15.0, *)
 func archivePrefixWinsOverAnErrorPhase() {
-    let message = "Could not open the archive: Permission denied."
+    let message = ControllerMessage.archiveOpenFailed(detail: "Permission denied.").text
     let state = ControlState(from: ControllerSnapshot(phase: .error, errorMessage: message))
     #expect(state.notice?.category == .archiveOpenFailed)
     #expect(state.notice?.displayMessage == message)

@@ -70,6 +70,9 @@ acta/
   Sources/Acta/
     ActaApp.swift                   # @main, MenuBarExtra, state idle/recording/error/recovered — the ONLY file here
   Sources/ActaRuntime/              # the pipeline (a library: SwiftPM cannot import an executable target)
+    ControlAPI.swift                # typed @MainActor façade over RecordingController: commands + states()
+    ControlState.swift              # the typed state (operation/lifecycleFailure/notice/recoveryNotice)
+    ControlState+Mapping.swift      # pure ControllerSnapshot → ControlState translation
     RecordingController.swift       # UI-facing observable state, start/stop wiring
     RecordingSession.swift          # one recording's lifecycle: marker, capture, assembly, wake lock
     AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush
@@ -77,7 +80,7 @@ acta/
     SegmentAssembler.swift          # ffmpeg concat (two tracks, no mix)
     RecoveryManager.swift           # on launch: find session.json status=recording → assemble segments
     SelfCheck.swift                 # verify data flow at start + watchdog + auto-heal
-    Permissions.swift               # Screen Recording + Microphone
+    SystemPermissions.swift         # Screen Recording + Microphone (behind the PermissionChecking seam)
     MeetingStore.swift              # folders, session.json, info.md front-matter, recordings list
     Settings.swift                  # archive path, segment length, segment cleanup
     BuildFlavor.swift               # stable/dev flavor, log subsystem, build revision

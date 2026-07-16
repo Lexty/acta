@@ -63,12 +63,14 @@ public struct ControllerSnapshot: Equatable, Sendable {
 
 /// A lifecycle failure — a recording that did not start, or stopped without producing its final file.
 ///
-/// ⚠️ **The provenance is a best-effort classification, not truthful typed provenance.** The
-/// controller publishes exactly one untyped `errorMessage`; nothing in it says which code path wrote
-/// it. `category` is therefore inferred by a reverse lookup over the strings production is known to
-/// write, and `.unknown` is the honest answer for anything else. `displayMessage` carries no such
-/// doubt: it is the controller's own string, passed through byte for byte, which is why the UI can be
-/// migrated onto this type without a single message changing.
+/// ⚠️ **The provenance is a classification, not truthful typed provenance.** The controller publishes
+/// exactly one untyped `errorMessage`; nothing in it says which code path wrote it. `category` is
+/// therefore inferred by a reverse lookup, and `.unknown` is the honest answer for a string no known
+/// writer accounts for. What the lookup does **not** risk is drift: it matches against
+/// `StartupFailure.userMessage` and `ControllerMessage.Prefix` — the writers' own text, not copies of
+/// it — so rewording a message moves the writer and this reader together or fails to compile.
+/// `displayMessage` carries no doubt at all: it is the controller's own string, passed through byte
+/// for byte, which is why the UI can be migrated onto this type without a single message changing.
 public struct ControlFailure: Equatable, Sendable {
     /// What the message was recognised as.
     public enum Category: Equatable, Sendable {
@@ -189,7 +191,10 @@ public struct ControlState: Equatable, Sendable {
     /// an operation.
     public var hasWorkInFlight: Bool { operation != .idle }
 
-    /// Whether `start(title:)` would do anything — the controller's own guard, restated.
+    /// Whether a **start** would be accepted — the controller's own guard, restated.
+    ///
+    /// Not "whether `start(title:)` would do anything": a title passed while busy still lands (see
+    /// `ControlAPI.start(title:)`), so the call is observable even when the start itself no-ops.
     public var canStart: Bool { operation == .idle }
 
     /// Whether `stop()` would do anything — the controller stops only from `phase == .recording`.

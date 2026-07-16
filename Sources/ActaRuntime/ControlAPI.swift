@@ -60,10 +60,18 @@ public final class ControlAPI {
     /// the only signal available is `objectWillChange` — which fires *before* the value lands and names
     /// neither the property nor its new value. The façade therefore *samples*: synchronously (settling
     /// the previous change) and again one main-actor turn later (settling this one), exactly as
-    /// `ControllerTestSupport`'s recorder does. Several mutations inside one turn collapse into the one
-    /// state that turn ends in. Buffering is unbounded, so nothing the façade *did* sample is dropped —
-    /// but unbounded buffering cannot recover a state that was never sampled, and no claim here rests
-    /// on it doing so.
+    /// `ControllerTestSupport`'s recorder does. Buffering is unbounded, so nothing the façade *did*
+    /// sample is dropped — but unbounded buffering cannot recover a state that was never sampled, and
+    /// no claim here rests on it doing so.
+    ///
+    /// ⚠️ **A yielded state is not necessarily one the controller settled on.** Several mutations in one
+    /// turn do *not* collapse: the synchronous sample runs per `objectWillChange`, so a turn that writes
+    /// two fields is sampled between them and yields the half-applied state in between. `start(title:)`
+    /// on a controller showing a recovery banner really does yield `.starting` *with* the banner before
+    /// yielding `.starting` without it, and a retry after a failed start yields `.starting` still
+    /// carrying the previous `lifecycleFailure`. These are real intermediate states of a real object,
+    /// not fabrications — but a consumer that renders every state verbatim will show them, and one that
+    /// needs only settled states must debounce to the end of the turn itself.
     public func states() -> AsyncStream<ControlState> {
         AsyncStream(bufferingPolicy: .unbounded) { continuation in
             // Runs synchronously inside `AsyncStream.init`, on the main actor: register and replay

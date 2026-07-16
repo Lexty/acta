@@ -10,26 +10,6 @@ import Foundation
 /// cover them at all. As a function over literals, every combination is reachable.
 @available(macOS 15.0, *)
 extension ControlState {
-    /// The message prefixes production is known to write into the controller's single `errorMessage`.
-    ///
-    /// ⚠️ These are copies of the controller's own literals — the unavoidable price of a reverse
-    /// lookup over an untyped field, and the reason `ControlFailure.category` is documented as
-    /// best-effort. Prefixes, not full strings, because the tails interpolate an
-    /// `error.localizedDescription`; the startup failures are matched by full equality instead, since
-    /// `StartupFailure.userMessage` is a closed set this mapping can enumerate. A literal that drifts
-    /// out of sync degrades the category to `.unknown` — it never corrupts `displayMessage`, which is
-    /// always the controller's own string passed through.
-    enum KnownMessage {
-        /// `RecordingController.openArchive()`.
-        static let archiveOpenFailed = "Could not open the archive: "
-        /// `RecordingController.performStart`, the non-`StartupFailure` branch.
-        static let startFailed = "Could not start recording: "
-        /// `RecordingController.performStop`, the branch where `ffmpeg` was not found.
-        static let ffmpegMissing = "Recording stopped, but there is nothing to build the final file with:"
-        /// `RecordingController.performStop`, the branch where the assembly itself failed.
-        static let assemblyFailed = "Recording stopped, but the assembly failed."
-    }
-
     /// Map a snapshot of the controller to the typed state.
     public init(from snapshot: ControllerSnapshot) {
         let classified = ControlState.classify(errorMessage: snapshot.errorMessage)
@@ -79,20 +59,30 @@ extension ControlState {
     /// recoverable here — the controller lost it too.
     private static func classify(errorMessage: String) -> (failure: ControlFailure?, notice: Notice?) {
         guard !errorMessage.isEmpty else { return (nil, nil) }
-        if errorMessage.hasPrefix(KnownMessage.archiveOpenFailed) {
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.archiveOpenFailed) {
             return (nil, Notice(category: .archiveOpenFailed, displayMessage: errorMessage))
         }
         return (ControlFailure(category: category(of: errorMessage), displayMessage: errorMessage), nil)
     }
 
     /// The reverse lookup: which known production string is this?
+    ///
+    /// Both closed sets it matches against are the writers' own — `StartupFailure.userMessage` is what
+    /// the controller publishes verbatim (matched by equality, since `CaseIterable` enumerates it), and
+    /// `ControllerMessage.Prefix` is the leading text of every message the controller composes (matched
+    /// by prefix, since two of the four interpolate an `error.localizedDescription` tail). Neither is a
+    /// copy, so neither can drift out from under this lookup.
     private static func category(of errorMessage: String) -> ControlFailure.Category {
         if let failure = StartupFailure.allCases.first(where: { $0.userMessage == errorMessage }) {
             return .startup(failure)
         }
-        if errorMessage.hasPrefix(KnownMessage.ffmpegMissing) { return .assemblyFailed(ffmpegMissing: true) }
-        if errorMessage.hasPrefix(KnownMessage.assemblyFailed) { return .assemblyFailed(ffmpegMissing: false) }
-        if errorMessage.hasPrefix(KnownMessage.startFailed) { return .startFailed }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.ffmpegMissing) {
+            return .assemblyFailed(ffmpegMissing: true)
+        }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.assemblyFailed) {
+            return .assemblyFailed(ffmpegMissing: false)
+        }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.startFailed) { return .startFailed }
         return .unknown
     }
 }

@@ -236,7 +236,7 @@ public final class RecordingController: ObservableObject {
             log.error("Start rejected by self-diagnosis: \(failure.userMessage, privacy: .public)")
         } catch {
             phase = .error
-            errorMessage = "Could not start recording: \(error.localizedDescription)"
+            errorMessage = ControllerMessage.startFailed(detail: error.localizedDescription).text
             session = nil
             FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start failed: \(error.localizedDescription, privacy: .public)")
@@ -342,12 +342,8 @@ public final class RecordingController: ObservableObject {
                 to: directory)
             phase = .error
             errorMessage = SegmentAssembler.locateFFmpeg() == nil
-                ? "Recording stopped, but there is nothing to build the final file with: ffmpeg was not found (install "
-                    + "it: brew install ffmpeg). The segments are saved — recovery will assemble them on the next launch."
-                // Not "will assemble on the next launch": `RecoveryManager` bounds its attempts, and these causes are
-                // the ones it treats as non-transient — promising a fix we may never deliver is the same over-claim.
-                : "Recording stopped, but the assembly failed. The segments are saved — recovery will retry on the "
-                    + "next launches; if it still cannot assemble them, the raw segments are kept (see info.md)."
+                ? ControllerMessage.ffmpegMissing.text
+                : ControllerMessage.assemblyFailed.text
             log.error("Recording stopped, but the assembly failed — leaving the segments to recovery")
             refresh()
             return
@@ -380,7 +376,7 @@ public final class RecordingController: ObservableObject {
         do {
             try ArchiveOpener.openArchive(store: store)
         } catch {
-            errorMessage = "Could not open the archive: \(error.localizedDescription)"
+            errorMessage = ControllerMessage.archiveOpenFailed(detail: error.localizedDescription).text
             log.error("Could not open the archive: \(error.localizedDescription, privacy: .public)")
         }
     }
