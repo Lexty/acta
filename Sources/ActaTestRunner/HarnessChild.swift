@@ -39,7 +39,7 @@ enum HarnessChild {
         // confirmed — see `clock.freeze()` below.
         clock.onSleep { _ in source.emitBatch() }
 
-        let controller = makeController(archiveRoot: archive, source: source, clock: clock)
+        let controller = makeController(root: root, source: source, clock: clock)
         controller.onLaunch()
         controller.start()
         guard await waitUntilOnMain(timeout: Harness.readinessTimeoutSeconds, { !controller.isStarting }),
@@ -187,41 +187,57 @@ enum HarnessChild {
 
     /// Recover `<root>/archive` as a fresh process and report the outcome as an exit code.
     private static func recover(root: URL) async -> Never {
-        let archive = Harness.archiveRoot(in: root)
         // A source that will never be asked for anything: recover mode never calls `start()`, and
         // wiring the live factory would put real ScreenCaptureKit behind an unreachable branch.
-        let controller = makeController(archiveRoot: archive, source: FakeCaptureSource(),
-                                        clock: TestClock())
+        let controller = makeController(root: root, source: FakeCaptureSource(), clock: TestClock())
         // `onLaunch()` also asks for notification authorization. It is not a prompt here and cannot
         // block: `Notifier` no-ops unless `Bundle.main.bundleIdentifier` exists, and this is a bare
         // executable, not an `.app`.
         controller.onLaunch()
 
-        switch await withTimeout(seconds: Harness.recoveryTimeoutSeconds,
-                                 operation: { await controller.awaitRecovery() }) {
-        case .timedOut:
-            finish(.recoveryTimedOut, "recovery did not finish within \(Harness.recoveryTimeoutSeconds)s")
-        case .value(nil):
-            finish(.recoveryDidNotRun, "onLaunch() started no recovery pass")
-        case .value(.some(let outcome)):
-            switch outcome {
-            // Both are success, and `nothingToRecover` has to be: a cleanly stopped archive holds no
-            // interrupted marker, so a pass over it correctly does nothing — which is exactly what
-            // the non-crash plumbing test asserts.
-            case .nothingToRecover, .recovered:
-                finish(.ok, "recovery: \(outcome)")
-            case .incomplete:
-                finish(.recoveryIncomplete, "recovery left audio outside a track: \(outcome)")
-            }
+        let deadline = armRecoveryDeadline()
+        let outcome = await controller.awaitRecovery()
+        // Before the switch, and nothing below it suspends: the deadline may not fire between a pass
+        // that finished and this process reporting that it did.
+        deadline.cancel()
+
+        guard let outcome else { finish(.recoveryDidNotRun, "onLaunch() started no recovery pass") }
+        switch outcome {
+        // Both are success, and `nothingToRecover` has to be: a cleanly stopped archive holds no
+        // interrupted marker, so a pass over it correctly does nothing — which is exactly what
+        // the non-crash plumbing test asserts.
+        case .nothingToRecover, .recovered:
+            finish(.ok, "recovery: \(outcome)")
+        case .incomplete:
+            finish(.recoveryIncomplete, "recovery did not bring every meeting back: \(outcome)")
+        }
+    }
+
+    /// Bound recover mode's wait — by exiting the process, not by unwinding the wait.
+    ///
+    /// **A racing task group cannot do this job, however natural it looks.** `awaitRecovery()`
+    /// suspends on an unstructured `Task`'s `value`, and awaiting that ignores cancellation — so
+    /// `withTaskGroup`'s implicit await of its children would park on the very hang the timeout
+    /// exists to bound, `cancelAll()` would reach nothing, and `Exit.recoveryTimedOut` would be
+    /// unreachable code. The parent would then wait out a child that never exits, and the suite would
+    /// hang where the harness is supposed to be reporting a failed run.
+    ///
+    /// Exiting is available where unwinding is not: `runRecovery` hands the `ffmpeg` work to a
+    /// detached task, so a pass hung inside it leaves this actor free to fire. A child that cannot
+    /// finish recovery has nothing further to report anyway — the exit code is the whole message.
+    private static func armRecoveryDeadline() -> Task<Void, Never> {
+        // `Task`, not `Task.detached`: it inherits this actor, which is where `finish` has to run —
+        // and the actor is free to take it, because `recover()` is suspended in `awaitRecovery()`
+        // and the pass this bounds runs on a detached task of its own.
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(Harness.recoveryTimeoutSeconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            finish(.recoveryTimedOut,
+                   "recovery did not finish within \(Harness.recoveryTimeoutSeconds)s")
         }
     }
 
     // MARK: - Shared
-
-    /// Undo whatever this process left outside its working directory. Set once the controller is
-    /// built; a `defer` cannot do this job, because every exit here goes through `exit()`, which
-    /// unwinds nothing.
-    private static var cleanup: (@MainActor () -> Void)?
 
     /// A `RecordingController` in a harness process: the same seams the in-process scenarios inject,
     /// and an isolated defaults suite, so the developer's own app is never pointed at a temp
@@ -230,11 +246,15 @@ enum HarnessChild {
     /// Not `ControllerHarness`: that one makes a temp root of its own and wires the clock to the
     /// source for the whole run, and those are the two decisions a harness child has to make
     /// differently — the root comes from the parent, and emission stops at readiness.
-    private static func makeController(archiveRoot: URL, source: FakeCaptureSource,
+    ///
+    /// The defaults suite is **named after the root, and removed by the parent**, because this
+    /// process may not live to remove it: `SIGKILL` runs no cleanup, which is the whole point of the
+    /// signal. A name minted here would be one the crashed child alone ever knew — an unreachable
+    /// persistent domain per crash run, accumulating in the developer's home forever.
+    private static func makeController(root: URL, source: FakeCaptureSource,
                                        clock: TestClock) -> RecordingController {
-        let suiteName = "acta-harness-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        cleanup = { defaults.removePersistentDomain(forName: suiteName) }
+        let archiveRoot = Harness.archiveRoot(in: root)
+        let defaults = UserDefaults(suiteName: Harness.defaultsSuiteName(in: root))!
         let settingsStore = SettingsStore(defaults: defaults)
         settingsStore.save(RecordingSettings(archivePath: archiveRoot.path,
                                              segmentSeconds: testSegmentSeconds,
@@ -248,15 +268,14 @@ enum HarnessChild {
         }
     }
 
-    /// Say what happened, on stderr, clean up, and go. The message is what turns a bare exit code in
-    /// a failing test into something diagnosable.
+    /// Say what happened, on stderr, and go. The message is what turns a bare exit code in a failing
+    /// test into something diagnosable.
     ///
-    /// The crash path reaches none of this, by construction — a `SIGKILL`ed child leaves its
-    /// defaults suite behind under a name nothing ever reads again. That is the price of the signal
-    /// being real.
+    /// Nothing is torn down here, and nothing needs to be: the working directory belongs to the
+    /// parent and the defaults suite is named so the parent can remove it. The crash path would reach
+    /// none of it anyway.
     private static func finish(_ code: Harness.Exit, _ reason: String) -> Never {
         FileHandle.standardError.write(Data("harness: \(reason)\n".utf8))
-        cleanup?()
         exit(code.rawValue)
     }
 
@@ -265,28 +284,5 @@ enum HarnessChild {
         let folders = meetingFolders(in: archive)
         guard folders.count == 1 else { return nil }
         return archive.appendingPathComponent(folders[0], isDirectory: true)
-    }
-
-    /// The result of a bounded wait — an explicit "did not finish" rather than a `nil` that would
-    /// nest inside the optional the operation itself returns.
-    private enum Timed<T: Sendable>: Sendable {
-        case value(T)
-        case timedOut
-    }
-
-    /// Run `operation`, giving up after `seconds`.
-    private static func withTimeout<T: Sendable>(
-        seconds: Double, operation: @escaping @Sendable () async -> T
-    ) async -> Timed<T> {
-        await withTaskGroup(of: Timed<T>.self) { group in
-            group.addTask { .value(await operation()) }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return .timedOut
-            }
-            let first = await group.next() ?? .timedOut
-            group.cancelAll()
-            return first
-        }
     }
 }

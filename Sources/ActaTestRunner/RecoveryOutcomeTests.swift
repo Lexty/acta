@@ -2,7 +2,7 @@ import ActaRuntime
 import Foundation
 import Testing
 
-// `RecoveryOutcome(_:)` — the pure mapping from a pass's four lists to the one verdict a harness
+// `RecoveryOutcome(_:)` — the pure mapping from a pass's five lists to the one verdict a harness
 // process reports as an exit code.
 //
 // It is tested here and not through the harness because the harness cannot reach it: a staged crash
@@ -11,15 +11,16 @@ import Testing
 // in the runtime and never named in a test is a decision nothing is holding in place.
 
 @available(macOS 15.0, *)
-private func outcome(recovered: Int = 0, partial: Int = 0,
-                     unassembled: Int = 0, retrying: Int = 0) -> RecoveryManager.Outcome {
+private func outcome(recovered: Int = 0, partial: Int = 0, unassembled: Int = 0,
+                     retrying: Int = 0, lost: Int = 0) -> RecoveryManager.Outcome {
     func urls(_ count: Int, _ label: String) -> [URL] {
         (0..<count).map { URL(fileURLWithPath: "/tmp/\(label)-\($0)", isDirectory: true) }
     }
     return RecoveryManager.Outcome(recovered: urls(recovered, "recovered"),
                                    partial: urls(partial, "partial"),
                                    unassembled: urls(unassembled, "unassembled"),
-                                   retrying: urls(retrying, "retrying"))
+                                   retrying: urls(retrying, "retrying"),
+                                   lost: urls(lost, "lost"))
 }
 
 /// A pass that did nothing and a pass that could do nothing are opposite answers, and the exit code
@@ -43,11 +44,25 @@ func aWhollySuccessfulPassIsRecovered() {
 @available(macOS 15.0, *)
 func anyFolderLeftBehindIsIncomplete() {
     #expect(RecordingController.RecoveryOutcome(outcome(partial: 1))
-            == .incomplete(partial: 1, unassembled: 0, retrying: 0))
+            == .incomplete(partial: 1, unassembled: 0, retrying: 0, lost: 0))
     #expect(RecordingController.RecoveryOutcome(outcome(unassembled: 1))
-            == .incomplete(partial: 0, unassembled: 1, retrying: 0))
+            == .incomplete(partial: 0, unassembled: 1, retrying: 0, lost: 0))
     #expect(RecordingController.RecoveryOutcome(outcome(recovered: 1, partial: 2, unassembled: 3))
-            == .incomplete(partial: 2, unassembled: 3, retrying: 0))
+            == .incomplete(partial: 2, unassembled: 3, retrying: 0, lost: 0))
+}
+
+/// The list with no audio behind it, and the one whose absence read as success. A folder the crash
+/// left with no salvageable segment is closed and gone — nothing to retry, nothing in the segments —
+/// so nothing about the *archive* distinguishes it from a folder that never needed recovering. The
+/// verdict has to, or a lost meeting exits zero.
+@Test("A meeting closed with nothing to salvage is a loss, not nothing to recover")
+@available(macOS 15.0, *)
+func aLostFolderIsNotAnEmptyPass() {
+    #expect(RecordingController.RecoveryOutcome(outcome(lost: 1))
+            == .incomplete(partial: 0, unassembled: 0, retrying: 0, lost: 1))
+    #expect(RecordingController.RecoveryOutcome(outcome(recovered: 2, lost: 1))
+            == .incomplete(partial: 0, unassembled: 0, retrying: 0, lost: 1))
+    #expect(!outcome(lost: 1).isEmpty)
 }
 
 /// `retrying` counts, and this is the assertion that makes the list worth having. A deferred folder
@@ -58,7 +73,7 @@ func anyFolderLeftBehindIsIncomplete() {
 @available(macOS 15.0, *)
 func aDeferredFolderIsIncompleteNotRecovered() {
     #expect(RecordingController.RecoveryOutcome(outcome(retrying: 1))
-            == .incomplete(partial: 0, unassembled: 0, retrying: 1))
+            == .incomplete(partial: 0, unassembled: 0, retrying: 1, lost: 0))
     #expect(RecordingController.RecoveryOutcome(outcome(recovered: 3, retrying: 1))
-            == .incomplete(partial: 0, unassembled: 0, retrying: 1))
+            == .incomplete(partial: 0, unassembled: 0, retrying: 1, lost: 0))
 }

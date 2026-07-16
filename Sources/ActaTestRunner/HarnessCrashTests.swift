@@ -17,81 +17,87 @@ import Testing
 /// crash-safety machinery — segmentation → `SIGKILL` → fresh-process recovery → header repair →
 /// assembly — end to end, automatically.
 ///
-/// Serialized, for the same reason `HarnessPlumbingTests` is: every test spawns children that run
-/// `AVAssetWriter` and `ffmpeg`, and the machine is process-global even where the code is not.
-@Suite(.serialized)
-struct HarnessCrashTests {
-    /// What one crash run may take, end to end. A bound on a hang rather than an expectation — a
-    /// cold `AVAssetWriter`, real finalisation and a real `ffmpeg` concat on a loaded machine are not
-    /// quick — but asserted, because a harness whose failure mode is "never returns" is not a test.
-    private static let wallClockBudgetSeconds = 180.0
+/// Nested in `HarnessTests` for the same reason `Plumbing` is: the parent carries `.serialized`, and
+/// only a shared parent can keep these children from racing that suite's — see the note there.
+extension HarnessTests {
+    @Suite
+    struct Crash {
+        /// What one crash run may take, end to end. A bound on a hang rather than an expectation — a
+        /// cold `AVAssetWriter`, real finalisation and a real `ffmpeg` concat on a loaded machine are
+        /// not quick — but asserted, because a harness whose failure mode is "never returns" is not a
+        /// test.
+        private static let wallClockBudgetSeconds = 180.0
 
-    @Test("A SIGKILLed recording is recovered by a fresh process, frame for frame")
-    @available(macOS 15.0, *)
-    func aKilledRecordingIsRecoveredFrameForFrame() async throws {
-        let started = Date()
-        let run = try await CrashRun.stage(label: "crash", fault: nil)
-        defer { run.tearDown() }
+        @Test("A SIGKILLed recording is recovered by a fresh process, frame for frame")
+        @available(macOS 15.0, *)
+        func aKilledRecordingIsRecoveredFrameForFrame() async throws {
+            let started = Date()
+            let run = try await CrashRun.stage(label: "crash", fault: nil)
+            defer { run.tearDown() }
 
-        // The marker the recovery pass leaves: `.recovered`, not `.done`. A crashed folder that came
-        // back is not the same thing as one that was stopped, and the archive says so.
-        #expect(try readSessionManifest(in: run.meeting).status == .recovered)
-        #expect(await bothTracksAssembled(in: run.meeting))
+            // The marker the recovery pass leaves: `.recovered`, not `.done`. A crashed folder that came
+            // back is not the same thing as one that was stopped, and the archive says so.
+            #expect(try readSessionManifest(in: run.meeting).status == .recovered)
+            #expect(await bothTracksAssembled(in: run.meeting))
 
-        for track in Track.allCases {
-            switch try run.verifyAssembled(track) {
-            case .ok(let frames):
-                // Strictly greater, and that is the assertion this test exists for. `>=` would be
-                // satisfied by a recovery that threw the unfinalised segment away and assembled the
-                // closed ones — which is not recovery, it is the data loss recovery prevents.
-                // Readiness guarantees the open segment was `.repair`, i.e. that `WAV.headerRepair`
-                // found a whole frame of body in it, and emission was frozen before the kill, so a
-                // repaired tail *must* carry the track past its closed prefix.
-                #expect(frames > run.closedFrames(track),
-                        "\(track) recovered \(frames) frames — the unfinalised tail past \(run.closedFrames(track)) was lost, not repaired")
-                #expect(frames <= run.readiness.frames(track))
-            case let other:
-                Issue.record("\(track) did not survive the crash intact: \(other)")
+            for track in Track.allCases {
+                switch try run.verifyAssembled(track) {
+                case .ok(let frames):
+                    // Strictly greater, and that is the assertion this test exists for. `>=` would be
+                    // satisfied by a recovery that threw the unfinalised segment away and assembled the
+                    // closed ones — which is not recovery, it is the data loss recovery prevents.
+                    // Readiness guarantees the open segment was `.repair`, i.e. that `WAV.headerRepair`
+                    // found a whole frame of body in it, and emission was frozen before the kill, so a
+                    // repaired tail *must* carry the track past its closed prefix.
+                    #expect(frames > run.closedFrames(track),
+                            """
+                            \(track) recovered \(frames) frames — the unfinalised tail past \
+                            \(run.closedFrames(track)) was lost, not repaired
+                            """)
+                    #expect(frames <= run.readiness.frames(track))
+                case let other:
+                    Issue.record("\(track) did not survive the crash intact: \(other)")
+                }
             }
+
+            let elapsed = Date().timeIntervalSince(started)
+            #expect(elapsed < Self.wallClockBudgetSeconds,
+                    "the crash run took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
         }
 
-        let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed < Self.wallClockBudgetSeconds,
-                "the crash run took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
-    }
+        /// The negative control, and it is permanent for a reason: every assertion above is only worth
+        /// what the oracle's ability to fail is worth. An oracle that always says `.ok` would make the
+        /// crash test green forever, including on the day recovery starts losing audio.
+        ///
+        /// So the same harness runs against a child that really does lose audio, and the oracle must name
+        /// **that** loss — the exact frame and the exact width. Not "some failure": a timeout, an
+        /// `ffmpeg` error or a dead child would all be failures too, and none of them would show the
+        /// oracle working.
+        @Test("The oracle names a dropped frame in a surviving segment, in the harness")
+        @available(macOS 15.0, *)
+        func theOracleCatchesAudioLostInASurvivingSegment() async throws {
+            let started = Date()
+            let run = try await CrashRun.stage(label: "dropped", fault: CrashRun.fault)
+            defer { run.tearDown() }
 
-    /// The negative control, and it is permanent for a reason: every assertion above is only worth
-    /// what the oracle's ability to fail is worth. An oracle that always says `.ok` would make the
-    /// crash test green forever, including on the day recovery starts losing audio.
-    ///
-    /// So the same harness runs against a child that really does lose audio, and the oracle must name
-    /// **that** loss — the exact frame and the exact width. Not "some failure": a timeout, an
-    /// `ffmpeg` error or a dead child would all be failures too, and none of them would show the
-    /// oracle working.
-    @Test("The oracle names a dropped frame in a surviving segment, in the harness")
-    @available(macOS 15.0, *)
-    func theOracleCatchesAudioLostInASurvivingSegment() async throws {
-        let started = Date()
-        let run = try await CrashRun.stage(label: "dropped", fault: CrashRun.fault)
-        defer { run.tearDown() }
+            // The run is otherwise a good one: the fault is missing audio, not a broken recording, so
+            // everything around the hole must still work. Without this the test could pass on a child
+            // that produced nothing at all.
+            #expect(try readSessionManifest(in: run.meeting).status == .recovered)
+            #expect(await bothTracksAssembled(in: run.meeting))
 
-        // The run is otherwise a good one: the fault is missing audio, not a broken recording, so
-        // everything around the hole must still work. Without this the test could pass on a child
-        // that produced nothing at all.
-        #expect(try readSessionManifest(in: run.meeting).status == .recovered)
-        #expect(await bothTracksAssembled(in: run.meeting))
+            for track in Track.allCases {
+                let result = try run.verifyAssembled(track)
+                #expect(result == .discontinuity(frame: CrashRun.faultFrame, skipped: CrashRun.fault.frames),
+                        "the oracle did not name the hole in \(track): \(result)")
+            }
 
-        for track in Track.allCases {
-            let result = try run.verifyAssembled(track)
-            #expect(result == .discontinuity(frame: CrashRun.faultFrame, skipped: CrashRun.fault.frames),
-                    "the oracle did not name the hole in \(track): \(result)")
+            // The same bound its positive twin carries, for the same reason: the harness suites are
+            // serialized, so a wedge here stalls the run rather than failing it.
+            let elapsed = Date().timeIntervalSince(started)
+            #expect(elapsed < Self.wallClockBudgetSeconds,
+                    "the negative control took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
         }
-
-        // The same bound its positive twin carries, for the same reason: both suites are serialized,
-        // so a wedge here stalls the run rather than failing it.
-        let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed < Self.wallClockBudgetSeconds,
-                "the negative control took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
     }
 }
 
@@ -172,7 +178,16 @@ struct CrashRun {
         // Recovery, in a process that shares nothing with the one that died — no in-memory state
         // survived it, which is exactly the point. Required to succeed before anything is inspected:
         // an assertion about an archive whose recovery failed says nothing about recovery.
-        let recoverer = try HarnessProcess(mode: .recover(root: child.root))
+        // Spawned inside a `do`, not with a bare `try`: every other exit from this function tears the
+        // child down first, and a spawn that throws must not be the one that walks out leaving a
+        // staged archive behind.
+        let recoverer: HarnessProcess
+        do {
+            recoverer = try HarnessProcess(mode: .recover(root: child.root))
+        } catch {
+            child.tearDown()
+            throw error
+        }
         let recovery = await recoverer.waitForExit()
         guard recovery.exited(.ok) else {
             child.tearDown()

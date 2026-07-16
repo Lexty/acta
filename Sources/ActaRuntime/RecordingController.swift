@@ -154,7 +154,7 @@ public final class RecordingController: ObservableObject {
         log.notice("""
             Recovery pass: \(recovered, privacy: .public) recovered, \
             \(partial, privacy: .public) partial, \(unassembled, privacy: .public) unassembled, \
-            \(outcome.retrying.count, privacy: .public) retrying
+            \(outcome.retrying.count, privacy: .public) retrying, \(outcome.lost.count, privacy: .public) lost
             """)
         if let message = RecoveryReport.message(recovered: recovered, partial: partial, unassembled: unassembled) {
             recoveredBanner = message.body

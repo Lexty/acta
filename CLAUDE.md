@@ -125,10 +125,13 @@ assemble both leave `session.json` at `recording`, so polling can only bound the
 resolve it — and the crash harness's recoverer has to tell "recovery worked" from "recovery gave up"
 to have proved anything. The verdict rides on `recoveryTask`'s own value, which is why that property
 is `internal` rather than `private` and why `didRunRecovery` is gone: the task's existence *is* that
-fact. Relatedly, `RecoveryManager.Outcome` has **four** lists, not three — `retrying` holds folders
-left interrupted for a later launch (a spent repair attempt, or no `ffmpeg`). It is not terminal, and
-it exists because without it such a folder lands in no list at all, making a blocked pass
-indistinguishable from an archive with nothing to recover. `isEmpty` counts it.
+fact. Relatedly, `RecoveryManager.Outcome` has **five** lists, not three, and the last two exist for
+one reason: a folder the pass acted on that lands in no list is reported as an archive with nothing
+to recover — the opposite answer. `retrying` holds folders left interrupted for a later launch (a
+spent repair attempt, or no `ffmpeg`); it is not terminal, the marker still says `recording`.
+`lost` holds folders closed because the crash left no salvageable segment — terminal, and total data
+loss, which must never come back as success. `isEmpty` counts both, and either makes the verdict
+`.incomplete`.
 
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).

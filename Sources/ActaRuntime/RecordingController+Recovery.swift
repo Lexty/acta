@@ -21,20 +21,23 @@ extension RecordingController {
         case nothingToRecover
         /// Every interrupted recording it found assembled whole.
         case recovered(count: Int)
-        /// It found interrupted recordings whose audio did not all reach a track — closed short
-        /// (`partial`), closed with nothing (`unassembled`), or left for a later launch
-        /// (`retrying`). One outcome for the three because they are one answer: the pass ran and the
-        /// audio is still in the segments.
-        case incomplete(partial: Int, unassembled: Int, retrying: Int)
+        /// It found interrupted recordings it did not bring back whole — closed short (`partial`),
+        /// closed with the audio still in the segments (`unassembled`), left for a later launch
+        /// (`retrying`), or closed over a crash that left nothing to salvage at all (`lost`). One
+        /// outcome for the four because they are one answer: the pass ran, and a meeting it found is
+        /// not in a playable track.
+        case incomplete(partial: Int, unassembled: Int, retrying: Int, lost: Int)
 
-        /// A pass's three lists read as one verdict. Any folder still holding audio outside a track
-        /// — terminal or not — makes the pass incomplete: `recovered` may only be claimed when
+        /// A pass's lists read as one verdict. Any folder that did not come back whole — terminal or
+        /// not, salvageable or not — makes the pass incomplete: `recovered` may only be claimed when
         /// nothing was left behind.
         public init(_ outcome: RecoveryManager.Outcome) {
-            guard outcome.partial.isEmpty, outcome.unassembled.isEmpty, outcome.retrying.isEmpty else {
+            guard outcome.partial.isEmpty, outcome.unassembled.isEmpty, outcome.retrying.isEmpty,
+                  outcome.lost.isEmpty else {
                 self = .incomplete(partial: outcome.partial.count,
                                    unassembled: outcome.unassembled.count,
-                                   retrying: outcome.retrying.count)
+                                   retrying: outcome.retrying.count,
+                                   lost: outcome.lost.count)
                 return
             }
             self = outcome.recovered.isEmpty ? .nothingToRecover

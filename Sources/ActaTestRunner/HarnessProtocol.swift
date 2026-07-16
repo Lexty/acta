@@ -152,6 +152,16 @@ enum Harness {
         root.appendingPathComponent("ready.json.partial")
     }
 
+    /// The `UserDefaults` suite the child keeps its settings in — part of the contract, not a detail
+    /// of the child, because **the parent is what removes it**.
+    ///
+    /// A `SIGKILL`ed child runs no cleanup, so a name it minted for itself would be known to nobody
+    /// once it dies: one orphaned persistent domain per crash run, in the developer's home, forever.
+    /// Derived from the working root instead, which the parent made and which is unique per run.
+    static func defaultsSuiteName(in root: URL) -> String {
+        "acta-harness-defaults-\(root.lastPathComponent)"
+    }
+
     /// The parent's request for a graceful stop, renamed into place for the same reason.
     static func stopFile(in root: URL) -> URL { root.appendingPathComponent("stop") }
     static func stopStagingFile(in root: URL) -> URL { root.appendingPathComponent("stop.partial") }

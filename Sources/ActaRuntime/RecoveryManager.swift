@@ -12,7 +12,7 @@ import os
 public struct RecoveryManager {
     /// What a recovery pass changed in the archive.
     ///
-    /// Four lists rather than one, because the outcomes need different things said about them: a
+    /// Five lists rather than one, because the outcomes need different things said about them: a
     /// folder that assembled whole holds audio the user can play, whereas one that gave up holds a
     /// meeting that lives, in part or entirely, only as raw segments. Reporting either give-up as
     /// "recovered" would be false, and not reporting it at all would leave the audio undiscoverable
@@ -37,21 +37,32 @@ public struct RecoveryManager {
         /// opposite answers. That ambiguity is exactly what `RecordingController.awaitRecovery()`
         /// has to resolve.
         public var retrying: [URL] = []
+        /// Folders the pass closed because there was nothing in them to salvage: the crash left the
+        /// marker but not one valid segment, so the meeting is gone — not in a track, not in the
+        /// segments.
+        ///
+        /// Its own list for exactly the reason `retrying` has one, and the case is not weaker.
+        /// Closing a folder is not leaving the archive as it was found, and a total loss reported in
+        /// no list at all comes back as the empty outcome of an archive with nothing to recover —
+        /// "every meeting is fine" and "a meeting was lost" answering identically.
+        public var lost: [URL] = []
 
         /// A struct's memberwise initialiser is internal even when the struct is public, so this is
         /// spelled out: the verdict `RecoveryOutcome(_:)` derives from these lists is a decision, and
         /// a test in another module has to be able to hand it one.
         public init(recovered: [URL] = [], partial: [URL] = [],
-                    unassembled: [URL] = [], retrying: [URL] = []) {
+                    unassembled: [URL] = [], retrying: [URL] = [], lost: [URL] = []) {
             self.recovered = recovered
             self.partial = partial
             self.unassembled = unassembled
             self.retrying = retrying
+            self.lost = lost
         }
 
         /// Whether the pass left the archive as it found it.
         public var isEmpty: Bool {
             recovered.isEmpty && partial.isEmpty && unassembled.isEmpty && retrying.isEmpty
+                && lost.isEmpty
         }
     }
 
@@ -90,12 +101,15 @@ public struct RecoveryManager {
                 // There is nothing to salvage and never will be: the crash managed to create the
                 // marker, but not a single valid segment was left. Leaving `recording` would doom
                 // the folder to a futile assembly on every launch and an eternal "not finished" in
-                // the list with no way to clear it. We do not add it to `recovered`: there was
-                // nothing to recover, and there is no reason to lie in the notification.
+                // the list with no way to clear it. Not `recovered` either — there was nothing to
+                // recover, and there is no reason to lie in the notification — but `lost`, and not
+                // silence: the pass closed a meeting that is gone, which is the opposite of the
+                // empty outcome an untouched archive returns.
                 //
                 // `segmentsUnrepairable` deliberately does not come here: there the segments *do*
                 // hold audio, so it gets its own bounded retry below.
                 closeEmpty(directory: dir, manifest: manifest)
+                outcome.lost.append(dir)
             } catch SegmentAssembler.AssembleError.segmentsUnrepairable,
                     SegmentAssembler.AssembleError.concatFailed {
                 // The segments hold audio that never reached a final file — the repair could not

@@ -157,6 +157,22 @@ final class HarnessProcess {
         if process.isRunning { kill() }
         stderr.fileHandleForReading.readabilityHandler = nil
         try? FileManager.default.removeItem(at: root)
+        removeDefaultsSuite()
+    }
+
+    /// Remove the defaults suite the child recorded through — from here, because the child may never
+    /// have had the chance: `SIGKILL` runs no cleanup. That is why the name is derived from `root`
+    /// rather than minted inside the child; see `Harness.defaultsSuiteName(in:)`.
+    ///
+    /// The domain *and* the file. `removePersistentDomain` empties the plist but leaves it behind in
+    /// `~/Library/Preferences`, so on its own it would still mean one file per run accumulating there
+    /// forever — only an empty one.
+    private func removeDefaultsSuite() {
+        let suite = Harness.defaultsSuiteName(in: root)
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/\(suite).plist")
+        try? FileManager.default.removeItem(at: plist)
     }
 
     enum HarnessError: Error {
