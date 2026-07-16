@@ -1,0 +1,210 @@
+import ActaKit
+import Combine
+import Foundation
+
+/// The typed, observable boundary over the recording pipeline — a **façade**, not a replacement.
+///
+/// It wraps an unchanged `RecordingController`: the same object the SwiftUI menu talks to, whose
+/// lifecycle is frozen by `RecordingControllerLifecycleTests` / `RecordingControllerGuardTests`. Every
+/// command below forwards to that controller and every state it publishes is
+/// `ControlState(from:)` over a snapshot of the controller's own published fields, so the façade
+/// cannot drift from the behaviour those contracts froze — there is nothing here for it to drift *to*.
+///
+/// ⚠️ **Privacy invariant: a recording is always visible in the UI.** `ControlAPI.shared` wraps
+/// `RecordingController.shared` — the menu's own instance — and that is *why* it must. A façade over a
+/// second controller would record into the archive while the menu, still reading `.shared`, showed
+/// nothing: an API-initiated recording no one on the machine could see. A test therefore never touches
+/// `.shared` (it reaches for the real `~/Acta`, real TCC and real time) and injects its own controller
+/// instead; production never constructs a second one.
+@available(macOS 15.0, *)
+@MainActor
+public final class ControlAPI {
+    private let controller: RecordingController
+    private var cancellables: Set<AnyCancellable> = []
+    private var continuations: [UUID: AsyncStream<ControlState>.Continuation] = [:]
+    /// The last state handed to the subscribers — dedupe memory only, never a source of truth. `state`
+    /// is always recomputed from the controller; this exists so an `objectWillChange` fire that changes
+    /// nothing the typed state can see (a private field, an identical rewrite) does not emit.
+    private var lastPublished: ControlState
+
+    /// The production façade. Wraps the menu's controller — see the privacy invariant above.
+    public static let shared = ControlAPI(controller: .shared)
+
+    /// - Parameter controller: the controller to wrap. Production passes `.shared`; a test passes one
+    ///   built with the injected seams.
+    public init(controller: RecordingController) {
+        self.controller = controller
+        lastPublished = ControlState(from: ControlAPI.snapshot(of: controller))
+        observe()
+    }
+
+    // MARK: - State
+
+    /// The current typed state — mapped fresh from the controller on every read, which is what makes it
+    /// the one source of truth `states()` replays rather than a second, drifting copy.
+    public var state: ControlState { ControlState(from: ControlAPI.snapshot(of: controller)) }
+
+    /// A stream of typed states: the current one first, then every distinct state observation settles on.
+    ///
+    /// **The guarantee, stated as what sampling can actually prove — no more:**
+    ///
+    /// - **Replay is atomic.** The continuation is registered and the current state yielded inside the
+    ///   same main-actor turn, so there is no fetch-then-subscribe gap for a transition to fall into.
+    /// - **Ordered and distinct.** Every subscriber sees the same states in the same order; a state
+    ///   equal to the previous one is not re-emitted.
+    /// - **The dangerous transitions are visible**, including a normal `.saving`: `stop()` sets the
+    ///   stop-in-flight flag synchronously before the assembly's first `await`, so the state is already
+    ///   `.saving` when the observation samples it.
+    ///
+    /// ⚠️ **It is not lossless, and does not pretend to be.** `RecordingController` is unchanged, so
+    /// the only signal available is `objectWillChange` — which fires *before* the value lands and names
+    /// neither the property nor its new value. The façade therefore *samples*: synchronously (settling
+    /// the previous change) and again one main-actor turn later (settling this one), exactly as
+    /// `ControllerTestSupport`'s recorder does. Several mutations inside one turn collapse into the one
+    /// state that turn ends in. Buffering is unbounded, so nothing the façade *did* sample is dropped —
+    /// but unbounded buffering cannot recover a state that was never sampled, and no claim here rests
+    /// on it doing so.
+    public func states() -> AsyncStream<ControlState> {
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            // Runs synchronously inside `AsyncStream.init`, on the main actor: register and replay
+            // without ever leaving the turn.
+            MainActor.assumeIsolated { register(continuation) }
+        }
+    }
+
+    private func register(_ continuation: AsyncStream<ControlState>.Continuation) {
+        let id = UUID()
+        continuations[id] = continuation
+        let current = state
+        if current == lastPublished {
+            continuation.yield(current)
+        } else {
+            // The sampler has not caught up with a change that already landed. Yielding to everyone —
+            // the new subscriber included — keeps the single ordered sequence single: a state replayed
+            // to one subscriber and withheld from the rest is two histories.
+            publish(current)
+        }
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in self?.continuations[id] = nil }
+        }
+    }
+
+    private func observe() {
+        controller.objectWillChange.sink { [weak self] _ in
+            // `@Published` publishes from the setter and every one of the controller's setters runs on
+            // the main actor, so this callback does too.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Two samples per fire, for the reason `ControllerStateLog` takes two: this one reads
+                // the state the *previous* change settled into (`objectWillChange` precedes the write),
+                // which is what makes a window opened at one change and closed at a later one
+                // observable without scheduling luck…
+                self.publish(self.state)
+                // …and this one reads the state *this* change settles into — the last change of all has
+                // no later fire to report it.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.publish(self.state)
+                }
+            }
+        }.store(in: &cancellables)
+    }
+
+    private func publish(_ current: ControlState) {
+        guard current != lastPublished else { return }
+        lastPublished = current
+        for continuation in continuations.values { continuation.yield(current) }
+    }
+
+    /// End every stream `states()` handed out. Not a `deinit`: this type is a `@MainActor` singleton in
+    /// production and nothing ever tears it down, while a test needs its collector's `for await` loop to
+    /// finish at a point in its own timeline rather than whenever a deallocation happens to run.
+    public func finish() {
+        for continuation in continuations.values { continuation.finish() }
+        continuations.removeAll()
+    }
+
+    private static func snapshot(of controller: RecordingController) -> ControllerSnapshot {
+        // `isSaving`, never the controller's `isStopping`: that field is `@Published private`, and the
+        // public flag already folds it in (see `ControllerSnapshot`).
+        ControllerSnapshot(phase: controller.phase,
+                           isStarting: controller.isStarting,
+                           isSaving: controller.isSaving,
+                           errorMessage: controller.errorMessage,
+                           recoveredBanner: controller.recoveredBanner,
+                           title: controller.title,
+                           suggestedTitle: controller.suggestedTitle,
+                           settings: controller.settings,
+                           recordings: controller.recordings,
+                           elapsedSeconds: controller.elapsedSeconds)
+    }
+
+    // MARK: - Title and settings
+
+    /// The editable meeting title — the field the menu binds to today. Exposed as settable because the
+    /// UI genuinely edits it; without this, "the façade covers every operation" would be false.
+    public var title: String {
+        get { controller.title }
+        set { controller.title = newValue }
+    }
+
+    /// The auto-suggested title (the field's placeholder). Read-only, as on the controller.
+    public var suggestedTitle: String { controller.suggestedTitle }
+
+    /// The current settings. Assigning mirrors the UI's binding; `saveSettings()` normalises and
+    /// persists them, exactly as the menu does.
+    public var settings: RecordingSettings {
+        get { controller.settings }
+        set { controller.settings = newValue }
+    }
+
+    /// Normalise and persist the settings.
+    public func saveSettings() { controller.saveSettings() }
+
+    /// The saved recordings, newest first.
+    public var recordings: [MeetingStore.Recording] { controller.recordings }
+
+    // MARK: - Commands
+
+    /// Start recording.
+    ///
+    /// - Parameter title: the meeting title. Passing one **sets the controller's `title` and then**
+    ///   calls `start()` — an observable intermediate mutation, not an atomic parameter, because the
+    ///   controller exposes `start()` over its own mutable field and this plan does not change it.
+    ///   `nil` leaves whatever `title` holds (what the menu does: the user typed into the field).
+    ///   An empty title, here as in the menu, means "use the auto-suggestion".
+    ///
+    /// ⚠️ A title passed while the controller is busy still lands: the existing guard makes the *start*
+    /// a no-op, and the title mutation happened before it. That is the controller's behaviour today,
+    /// reproduced rather than replaced by a rejection this façade would have had to invent.
+    public func start(title: String? = nil) {
+        if let title { controller.title = title }
+        controller.start()
+    }
+
+    /// Stop the recording, fire-and-forget — returns as soon as the work is kicked off.
+    public func stop() { controller.stop() }
+
+    /// Stop the recording and wait until it is saved. The quit path: it awaits a start in flight first,
+    /// so a capture that is already live while the operation still reads `.starting` is actually torn
+    /// down instead of dying mid-segment.
+    public func stopAndWait() async { await controller.stopAndWait() }
+
+    /// Recover recordings interrupted by a crash — the controller's `onLaunch()`. Recovery runs **once
+    /// per controller**; a second call is a no-op, as it is for a second `onLaunch`.
+    public func recover() { controller.onLaunch() }
+
+    /// Refresh the suggested title and the recordings list — the controller's `onAppear()`. It does
+    /// **not** recover: recovery belongs to `recover()` and nowhere else.
+    public func refresh() { controller.onAppear() }
+
+    /// Reveal the archive root in Finder. A failure sets a `notice`, never a `lifecycleFailure` — and
+    /// never touches the operation.
+    public func openArchive() { controller.openArchive() }
+
+    /// Reveal one recording's folder in Finder.
+    public func openInFinder(_ url: URL) { controller.openInFinder(url) }
+
+    /// Dismiss the recovery banner — the controller's `dismissRecoveredBanner()`.
+    public func dismissRecoveryNotice() { controller.dismissRecoveredBanner() }
+}
