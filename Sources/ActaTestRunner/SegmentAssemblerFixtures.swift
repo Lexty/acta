@@ -73,6 +73,28 @@ func writeWAVWithDataBeyondProbe(to url: URL, frames: Int = 24_000) throws {
     try Data(bytes).write(to: url)
 }
 
+/// The file a real `AVAssetWriter` leaves between `startWriting` and the first `append`: the whole
+/// preamble — `FLLR` padding included, so the `data` header lands at exactly 4088..4096, the shape
+/// `Recovery.headerProbeBytes` documents — and not one frame of audio behind it.
+///
+/// A byte cutoff cannot tell this from a segment full of audio: at 4096 bytes it is two orders of
+/// magnitude above `minValidSegmentBytes`, which is why the retention guard parses the header rather
+/// than weighing the file. A crash between a segment rollover and its first buffer leaves exactly
+/// this, and reading it as lost audio condemns a whole meeting to a false "partially assembled".
+func writeEmptyPreambleWAV(to url: URL) throws {
+    let fmtBody = pcmFormatBody()
+    let padding = [UInt8](repeating: 0, count: 4_044) // sized so `data` starts at 4088
+
+    var body: [UInt8] = Array("WAVE".utf8)
+    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
+    body += Array("FLLR".utf8) + le32(padding.count) + padding
+    body += Array("data".utf8) + le32(0) // the size is unset and the body is genuinely empty
+
+    // The RIFF size holds the preamble length, exactly as a killed writer leaves it.
+    let bytes = Array("RIFF".utf8) + le32(body.count) + body
+    try Data(bytes).write(to: url)
+}
+
 /// A recording folder with the requested number of valid segments per track. A track given `nil`
 /// still gets its (empty) directory — that is what the writers create before the first buffer.
 func makeRecording(in directory: URL, systemSegments: Int?, micSegments: Int?) throws {

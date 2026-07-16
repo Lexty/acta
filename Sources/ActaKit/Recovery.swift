@@ -77,9 +77,24 @@ public enum Recovery {
     /// preamble", it is audio we failed to place: `data` sitting past `headerProbeBytes` is the
     /// documented way this happens (see `headerProbeBytes`), and it costs whole segments at a time.
     ///
-    /// The cutoff is the carve-out: below `minValidSegmentBytes` there is genuinely nothing inside —
-    /// `AVAssetWriter` creates the file before the first buffer — and those must keep dropping
-    /// quietly, or every recording would end up retaining its segments forever.
+    /// Two carve-outs keep the guard from firing on segments that never held audio, which would
+    /// retain the segments of an ordinary recording forever:
+    ///
+    /// - below `minValidSegmentBytes` the file is a bare stub — `AVAssetWriter` creates it before the
+    ///   first buffer;
+    /// - a header that **parses** while the body holds not even one frame is that same "no audio yet"
+    ///   file, just further along: the writer lays down its full preamble (`FLLR` padding included, so
+    ///   ~4096 bytes — see `headerProbeBytes`) before the first `append`, which puts it an order of
+    ///   magnitude above any byte cutoff. Sizing the carve-out instead of parsing it read that
+    ///   preamble as lost audio, and the price was paid by a whole meeting: a crash landing between a
+    ///   segment rollover and its first buffer made `assemble` throw `segmentsUnrepairable` over a
+    ///   file with nothing in it — three recovery attempts, a false "part of the audio could not be
+    ///   assembled" in `info.md`, and permanently retained segments, while both tracks had in fact
+    ///   assembled whole.
+    ///
+    /// What is left after those is the case the guard exists for: a header we could not parse at all,
+    /// over a file far too big to be empty — `data` sitting past `headerProbeBytes` is the documented
+    /// way that happens. That is audio, and we could not place it.
     public static func discardedSegmentCount(fromFileNames names: [String],
                                              sizeByFileName: [String: Int],
                                              headerByFileName: [String: Data]) -> Int {
@@ -87,8 +102,12 @@ public enum Recovery {
             .map(\.fileName)
             .count { name in
                 let bytes = sizeByFileName[name] ?? 0
+                let header = headerByFileName[name] ?? Data()
                 guard bytes >= minValidSegmentBytes else { return false }
-                return self.action(bytes: bytes, header: headerByFileName[name] ?? Data()) == nil
+                guard self.action(bytes: bytes, header: header) == nil else { return false }
+                // `action` returning nil past a parseable header means `headerRepair` found less than
+                // one whole frame of body — an empty preamble, not audio we failed to read.
+                return WAV.layout(header) == nil
             }
     }
 

@@ -105,6 +105,31 @@ struct ArchiveDocTests {
         }
     }
 
+    /// A begin fence the user left unclosed must not cost them the text under it.
+    ///
+    /// Appending here would lay down a second begin fence, and the launch after that would bind
+    /// `begin` to the first and `end` to the only end fence — deleting everything in between. The
+    /// file is malformed, so it is left alone: two launches, byte-for-byte unchanged.
+    @Test
+    func leavesAFileWithAnUnclosedFenceUntouched() throws {
+        try withTemporaryDirectory { directory in
+            let mine = """
+                # My notes
+
+                <!-- acta-archive-doc: begin -->
+                Notes I keep under a fence I never closed.
+                """
+            let claudeMD = directory.appendingPathComponent("CLAUDE.md")
+            try mine.write(to: claudeMD, atomically: true, encoding: .utf8)
+
+            let store = MeetingStore(archiveRoot: directory)
+            try store.ensureArchiveRoot()
+            try store.ensureArchiveRoot()
+
+            #expect(doc(in: directory) == mine)
+        }
+    }
+
     /// An up-to-date block stops the rewrite, or every launch would clobber the file it just wrote.
     @Test
     func leavesTheCurrentDocAlone() throws {

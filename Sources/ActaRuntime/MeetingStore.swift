@@ -111,15 +111,22 @@ public struct MeetingStore {
     ///
     /// A file with no fences (written by a build that predated them, or by the user) is *appended*
     /// to, never truncated: the text already there is not ours to judge.
+    ///
+    /// A begin fence with no end fence is malformed — only a user's own hand puts it there — and the
+    /// file is left exactly as it is. Appending to it would lay down a *second* begin fence, and the
+    /// next launch would then bind `begin` to the first fence and `end` to the only end fence and
+    /// replace everything in between: the user's text under their unbalanced fence, deleted from
+    /// their home directory without a word. Writing nothing costs a stale block; the alternative
+    /// costs their notes.
     static func archiveDocRefreshed(from existing: String?) -> String? {
         guard let existing, !existing.isEmpty else { return archiveDoc + "\n" }
-        guard let begin = existing.range(of: archiveDocBeginFence),
-              let end = existing.range(of: archiveDocEndFence, range: begin.upperBound..<existing.endIndex)
-        else {
+        guard let begin = existing.range(of: archiveDocBeginFence) else {
             return existing.hasSuffix("\n")
                 ? existing + "\n" + archiveDoc + "\n"
                 : existing + "\n\n" + archiveDoc + "\n"
         }
+        guard let end = existing.range(of: archiveDocEndFence,
+                                       range: begin.upperBound..<existing.endIndex) else { return nil }
         guard String(existing[begin.lowerBound..<end.upperBound]) != archiveDoc else { return nil }
         return existing.replacingCharacters(in: begin.lowerBound..<end.upperBound, with: archiveDoc)
     }

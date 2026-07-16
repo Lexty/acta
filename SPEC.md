@@ -55,8 +55,10 @@ everything builds without full Xcode.
   Both tracks are always produced; there is **no mix in the pipeline**. A mix (`combined.wav`,
   `amix=inputs=2:duration=longest`) is **not produced at all** for now: an on-demand "Export mix"
   action is backlog, not shipped code, so until it lands the one case where a mix helps — listening
-  back to a meeting as a whole — is served by running `ffmpeg` by hand. `FFmpeg.mixArgs` is kept
-  covered by tests for it.
+  back to a meeting as a whole — is served by running `ffmpeg` by hand. There is no mix code left to
+  reuse: `FFmpeg.mixArgs` was removed with the rest, since an argument builder for a file nothing
+  produces reads as live code. The recipe above is the record of it; Export mix re-adds it against a
+  real export path.
 - **Permissions (TCC):** Microphone (`NSMicrophoneUsageDescription`), Screen Recording
   (runtime; status via `CGPreflightScreenCaptureAccess()`, request via `CGRequestScreenCaptureAccess()`).
 
