@@ -23,6 +23,25 @@ plan — **`docs/plans/acta.md`**.
 
 The conversation with the user may be in Russian; the repository must not be.
 
+## Plan files: one file per ralphex run, never reused
+
+**A plan file is a container for a single run, not a living document.** Name every new plan
+`docs/plans/YYYY-MM-DD-<slug>.md` (e.g. `2026-07-16-capture-seam.md`) and never re-scope an existing
+one for a new run.
+
+**Why it matters — reusing a name destroys the run's history.** ralphex derives its progress log from
+the plan's basename (`acta.md` → `.ralphex/progress/progress-acta.txt`), and archives the finished
+plan to `docs/plans/completed/<same-basename>.md`. Point a second run at the same plan name and both
+are overwritten: the log is gitignored, so **that trace is gone for good** — it already cost us the
+whole reasoning trail of the overnight run that removed the mix. The archive survives only because
+git happens to have it.
+
+Consequences to keep in mind:
+- The plan currently being executed **must not be renamed mid-run** — the running process holds that
+  path. Fix the name when mounting the *next* plan, not during a run.
+- Work parked out of a plan goes to `docs/backlog/`, which is where scope lives between runs. The
+  plan file is written once, executed once, archived, and left alone.
+
 ## Three mandatory recording properties
 1. **Streaming writes to disk** (incremental, segmented) — never buffer a whole recording in memory.
 2. **Fault tolerance** — a restart/crash must not lose recorded audio; an interrupted recording is
