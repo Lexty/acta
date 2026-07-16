@@ -59,6 +59,10 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     private var currentStream = 0
     private var format: FixtureAudioFormat = .stereo48k
     private var emitOnStart = true
+    /// Whether the emitted buffers carry `PositionEncodedAudio` rather than silence.
+    private var positionEncoded = false
+    /// Set by `freezeEmission()`: nothing is enqueued again, so `emittedFrames` stops moving.
+    private var frozen = false
 
     /// One second of 48 kHz audio per buffer, so a buffer's presentation timestamp advances by a
     /// second — enough for a handful of them to cross a segment boundary without a test having to
@@ -74,6 +78,25 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     func setEmitOnStart(_ emit: Bool) { withLock { emitOnStart = emit } }
     /// The audio format of the emitted buffers.
     func setFormat(_ newFormat: FixtureAudioFormat) { withLock { format = newFormat } }
+    /// Fill the emitted buffers with `PositionEncodedAudio` instead of silence, so that a frame lost
+    /// anywhere below can be named afterwards. Off by default: every existing scenario counts
+    /// buffers rather than reading them, and silence is the cheaper fixture.
+    func encodePositions() { withLock { positionEncoded = true } }
+
+    /// Stop producing audio for good — no `start()`, batch or restart enqueues anything again.
+    ///
+    /// What makes `emittedFrames` an *upper bound* rather than a moving target. A harness that means
+    /// to crash this process has to know exactly how much audio existed at the moment it did, and
+    /// while anything can still emit, the number it reads is already stale.
+    func freezeEmission() { withLock { frozen = true } }
+
+    /// The absolute frame index the next buffer of each track would start at — that is, how many
+    /// frames this source has produced per track. Read it after `freezeEmission()`; before that it
+    /// is a number that was true a moment ago.
+    var emittedFrames: [Track: Int] {
+        withLock { nextFrame.mapValues { Int($0) } }
+    }
+
     /// This track stops producing audio; the other one carries on. A restart does not heal it — a
     /// dead capture device stays dead, which is what tells this apart from `goSilentUntilRestart()`.
     func silence(_ track: Track) { withLock { _ = silencedTracks.insert(track) } }
@@ -160,11 +183,12 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     /// Enqueue a batch without waiting for it — for the tests that need a delivery in flight while
     /// `stop()` is called.
     func enqueueBatch(count: Int? = nil) {
-        let (size, live, fmt, frames) = withLock {
+        let (size, live, fmt, frames, encoded) = withLock {
             (count ?? batchSize,
-             silentUntilRestart ? [] : Track.allCases.filter { !silencedTracks.contains($0) },
+             (silentUntilRestart || frozen) ? [] : Track.allCases.filter { !silencedTracks.contains($0) },
              format,
-             framesPerBuffer)
+             framesPerBuffer,
+             positionEncoded)
         }
         guard size > 0 else { return }
         for track in live {
@@ -175,7 +199,14 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
                     return frame
                 }
                 let pts = CMTime(value: start, timescale: CMTimeScale(fmt.sampleRate))
-                guard let buffer = makeAudioSampleBuffer(pts: pts, frames: frames, format: fmt) else { continue }
+                // The frame index and the presentation timestamp are the same number: the buffers of
+                // a track are contiguous from zero, so where a sample sits in the track is where the
+                // encoding says it sits.
+                let buffer = encoded
+                    ? makePositionEncodedSampleBuffer(track: track, startFrame: Int(start), pts: pts,
+                                                      frames: frames, format: fmt)
+                    : makeAudioSampleBuffer(pts: pts, frames: frames, format: fmt)
+                guard let buffer else { continue }
                 let box = BufferBox(buffer: buffer)
                 queue(for: track).async { [weak self] in self?.deliver(track, box.buffer) }
             }
@@ -269,60 +300,6 @@ final class FakePermissions: PermissionChecking, @unchecked Sendable {
             if grantsOnRequest { micStatus = .authorized }
             return micStatus == .authorized
         }
-    }
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
-}
-
-// MARK: - Test clock
-
-/// A clock that hands back the time asked of it almost immediately **and moves `now` by the full
-/// amount anyway** — the two halves have to travel together. With `now` frozen, the stall threshold
-/// never elapses, the watchdog's restart path silently becomes unreachable, and the tests keep
-/// passing while proving nothing. That is the trap this type exists to avoid.
-///
-/// "Almost immediately" and not "instantly", which is the one non-obvious decision here. The
-/// watchdog is a `while` loop whose only suspension is this sleep, so a truly instant one turns it
-/// into a busy loop: it would burn its entire restart budget and flood the disk with buffers in the
-/// microseconds between `start()` returning and a test calling `stop()`. A token real wait keeps the
-/// loop's *shape* honest while compressing an hour of watchdog time into milliseconds. It is not a
-/// virtual scheduler — nothing here queues, advances or drains on demand.
-///
-/// `onSleep` is what lets a test put data into the window the code is observing: the startup probe
-/// and every watchdog tick call it, which is where the fake source's next batch comes from.
-final class TestClock: SelfCheckClock, @unchecked Sendable {
-    /// The real time a sleep of any virtual length costs. Small enough that a whole watchdog stall
-    /// (six ticks) is milliseconds, large enough not to spin a core.
-    private static let realWaitNanos: UInt64 = 200_000
-
-    private let lock = NSLock()
-    private var seconds = 0.0
-    private var sleeps = 0
-    private var handler: (@Sendable (Double) -> Void)?
-
-    /// Called on every sleep, with the requested duration, after `now` has advanced.
-    func onSleep(_ body: @escaping @Sendable (Double) -> Void) { withLock { handler = body } }
-
-    /// How many waits the code under test has performed.
-    var sleepCount: Int { withLock { sleeps } }
-
-    var now: Double { withLock { seconds } }
-
-    func sleep(for duration: Double) async {
-        let body: (@Sendable (Double) -> Void)? = withLock {
-            seconds += duration
-            sleeps += 1
-            return handler
-        }
-        body?(duration)
-        // The suspension the watchdog's cancellation depends on: a loop that never suspends would
-        // never observe `Task.isCancelled`, and `stop()` — which cancels and then awaits it — would
-        // hang forever.
-        try? await Task.sleep(nanoseconds: Self.realWaitNanos)
     }
 
     private func withLock<T>(_ body: () -> T) -> T {

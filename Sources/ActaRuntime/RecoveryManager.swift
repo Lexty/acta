@@ -27,9 +27,21 @@ public struct RecoveryManager {
         /// Folders closed with their audio still only in the segments: no track assembled, so there
         /// is no wav to play and the segments are the sole copy of the meeting.
         public var unassembled: [URL] = []
+        /// Folders the pass found interrupted and left interrupted, to try again on a later launch —
+        /// an attempt spent on audio the assembly could not place, or a cause outside the folder
+        /// (no `ffmpeg`). Apart from the three above because they are terminal and this is not: the
+        /// marker still says `recording`.
+        ///
+        /// It exists because without it such a folder is invisible to the caller — the pass returns
+        /// the same empty outcome it returns for an archive with nothing to recover, and those are
+        /// opposite answers. That ambiguity is exactly what `RecordingController.awaitRecovery()`
+        /// has to resolve.
+        public var retrying: [URL] = []
 
         /// Whether the pass left the archive as it found it.
-        public var isEmpty: Bool { recovered.isEmpty && partial.isEmpty && unassembled.isEmpty }
+        public var isEmpty: Bool {
+            recovered.isEmpty && partial.isEmpty && unassembled.isEmpty && retrying.isEmpty
+        }
     }
 
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "RecoveryManager")
@@ -85,14 +97,16 @@ public struct RecoveryManager {
                 // are as permanent as a failed repair. Left unbounded it would re-run a full concat
                 // on every launch, with every `start()` waiting on it, forever.
                 switch retryOrCloseIncomplete(directory: dir, manifest: manifest) {
-                case .retrying: break
+                case .retrying: outcome.retrying.append(dir)
                 case .closedWithTracks: outcome.partial.append(dir)
                 case .closedWithoutTracks: outcome.unassembled.append(dir)
                 }
             } catch {
                 // `ffmpegNotFound` lands here deliberately, and must stay unbounded: without the
                 // binary nothing assembles for reasons outside this folder, and installing it is
-                // exactly the kind of fix a later launch is meant to pick up.
+                // exactly the kind of fix a later launch is meant to pick up. The folder keeps its
+                // `recording` marker, so it is a retry like any other and is reported as one.
+                outcome.retrying.append(dir)
                 let name = dir.lastPathComponent
                 log.error("""
                     Failed to recover \(name, privacy: .public): \

@@ -67,9 +67,10 @@ public final class RecordingController: ObservableObject {
     /// Recovery of interrupted recordings runs once per app launch (from `onLaunch`).
     /// `RecoveryManager` treats any folder with status `recording` as interrupted — including the
     /// active recording, whose assembly must not be started on the fly, so the start awaits this
-    /// task.
-    private var recoveryTask: Task<Void, Never>?
-    private var didRunRecovery = false
+    /// task. Its value is the pass's verdict, which is both what `awaitRecovery()` hands back and
+    /// why no `didRunRecovery` flag sits beside it: the task's existence is that fact.
+    /// `internal` only so `awaitRecovery()`, an extension in another file, can read it.
+    var recoveryTask: Task<RecoveryOutcome, Never>?
 
     /// The shared instance: recovery must start when the app launches (`AppDelegate`), not when the
     /// menu is first opened, and `MenuContent` shows that same state.
@@ -123,9 +124,9 @@ public final class RecordingController: ObservableObject {
     /// opened.
     public func onLaunch() {
         Notifier.requestAuthorization()
-        guard !didRunRecovery else { return }
-        didRunRecovery = true
-        recoveryTask = Task { [weak self] in await self?.runRecovery() }
+        guard recoveryTask == nil else { return }
+        // The `??` covers a controller deallocated before its task ran: unreachable via `awaitRecovery()`.
+        recoveryTask = Task { [weak self] in await self?.runRecovery() ?? .nothingToRecover }
     }
 
     /// Call when the menu appears: suggest a source and refresh the list. Notification authorization
@@ -144,7 +145,7 @@ public final class RecordingController: ObservableObject {
     /// The assembly runs `ffmpeg` synchronously over every interrupted folder — tens of seconds for
     /// an hour-long meeting. On the main actor that would freeze the whole menu, so the work moves
     /// off it and only the banner and the notification come back to the main one.
-    private func runRecovery() async {
+    private func runRecovery() async -> RecoveryOutcome {
         let root = store.archiveRoot
         let outcome = await Task.detached(priority: .utility) {
             RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
@@ -152,12 +153,15 @@ public final class RecordingController: ObservableObject {
         let recovered = outcome.recovered.count, partial = outcome.partial.count, unassembled = outcome.unassembled.count
         log.notice("""
             Recovery pass: \(recovered, privacy: .public) recovered, \
-            \(partial, privacy: .public) partial, \(unassembled, privacy: .public) unassembled
+            \(partial, privacy: .public) partial, \(unassembled, privacy: .public) unassembled, \
+            \(outcome.retrying.count, privacy: .public) retrying
             """)
-        guard let message = RecoveryReport.message(recovered: recovered, partial: partial, unassembled: unassembled) else { return }
-        recoveredBanner = message.body
-        Notifier.notify(title: message.title, body: message.body)
-        refresh()
+        if let message = RecoveryReport.message(recovered: recovered, partial: partial, unassembled: unassembled) {
+            recoveredBanner = message.body
+            Notifier.notify(title: message.title, body: message.body)
+            refresh()
+        }
+        return RecoveryOutcome(outcome)
     }
 
     /// Refresh the list of saved recordings.
@@ -185,7 +189,7 @@ public final class RecordingController: ObservableObject {
         // Wait for recovery: it treats any folder with `status=recording` as interrupted — and a new
         // recording creates exactly such a folder. Otherwise a start right after the app launched
         // would end up having its own, still-being-written folder assembled.
-        await recoveryTask?.value
+        _ = await recoveryTask?.value
         var createdDirectory: URL?
         do {
             // Snapshot the settings at start time: a change of the archive path/segment length is
