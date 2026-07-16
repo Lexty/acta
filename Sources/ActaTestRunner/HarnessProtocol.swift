@@ -55,13 +55,19 @@ enum Harness {
         var frames: Int
         var bufferIndex: Int
 
+        /// The exclusive ceiling on a hole's width — half the encoding's 65536-frame wrap, so that a
+        /// loss can never be arithmetically confused with a repetition. Enforced rather than merely
+        /// documented: a fault wider than a buffer is silently ignored by the source, and a negative
+        /// control that quietly runs a *healthy* child is a rubber stamp.
+        static let maxFrames = 32_768
+
         /// `<frames>@<bufferIndex>`, the form the option takes on the command line.
         var argument: String { "\(frames)@\(bufferIndex)" }
 
         static func parse(_ text: String) -> Fault? {
             let parts = text.split(separator: "@")
             guard parts.count == 2, let frames = Int(parts[0]), let index = Int(parts[1]),
-                  frames > 0, index > 0 else { return nil }
+                  frames > 0, frames < maxFrames, index > 0 else { return nil }
             return Fault(frames: frames, bufferIndex: index)
         }
     }
@@ -181,6 +187,10 @@ enum Harness {
         case startFailed = 65
         /// The archive never reached the state readiness is defined as.
         case notReady = 66
+        /// A requested stop did not leave the recording saved. Its own code rather than
+        /// `startFailed`: a stop that loses the meeting and a start that never began are opposite
+        /// failures, and codes that lie are worse than a bare non-zero.
+        case stopFailed = 72
         /// Recovery ran and left audio outside a track.
         case recoveryIncomplete = 67
         /// Recovery did not finish inside `recoveryTimeoutSeconds`.
@@ -207,4 +217,13 @@ enum Harness {
 
     /// How long the child may spend driving audio into the archive before readiness must hold.
     static let readinessTimeoutSeconds = 60.0
+
+    /// How long the parent waits for readiness — **derived, and it has to outlast the child.**
+    ///
+    /// The child spends this budget twice before it gives up: once waiting out `start()`, once
+    /// driving the archive to a crash-worthy state. A parent that gave up sooner would kill a healthy
+    /// child on a loaded machine and report it as "never ready", and `Exit.notReady` — the child's own
+    /// word for that failure — could never be observed, because the parent would always speak first.
+    /// The margin covers the spawn and the polling interval.
+    static let readinessWaitSeconds = 2 * readinessTimeoutSeconds + 30.0
 }

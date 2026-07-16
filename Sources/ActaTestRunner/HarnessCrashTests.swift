@@ -41,9 +41,14 @@ struct HarnessCrashTests {
         for track in Track.allCases {
             switch try run.verifyAssembled(track) {
             case .ok(let frames):
-                // The bound, restated as an assertion so a vacuous pass is impossible: an oracle
-                // handed `0...0` would say `.ok` about an empty file.
-                #expect(frames >= run.closedFrames(track))
+                // Strictly greater, and that is the assertion this test exists for. `>=` would be
+                // satisfied by a recovery that threw the unfinalised segment away and assembled the
+                // closed ones — which is not recovery, it is the data loss recovery prevents.
+                // Readiness guarantees the open segment was `.repair`, i.e. that `WAV.headerRepair`
+                // found a whole frame of body in it, and emission was frozen before the kill, so a
+                // repaired tail *must* carry the track past its closed prefix.
+                #expect(frames > run.closedFrames(track),
+                        "\(track) recovered \(frames) frames — the unfinalised tail past \(run.closedFrames(track)) was lost, not repaired")
                 #expect(frames <= run.readiness.frames(track))
             case let other:
                 Issue.record("\(track) did not survive the crash intact: \(other)")
@@ -66,6 +71,7 @@ struct HarnessCrashTests {
     @Test("The oracle names a dropped frame in a surviving segment, in the harness")
     @available(macOS 15.0, *)
     func theOracleCatchesAudioLostInASurvivingSegment() async throws {
+        let started = Date()
         let run = try await CrashRun.stage(label: "dropped", fault: CrashRun.fault)
         defer { run.tearDown() }
 
@@ -80,6 +86,12 @@ struct HarnessCrashTests {
             #expect(result == .discontinuity(frame: CrashRun.faultFrame, skipped: CrashRun.fault.frames),
                     "the oracle did not name the hole in \(track): \(result)")
         }
+
+        // The same bound its positive twin carries, for the same reason: both suites are serialized,
+        // so a wedge here stalls the run rather than failing it.
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < Self.wallClockBudgetSeconds,
+                "the negative control took \(Int(elapsed))s, over the \(Int(Self.wallClockBudgetSeconds))s budget")
     }
 }
 
@@ -129,10 +141,14 @@ struct CrashRun {
             child.tearDown()
             throw HarnessRunError.diedBeforeTheKill(child.diagnostics)
         }
-        // The pid the child published, not the one this side spawned. They are asserted equal in the
-        // plumbing test; here the child's own word is used, because the child is the thing that knows
-        // which process wrote the archive.
-        #expect(readiness.pid == child.processIdentifier)
+        // The pid the child published, not the one this side spawned — the child is the thing that
+        // knows which process wrote the archive. Fatal to the run rather than a bare `#expect`: the
+        // kill below is aimed at this number, and signalling a pid the child never claimed is
+        // signalling an unrelated process on the developer's machine.
+        guard readiness.pid == child.processIdentifier else {
+            child.tearDown()
+            throw HarnessRunError.pidDisagreed(published: readiness.pid, spawned: child.processIdentifier)
+        }
         _ = Foundation.kill(readiness.pid, SIGKILL)
 
         // The assertion the whole scenario rests on. A child that exited *normally* means the kill
@@ -176,8 +192,12 @@ struct CrashRun {
     func verifyAssembled(_ track: Track) throws -> PositionEncodedAudio.Verification {
         let name = track == .system ? SegmentLayout.systemTrackFileName : SegmentLayout.micTrackFileName
         let wav = try Data(contentsOf: meeting.appendingPathComponent(name))
-        return PositionEncodedAudio.verify(wav: wav, track: track,
-                                           frames: closedFrames(track)...readiness.frames(track))
+        let low = closedFrames(track), high = readiness.frames(track)
+        // A finalised prefix longer than everything ever emitted is impossible, and the check is here
+        // because `low...high` would otherwise *trap* on it — killing the whole suite where the
+        // harness should be reporting a failed run.
+        guard low <= high else { throw HarnessRunError.boundsInverted(track: track, closed: low, emitted: high) }
+        return PositionEncodedAudio.verify(wav: wav, track: track, frames: low...high)
     }
 
     func closedFrames(_ track: Track) -> Int { closed[track] ?? 0 }
@@ -187,8 +207,10 @@ struct CrashRun {
     enum HarnessRunError: Error {
         case neverReady(String)
         case diedBeforeTheKill(String)
+        case pidDisagreed(published: Int32, spawned: Int32)
         case notKilled(HarnessProcess.Termination, String)
         case recoveryFailed(String)
+        case boundsInverted(track: Track, closed: Int, emitted: Int)
     }
 }
 

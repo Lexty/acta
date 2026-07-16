@@ -116,6 +116,20 @@ factories because a `CaptureSource` is stateful and belongs to exactly one recor
 `RecordingSession` is the **composition root** (it hands the one `PermissionChecking` instance to
 both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission questions itself.
 
+**One seam is deliberately not in `RecordingDependencies`**, and the rule above does not cover it:
+`RecordingController.awaitRecovery()` (`RecordingController+Recovery.swift`) is a **completion** seam,
+not an injection point — it returns the verdict of the pass `onLaunch()` already started
+(`RecoveryOutcome`: `.nothingToRecover` / `.recovered(count:)` / `.incomplete(partial:unassembled:retrying:)`).
+The disk cannot answer that question: a pass still running and a pass that finished but could not
+assemble both leave `session.json` at `recording`, so polling can only bound the ambiguity, never
+resolve it — and the crash harness's recoverer has to tell "recovery worked" from "recovery gave up"
+to have proved anything. The verdict rides on `recoveryTask`'s own value, which is why that property
+is `internal` rather than `private` and why `didRunRecovery` is gone: the task's existence *is* that
+fact. Relatedly, `RecoveryManager.Outcome` has **four** lists, not three — `retrying` holds folders
+left interrupted for a later launch (a spent repair attempt, or no `ffmpeg`). It is not terminal, and
+it exists because without it such a folder lands in no list at all, making a blocked pass
+indistinguishable from an archive with nothing to recover. `isEmpty` counts it.
+
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).
 - **No external SwiftPM dependencies** (no transcription → no WhisperKit). But `ffmpeg` is a

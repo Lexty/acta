@@ -69,13 +69,15 @@ final class HarnessProcess {
     /// Whatever the child has said on stderr so far.
     var diagnostics: String { collected.text }
 
-    /// Wait, up to `timeout`, for the child to publish readiness; `nil` if it never does.
+    /// Wait for the child to publish readiness; `nil` if it never does.
     ///
     /// Bounded, and it gives up rather than hanging: a child that dies before signalling would
     /// otherwise leave the suite waiting forever, and "the test never finished" is not a test result.
-    func waitForReadiness(timeout: Double = 90.0) async -> Harness.Readiness? {
+    /// The bound is `Harness.readinessWaitSeconds` rather than a number of this side's own, because
+    /// it is only correct in relation to the child's — see that constant.
+    func waitForReadiness() async -> Harness.Readiness? {
         let file = Harness.readinessFile(in: root)
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = Date().addingTimeInterval(Harness.readinessWaitSeconds)
         while Date() < deadline {
             if let data = try? Data(contentsOf: file),
                let readiness = try? JSONDecoder().decode(Harness.Readiness.self, from: data) {

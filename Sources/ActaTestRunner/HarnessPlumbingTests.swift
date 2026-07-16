@@ -60,6 +60,13 @@ struct HarnessPlumbingTests {
         // A hole at buffer zero is not a hole — the indices have not advanced yet.
         #expect(Harness.Fault.parse("4096@0") == nil)
         #expect(Harness.Fault.parse("4096@1") == Harness.Fault(frames: 4096, bufferIndex: 1))
+        // And a hole at or past half the encoding's wrap is rejected rather than accepted and then
+        // ignored by the source: at 48000 the oracle would report a truthful 17536-frame repetition
+        // about audio that was actually lost, and the control would be testing nothing.
+        #expect(Harness.Fault.parse("48000@1") == nil)
+        #expect(Harness.Fault.parse("\(Harness.Fault.maxFrames)@1") == nil)
+        #expect(Harness.Fault.parse("\(Harness.Fault.maxFrames - 1)@1")
+                == Harness.Fault(frames: Harness.Fault.maxFrames - 1, bufferIndex: 1))
     }
 
     /// A harness flag the parser cannot honour must not become a test run. Falling through would put

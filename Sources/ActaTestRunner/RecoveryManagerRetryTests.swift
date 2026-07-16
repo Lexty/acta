@@ -91,7 +91,19 @@ func sessionManifestRoundTripsTheAssemblyAttemptCounter() throws {
 @Test
 func recoveryRetriesAFolderWhoseSegmentsCouldNotBeRepaired() throws {
     try withInterruptedMeeting { root, directory in
-        RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+        let outcome = RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+
+        // The pass must *say* it deferred the folder, not merely leave the marker behind. Without
+        // this the deferred folder is reported in no list at all — the same empty outcome an archive
+        // with nothing to recover gives — and those are opposite answers.
+        //
+        // Symlinks resolved on both sides: the pass builds its URLs from a directory scan, so under
+        // the temp directory it reports `/private/var/...` where the caller holds `/var/...` — the
+        // same folder, and a raw `==` on the URLs would compare the accident rather than the answer.
+        #expect(outcome.retrying.map { $0.resolvingSymlinksInPath() }
+                == [directory.resolvingSymlinksInPath()])
+        #expect(outcome.recovered.isEmpty && outcome.partial.isEmpty && outcome.unassembled.isEmpty)
+        #expect(!outcome.isEmpty)
 
         let manifest = try readManifest(in: directory)
         #expect(manifest.status == .recording)

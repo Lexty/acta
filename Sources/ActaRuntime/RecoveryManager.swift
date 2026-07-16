@@ -12,12 +12,12 @@ import os
 public struct RecoveryManager {
     /// What a recovery pass changed in the archive.
     ///
-    /// Three lists rather than one, because the outcomes need different things said about them: a
+    /// Four lists rather than one, because the outcomes need different things said about them: a
     /// folder that assembled whole holds audio the user can play, whereas one that gave up holds a
     /// meeting that lives, in part or entirely, only as raw segments. Reporting either give-up as
     /// "recovered" would be false, and not reporting it at all would leave the audio undiscoverable
     /// outside `log show`.
-    public struct Outcome: Sendable {
+    public struct Outcome: Sendable, Equatable {
         /// Folders whose every track assembled — nothing was left behind in the segments.
         public var recovered: [URL] = []
         /// Folders closed over a track that assembled while audio the plan vouched for stayed in the
@@ -37,6 +37,17 @@ public struct RecoveryManager {
         /// opposite answers. That ambiguity is exactly what `RecordingController.awaitRecovery()`
         /// has to resolve.
         public var retrying: [URL] = []
+
+        /// A struct's memberwise initialiser is internal even when the struct is public, so this is
+        /// spelled out: the verdict `RecoveryOutcome(_:)` derives from these lists is a decision, and
+        /// a test in another module has to be able to hand it one.
+        public init(recovered: [URL] = [], partial: [URL] = [],
+                    unassembled: [URL] = [], retrying: [URL] = []) {
+            self.recovered = recovered
+            self.partial = partial
+            self.unassembled = unassembled
+            self.retrying = retrying
+        }
 
         /// Whether the pass left the archive as it found it.
         public var isEmpty: Bool {

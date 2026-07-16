@@ -53,8 +53,10 @@ enum HarnessChild {
         // into the archive is the loop below, and the count it ends on is the whole truth.
         clock.freeze()
 
+        // `notReady`, not `startFailed`: the start already reached `.recording` above, so whatever is
+        // wrong with the archive is a readiness failure.
         guard let meeting = soleMeeting(in: archive) else {
-            finish(.startFailed, "the archive does not hold exactly one meeting folder")
+            finish(.notReady, "the archive does not hold exactly one meeting folder")
         }
         guard await driveUntilCrashWorthy(source: source, meeting: meeting) else {
             finish(.notReady, "the archive never reached a crash-worthy state: \(meeting.lastPathComponent)")
@@ -84,7 +86,7 @@ enum HarnessChild {
             if FileManager.default.fileExists(atPath: stop.path) {
                 await controller.stopAndWait()
                 guard controller.phase == .idle else {
-                    finish(.startFailed, "the stop did not save the recording: \(controller.errorMessage)")
+                    finish(.stopFailed, "the stop did not save the recording: \(controller.errorMessage)")
                 }
                 finish(.ok, "stopped cleanly")
             }
