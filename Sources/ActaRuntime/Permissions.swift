@@ -7,7 +7,7 @@ import CoreGraphics
 /// with no side logic.
 enum Permissions {
     /// Whether the Screen Recording permission is granted (needed even for audio-only capture
-    /// via SCStream).
+    /// via ScreenCaptureKit).
     ///
     /// `CGPreflightScreenCaptureAccess()` does not show the system dialog — it only reads the status.
     static var hasScreenRecording: Bool {

@@ -9,8 +9,10 @@ import os
 /// the interval elapses, is **finalized** (`finishWriting`) and becomes a valid WAV. A hard
 /// crash/restart loses at most the last unclosed segment.
 ///
-/// All methods are called from the serialized queue of the `SCStream` delegate (one per track), so
-/// the internal state needs no additional synchronization.
+/// `append` is called from the capture source's serialized queue for this track, and
+/// `finish`/`finishAndAdvance` only once an awaited `CaptureSource.stop()` has drained that queue —
+/// so no two methods ever run concurrently and the internal state needs no additional
+/// synchronization.
 final class SegmentWriter {
     /// The track's directory (for example `.../system`) where `NNNN.wav` files are written.
     private let directory: URL
@@ -121,8 +123,8 @@ final class SegmentWriter {
     func finish() {
         isFinished = true
         finalizeCurrent()
-        // We wait with a cap: `finish()` is called synchronously from the track's queue inside
-        // `stop()`, and a `finishWriting` hung inside AVFoundation would, without a timeout, jam the
+        // We wait with a cap: `finish()` is called synchronously inside `stop()`, and a
+        // `finishWriting` hung inside AVFoundation would, without a timeout, jam the
         // stop forever — the UI would stay on "recording" with a button that does nothing any more
         // (`isStopping` would never clear). On timeout we move on: the segment is left with an
         // unfinalized header, which `Recovery.action` repairs from the actual file size — the tail

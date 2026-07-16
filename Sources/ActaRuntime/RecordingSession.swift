@@ -6,7 +6,7 @@ import os
 /// capture through `AudioRecorder`, and on a clean stop finalize (`done`) and assemble the segments
 /// into the final files.
 ///
-/// Splits responsibility with `AudioRecorder` (which only knows about `SCStream` and segments):
+/// Splits responsibility with `AudioRecorder` (which only knows about the capture and the segments):
 /// here live the session marker and the assembly, that is, the fault-tolerant part.
 ///
 /// `@unchecked Sendable`, and the reason is *not* "the methods run on the main actor" — they do not.

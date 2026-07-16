@@ -1,61 +1,38 @@
 import AVFoundation
 import ActaKit
+import CoreMedia
 import os
-@preconcurrency import ScreenCaptureKit
 
-/// Meeting audio capture with a single `SCStream`: system audio (the other participants' voices) +
-/// microphone.
+/// Meeting audio recording: it takes the two capture tracks a `CaptureSource` produces — system audio
+/// (the other participants' voices) and microphone — and routes them into **two separate**
+/// `SegmentWriter`s (`system/`, `mic/`), counting what arrived and what was actually written.
 ///
-/// Buffers arrive in the delegate with different types and formats (`SCStreamOutputType.audio` /
-/// `.microphone`), so they are routed into **two separate** `SegmentWriter`s (`system/`, `mic/`) —
-/// they cannot be written into a single container (see the `screencapturekit-audio` skill).
-/// `.screen` frames are ignored: video is not needed, but an `SCContentFilter` is mandatory even
-/// for audio-only.
+/// The capture itself lives behind `CaptureSource` (`SCKCaptureSource` in production), so this class
+/// knows nothing about how buffers are produced. What it does own is the composition the source
+/// cannot: permissions, the writers, and `restart()`.
+///
+/// Buffers arrive on the source's per-track queues and are appended on that very callback, with no
+/// hop of its own — the per-track serialization the writers need is the source's, which is exactly
+/// why `CaptureSource.stop()` must drain before it returns.
 ///
 /// `captureMicrophone` is available from macOS 15, hence the availability annotation on the whole
 /// recorder.
 @available(macOS 15.0, *)
-public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
+public final class AudioRecorder: @unchecked Sendable {
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "AudioRecorder")
 
     /// The recording folder — its subdirectories hold the segments of both tracks.
     private let directory: URL
 
+    private let source: CaptureSource
+
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
 
-    // Separate serialized queues per track: the SegmentWriter's delegate needs no external
-    // synchronization as long as a single queue drives it.
-    private let systemQueue = DispatchQueue(label: "dev.personal.acta.audio.system")
-    private let micQueue = DispatchQueue(label: "dev.personal.acta.audio.mic")
-    private let screenQueue = DispatchQueue(label: "dev.personal.acta.audio.screen")
-
-    // The current stream under a lock: `startStream()` sets it and `stop()`/`restart()` clear it
-    // (the Swift concurrency pool), while the `didStopWithError` delegate does so from its own
-    // ScreenCaptureKit queue; and the self-diagnosis reads it from a third one. Without the lock
-    // this is a race for the reference: releasing the old stream in parallel with storing a new one
-    // corrupts the retain count, and an unsynchronized read in the `===` check could see a stale
-    // value and clear an already-restarted stream.
-    private let streamLock = NSLock()
-    private var currentStream: SCStream?
-
-    private var activeStream: SCStream? {
-        get { streamLock.lock(); defer { streamLock.unlock() }; return currentStream }
-        set { streamLock.lock(); currentStream = newValue; streamLock.unlock() }
-    }
-
-    /// Clear the stream only if it is still the very same one — the check and the clearing happen
-    /// under a single lock, otherwise `restart()` with its new stream could slip in between them.
-    private func clearStream(ifIdentical stream: SCStream) {
-        streamLock.lock()
-        if currentStream === stream { currentStream = nil }
-        streamLock.unlock()
-    }
-
-    // Counters of received buffers per track under a lock: the delegate is driven by different
-    // queues (`systemQueue`/`micQueue`), while the self-diagnosis/watchdog reads them from yet
-    // another one. We count the tracks separately so that the system audio flow does not mask a
-    // dead microphone track (Task 4).
+    // Counters of received buffers per track under a lock: the buffer handler is driven by the
+    // source's two queues, while the self-diagnosis/watchdog reads them from yet another one. We
+    // count the tracks separately so that the system audio flow does not mask a dead microphone
+    // track (Task 4).
     private let bufferCountLock = NSLock()
     private var receivedSystemBuffers = 0
     private var receivedMicBuffers = 0
@@ -68,7 +45,7 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
     }
 
     /// How many buffers the writers actually accepted into segments, per track. Unlike
-    /// `receivedBufferCounts` it confirms that the data reached the file, not just the delegate.
+    /// `receivedBufferCounts` it confirms that the data reached the file, not just the handler.
     public var writtenBufferCounts: (system: Int, mic: Int) {
         (systemWriter.appendedCount, micWriter.appendedCount)
     }
@@ -90,12 +67,13 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
         }
     }
 
-    /// Whether an `SCStream` is currently up (for the self-diagnosis snapshot).
-    public var isStreaming: Bool { activeStream != nil }
+    /// Whether the capture is currently up (for the self-diagnosis snapshot). The source's actual
+    /// state, not a flag of our own: an asynchronous failure must be visible here too.
+    public var isStreaming: Bool { source.isStreaming }
 
-    // Finalized segments per track under a lock: the writers fire the callback from their own queues
-    // (`systemQueue`/`micQueue`), while `RecordingSession`'s counter reads it from a third one. The
-    // arithmetic lives in the pure `SegmentProgress` (ActaKit); this is only the serialization.
+    // Finalized segments per track under a lock: the writers fire the callback from the source's
+    // per-track queues, while `RecordingSession`'s counter reads it from a third one. The arithmetic
+    // lives in the pure `SegmentProgress` (ActaKit); this is only the serialization.
     private let progressLock = NSLock()
     private var progress = SegmentProgress()
     private var onSegmentCountChange: (@Sendable (Int) -> Void)?
@@ -123,8 +101,12 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
     /// - Parameter directory: the recording folder; segments are written into its `system/` and
     ///   `mic/` subdirectories.
-    public init(directory: URL, segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds)) {
+    /// - Parameter source: where the buffers come from; the real ScreenCaptureKit capture by default.
+    public init(directory: URL,
+                segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds),
+                source: CaptureSource = SCKCaptureSource()) {
         self.directory = directory
+        self.source = source
         self.systemWriter = SegmentWriter(
             directory: directory.appendingPathComponent(SegmentLayout.systemDirName),
             segmentSeconds: segmentSeconds
@@ -133,24 +115,11 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
             directory: directory.appendingPathComponent(SegmentLayout.micDirName),
             segmentSeconds: segmentSeconds
         )
-        super.init()
         systemWriter.onSegmentFinalized = { [weak self] in self?.countFinalizedSegment(track: .system) }
         micWriter.onSegmentFinalized = { [weak self] in self?.countFinalizedSegment(track: .mic) }
-    }
-
-    /// Build the stream configuration. Extracted to keep the capture "magic" in one place.
-    private func makeConfiguration() -> SCStreamConfiguration {
-        let config = SCStreamConfiguration()
-        config.capturesAudio = true
-        config.captureMicrophone = true
-        config.excludesCurrentProcessAudio = true
-        config.sampleRate = 48_000
-        config.channelCount = 2
-        // Minimal video config: we do not use the frames, but a display filter is mandatory.
-        config.width = 2
-        config.height = 2
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        return config
+        // Installed here, and not in `start()`: the contract is that the handler is in place before
+        // the source can produce anything.
+        source.setBufferHandler { [weak self] track, buffer in self?.append(track, buffer) }
     }
 
     /// Start the capture. Throws a `StartupFailure` with ready-made text for the menu bar: the
@@ -159,34 +128,23 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
     public func start() async throws {
         try await requestPermissionsIfNeeded()
         do {
-            try await startStream()
+            try await source.start()
         } catch {
-            // Raw ScreenCaptureKit errors are not let out: without `.streamNotStarted` the caller
-            // cannot tell "the stream did not come up" (healed by a restart) from other failures,
-            // and the self-healing (`SelfCheck`) would not spend its attempts (Task 4).
+            // Raw capture errors are not let out: without `.streamNotStarted` the caller cannot tell
+            // "the stream did not come up" (healed by a restart) from other failures, and the
+            // self-healing (`SelfCheck`) would not spend its attempts (Task 4).
             log.error("Stream did not come up: \(error.localizedDescription, privacy: .public)")
             throw StartupFailure.streamNotStarted
         }
     }
 
-    private func startStream() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first else { throw StartupFailure.streamNotStarted }
-
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let stream = SCStream(filter: filter, configuration: makeConfiguration(), delegate: self)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
-        try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: micQueue)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
-        try await stream.startCapture()
-        activeStream = stream
-        log.info("Capture started")
-    }
-
     /// Show the system TCC dialogs if the permissions have not been granted yet, and make sure they
     /// are there afterwards. Without an explicit request the first launch would silently hit a
-    /// denial: an `SCStream` will not come up without the screen recording permission, and without
+    /// denial: the capture will not come up without the screen recording permission, and without
     /// the microphone only half the meeting gets recorded.
+    ///
+    /// This stays here rather than in the source: the source produces buffers, it does not decide
+    /// whether it is allowed to. Every restart re-checks, because `restart()` ends in `start()`.
     ///
     /// On its first call `CGRequestScreenCaptureAccess` shows the dialog, but the permission only
     /// applies to the next launch of the process — so here we still fail with a hint saying "grant
@@ -208,28 +166,30 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
         }
     }
 
-    /// Restart the stream **keeping the segments already recorded** — for the self-healing
+    /// Restart the capture **keeping the segments already recorded** — for the self-healing
     /// (`SelfCheck`) and the watchdog. The current segments are finalized and stay valid, the track
-    /// counters move forward, and a new `SCStream` is brought up.
+    /// counters move forward, and a fresh capture is brought up.
+    ///
+    /// The order is the whole point and must not be rearranged. By the `CaptureSource` contract an
+    /// awaited `stop()` delivers nothing further, so no callback can append while the writers
+    /// advance; and advancing them before the new capture exists means nothing can be appended into
+    /// a segment that is being finalized. It ends in `self.start()`, not `source.start()`, because
+    /// that is what re-checks the permissions.
     public func restart() async throws {
-        if let stream = activeStream {
-            try? await stream.stopCapture()
-        }
-        activeStream = nil
-        systemQueue.sync { systemWriter.finishAndAdvance() }
-        micQueue.sync { micWriter.finishAndAdvance() }
+        await source.stop()
+        systemWriter.finishAndAdvance()
+        micWriter.finishAndAdvance()
         log.info("Restarting stream")
         try await start()
     }
 
-    /// Stop the capture and finalize the current segments of both tracks.
+    /// Stop the capture and finalize the current segments of both tracks. Safe by the same argument
+    /// as `restart()`: after an awaited `stop()` the source delivers nothing more, so no buffer can
+    /// land in a writer that is being finalized — which would delete the very tail being closed.
     public func stop() async {
-        if let stream = activeStream {
-            try? await stream.stopCapture()
-        }
-        activeStream = nil
-        systemQueue.sync { systemWriter.finish() }
-        micQueue.sync { micWriter.finish() }
+        await source.stop()
+        systemWriter.finish()
+        micWriter.finish()
         log.info("Capture stopped")
     }
 
@@ -241,19 +201,17 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
         return progress.segmentCount
     }
 
-    // MARK: - SCStreamOutput
+    // MARK: - Buffers
 
-    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                       of type: SCStreamOutputType) {
-        switch type {
-        case .audio:
+    /// Called synchronously on the source's per-track queue.
+    private func append(_ track: Track, _ buffer: CMSampleBuffer) {
+        switch track {
+        case .system:
             countBuffer(system: true)
-            systemWriter.append(sampleBuffer)
-        case .microphone:
+            systemWriter.append(buffer)
+        case .mic:
             countBuffer(system: false)
-            micWriter.append(sampleBuffer)
-        default:
-            break // .screen and the rest — ignored
+            micWriter.append(buffer)
         }
     }
 
@@ -265,17 +223,5 @@ public final class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput, @u
             receivedMicBuffers += 1
         }
         bufferCountLock.unlock()
-    }
-
-    // MARK: - SCStreamDelegate
-
-    public func stream(_ stream: SCStream, didStopWithError error: Error) {
-        log.error("Stream stopped with an error: \(error.localizedDescription, privacy: .public)")
-        // The stream is dead — drop it, otherwise `isStreaming` would keep showing the
-        // self-diagnosis a live stream, and it would explain the failed capture to the user as a
-        // broken audio device instead of the real cause. We check identity: while the error was
-        // being delivered, `restart()` could have already stored a new stream, and clearing it here
-        // would be a lie in the other direction.
-        clearStream(ifIdentical: stream)
     }
 }
