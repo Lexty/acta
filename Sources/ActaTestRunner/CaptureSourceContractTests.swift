@@ -227,26 +227,22 @@ private final class Recorded: @unchecked Sendable {
 
 @Suite
 struct SCKCaptureSourceContractTests {
+    // Only the contract that touches no capture: `isStreaming` before a start, and that a `stop()`
+    // with nothing to stop is a no-op. Both read state without ever calling `start()`, so neither
+    // prompts for anything.
     @Test
     @available(macOS 15.0, *)
     func baseContract() async {
         await assertCaptureSourceBaseContract(SCKCaptureSource(), label: "SCKCaptureSource")
     }
 
-    // Gated on the permission, and read with the preflight call, which does not prompt. Without
-    // screen-recording access `SCShareableContent` cannot hand back a display, so the real start
-    // takes exactly the failure path this asserts. With access granted it would instead bring a real
-    // capture up — which is a live recording, not a unit test, and not something this runner should
-    // start behind the user's back.
-    //
-    // A trait and not an early `return`: the runner grants itself screen recording on any machine
-    // where Acta is actually developed, so a bare `return` would report this as passed on exactly
-    // the machine that matters, having asserted nothing. `.enabled(if:)` makes swift-testing say it
-    // was skipped.
-    @Test(.enabled(if: !SystemPermissions().hasScreenRecording,
-                   "needs screen recording denied: with it granted, start() would begin a live capture"))
-    @available(macOS 15.0, *)
-    func aStartThatCannotReachADisplayMapsToStreamNotStarted() async {
-        await assertFailedStartContract(SCKCaptureSource(), label: "SCKCaptureSource")
-    }
+    // The real source's *failed-start* mapping (raw ScreenCaptureKit error -> `StartupFailure`) is
+    // deliberately NOT exercised here. It once was, gated on "screen recording denied" on the
+    // assumption that `SCShareableContent` then returns no display and `start()` short-circuits before
+    // `startCapture()`. That assumption is false on macOS 26: the display is handed back, `start()`
+    // reaches `startCapture()`, and the microphone TCC prompt fires — in the user's face, from a test
+    // run. There is no way to drive the real `start()` to its failure path without that side effect,
+    // so the failure-mapping contract is covered against the fake (`assertFailedStartContract` in
+    // `FakeCaptureSourceContractTests`), and the real source's start path is proven only by live
+    // recording. See docs/backlog.
 }

@@ -13,6 +13,23 @@
 
 ---
 
+## The real capture source's failed-start path is not unit-tested (low)
+
+`SCKCaptureSource.start()` maps any raw ScreenCaptureKit failure to `StartupFailure.streamNotStarted`.
+That mapping is covered against the **fake** (`assertFailedStartContract`), but not against the real
+source, and it cannot be safely: driving the real `start()` to its failure path reaches
+`SCStream.startCapture()`, which prompts for microphone (and screen-recording) TCC — a dialog in the
+user's face from a test run. The earlier attempt assumed "screen recording denied ⇒ `SCShareableContent`
+returns no display ⇒ `start()` short-circuits before `startCapture()`"; that is **false on macOS 26**,
+where the display is returned and the prompt fires anyway.
+
+To close this without the side effect, the seam would need to go one level deeper — inject the
+`SCShareableContent`/`SCStream` factory so a test can feed a failing stub. Not worth it yet: the
+mapping is one `catch`, and the real start path is exercised by every live recording. Promote only if
+that mapping grows real logic.
+
+---
+
 ## Found live on 2026-07-15 — two defects, both proven on real hardware
 
 ### 1. The display going dark kills the recording (severe, everyday)
