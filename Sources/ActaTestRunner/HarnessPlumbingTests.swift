@@ -35,6 +35,33 @@ struct HarnessPlumbingTests {
                 == .harness(.recover(root: URL(fileURLWithPath: root, isDirectory: true))))
     }
 
+    /// The grammar's two readings, checked against each other. They live in one process here and in
+    /// two when it matters, and a fault that the parent writes and the child does not read is a
+    /// negative control that quietly controls nothing.
+    @Test("What the parent asks for is what the child parses")
+    @available(macOS 15.0, *)
+    func theArgumentBuilderAndTheParserAgree() {
+        let root = URL(fileURLWithPath: "/tmp/acta-harness", isDirectory: true)
+        for mode: Harness.Mode in [.record(root: root),
+                                   .record(root: root, fault: CrashRun.fault),
+                                   .recover(root: root)] {
+            #expect(Harness.invocation(arguments: ["ActaTestRunner"] + Harness.arguments(for: mode))
+                    == .harness(mode))
+        }
+    }
+
+    @Test("A drop that does not parse is malformed, not silently ignored")
+    func anUnparseableDropIsMalformed() {
+        // Silently dropping the fault would leave the negative control running a *healthy* child and
+        // reporting the oracle's silence as the oracle working.
+        #expect(Harness.invocation(arguments: ["ActaTestRunner", Harness.childFlag,
+                                               Harness.rootOption, "/tmp/x", Harness.dropOption, "4096"])
+                == .malformed("\(Harness.dropOption) requires <frames>@<bufferIndex>, got 4096"))
+        // A hole at buffer zero is not a hole — the indices have not advanced yet.
+        #expect(Harness.Fault.parse("4096@0") == nil)
+        #expect(Harness.Fault.parse("4096@1") == Harness.Fault(frames: 4096, bufferIndex: 1))
+    }
+
     /// A harness flag the parser cannot honour must not become a test run. Falling through would put
     /// the suite inside the child — and the suite spawns children.
     @Test("A harness flag with no root is a malformed invocation, not a test run")

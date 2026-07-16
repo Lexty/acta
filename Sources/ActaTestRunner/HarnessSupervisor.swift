@@ -38,7 +38,7 @@ final class HarnessProcess {
         }
         process = Process()
         process.executableURL = executable
-        process.arguments = [Self.flag(for: mode), Harness.rootOption, root.path]
+        process.arguments = Harness.arguments(for: mode)
         process.standardError = stderr
         // Nothing on stdout matters, and inheriting the parent's would interleave with the test
         // report; stdin is closed so a child that ever tried to read one gets EOF, not the runner's.
@@ -59,13 +59,6 @@ final class HarnessProcess {
         // Set before `run()`, so a child that exits immediately cannot beat the handler into place.
         process.terminationHandler = { [exited] _ in exited.fire() }
         try process.run()
-    }
-
-    private static func flag(for mode: Harness.Mode) -> String {
-        switch mode {
-        case .record: return Harness.childFlag
-        case .recover: return Harness.recoverFlag
-        }
     }
 
     /// The child's pid as this side sees it. The crash scenario signals the pid the *child* publishes

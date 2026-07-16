@@ -23,6 +23,8 @@ enum Harness {
     static let recoverFlag = "--harness-recover"
     /// The harness working directory, which is not the archive root — see `archiveRoot(in:)`.
     static let rootOption = "--root"
+    /// `<frames>@<bufferIndex>`: record mode, but with audio deliberately lost. See `Fault`.
+    static let dropOption = "--harness-drop"
 
     /// What this invocation of the binary is for.
     ///
@@ -38,15 +40,41 @@ enum Harness {
         case malformed(String)
     }
 
+    /// Audio the child is told to lose on purpose — the negative control's whole content.
+    ///
+    /// **A hole of `frames`, not a whole dropped buffer, and the size is not arbitrary.** The
+    /// encoding wraps every 65536 frames, so a lost run of *k* frames and a repeated run of
+    /// `65536 - k` produce the same value delta: dropping one of the fake's one-second buffers (48000
+    /// frames) would be reported, correctly but uselessly, as a 17536-frame repetition. A hole well
+    /// under 32768 frames is a loss the oracle can name as a loss.
+    ///
+    /// It lands *before* the buffer at `bufferIndex`, so `bufferIndex > 0` is what "after the indices
+    /// have advanced" means: a hole at the very start of a track is not a hole, it is a track that
+    /// begins late.
+    struct Fault: Equatable {
+        var frames: Int
+        var bufferIndex: Int
+
+        /// `<frames>@<bufferIndex>`, the form the option takes on the command line.
+        var argument: String { "\(frames)@\(bufferIndex)" }
+
+        static func parse(_ text: String) -> Fault? {
+            let parts = text.split(separator: "@")
+            guard parts.count == 2, let frames = Int(parts[0]), let index = Int(parts[1]),
+                  frames > 0, index > 0 else { return nil }
+            return Fault(frames: frames, bufferIndex: index)
+        }
+    }
+
     /// A harness mode and the working directory it operates on.
     enum Mode: Equatable {
-        case record(root: URL)
+        case record(root: URL, fault: Fault? = nil)
         case recover(root: URL)
 
         /// The working directory, whichever mode this is.
         var root: URL {
             switch self {
-            case .record(let root), .recover(let root): return root
+            case .record(let root, _), .recover(let root): return root
             }
         }
     }
@@ -56,16 +84,42 @@ enum Harness {
     static func invocation(arguments: [String]) -> Invocation {
         let flags = [childFlag, recoverFlag]
         guard let flag = arguments.first(where: { flags.contains($0) }) else { return .tests }
-        guard let optionIndex = arguments.firstIndex(of: rootOption),
-              optionIndex + 1 < arguments.count else {
+        guard let path = value(of: rootOption, in: arguments) else {
             return .malformed("\(flag) requires \(rootOption) <dir>")
         }
-        let path = arguments[optionIndex + 1]
         guard !path.hasPrefix("--") else {
             return .malformed("\(rootOption) requires a directory, got \(path)")
         }
         let root = URL(fileURLWithPath: path, isDirectory: true)
-        return .harness(flag == childFlag ? .record(root: root) : .recover(root: root))
+        guard flag == childFlag else { return .harness(.recover(root: root)) }
+
+        guard let text = value(of: dropOption, in: arguments) else {
+            return .harness(.record(root: root))
+        }
+        guard let fault = Fault.parse(text) else {
+            return .malformed("\(dropOption) requires <frames>@<bufferIndex>, got \(text)")
+        }
+        return .harness(.record(root: root, fault: fault))
+    }
+
+    /// The command line that asks for `mode` — the counterpart of `invocation(arguments:)`, so the
+    /// two readings of the grammar sit next to each other rather than in the two processes that have
+    /// to agree on it.
+    static func arguments(for mode: Mode) -> [String] {
+        switch mode {
+        case .record(let root, let fault):
+            return [childFlag, rootOption, root.path]
+                + (fault.map { [dropOption, $0.argument] } ?? [])
+        case .recover(let root):
+            return [recoverFlag, rootOption, root.path]
+        }
+    }
+
+    private static func value(of option: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: option), index + 1 < arguments.count else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 
     // MARK: - Layout of the working directory

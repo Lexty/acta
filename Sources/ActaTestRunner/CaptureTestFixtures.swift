@@ -38,6 +38,10 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     private let micQueue = DispatchQueue(label: "dev.personal.acta.test.fake.mic")
 
     private let lock = NSLock()
+    /// Held for the whole of `enqueueBatch`, so `freezeEmission()` can wait out a batch that is
+    /// already under way rather than only turning the next one away. `lock` is always taken *inside*
+    /// it, never the other way round.
+    private let emissionLock = NSLock()
     private var handler: (@Sendable (Track, CMSampleBuffer) -> Void)?
     /// Closed between `stop()` and the next `start()` — the other half of the no-delivery-after-stop
     /// guarantee, exactly as in `SCKCaptureSource`.
@@ -63,6 +67,10 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     private var positionEncoded = false
     /// Set by `freezeEmission()`: nothing is enqueued again, so `emittedFrames` stops moving.
     private var frozen = false
+    /// Audio to lose on purpose, and how many buffers each track has produced so far — the counter
+    /// exists only to locate the fault.
+    private var fault: Harness.Fault?
+    private var emittedBuffers: [Track: Int] = [.system: 0, .mic: 0]
 
     /// One second of 48 kHz audio per buffer, so a buffer's presentation timestamp advances by a
     /// second — enough for a handful of them to cross a segment boundary without a test having to
@@ -83,12 +91,37 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     /// buffers rather than reading them, and silence is the cheaper fixture.
     func encodePositions() { withLock { positionEncoded = true } }
 
-    /// Stop producing audio for good — no `start()`, batch or restart enqueues anything again.
+    /// Lose `fault.frames` frames of audio on both tracks, just before the buffer at
+    /// `fault.bufferIndex` — the fault the negative control exists to have the oracle catch.
+    ///
+    /// A *real* loss, not a mislabelled one: the buffer at that index is delivered short and starting
+    /// late, in content and in presentation timestamp alike, and every buffer after it keeps the
+    /// position it would have had anyway. So the hole is exactly `frames` wide, it sits at a frame
+    /// index the caller can predict, and `emittedFrames` still bounds the track from above.
+    ///
+    /// Off unless asked for, like `encodePositions()`: a source that could silently drop audio in
+    /// every scenario would make every other suite's counts a matter of trust.
+    func drop(_ fault: Harness.Fault) { withLock { self.fault = fault } }
+
+    /// Stop producing audio for good — no `start()`, batch or restart enqueues anything again — and
+    /// do not return until any batch already in flight has finished.
     ///
     /// What makes `emittedFrames` an *upper bound* rather than a moving target. A harness that means
     /// to crash this process has to know exactly how much audio existed at the moment it did, and
     /// while anything can still emit, the number it reads is already stale.
-    func freezeEmission() { withLock { frozen = true } }
+    ///
+    /// ⚠️ **Waiting out the batch in flight is the whole of the guarantee, and leaving it out looked
+    /// fine for a long time.** Emission is driven from several tasks — the child's own loop, `start()`
+    /// and the startup probe's clock handler — so a flag that only turns *new* batches away still lets
+    /// one that is already past the check advance `nextFrame` afterwards. The count then goes out
+    /// stale, and frames reach the disk that it never covered: a recovered track legitimately longer
+    /// than its own ceiling, roughly one run in ten. Only the frame-level oracle could see it — a
+    /// buffer count would have agreed with itself either way.
+    func freezeEmission() {
+        emissionLock.lock()
+        defer { emissionLock.unlock() }
+        withLock { frozen = true }
+    }
 
     /// The absolute frame index the next buffer of each track would start at — that is, how many
     /// frames this source has produced per track. Read it after `freezeEmission()`; before that it
@@ -183,6 +216,11 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     /// Enqueue a batch without waiting for it — for the tests that need a delivery in flight while
     /// `stop()` is called.
     func enqueueBatch(count: Int? = nil) {
+        // Held across the whole batch, not just the decision to emit one: `freezeEmission()` waits on
+        // exactly this, and a batch that could still be enqueuing after it returned would put frames
+        // on disk that the published count does not know about.
+        emissionLock.lock()
+        defer { emissionLock.unlock() }
         let (size, live, fmt, frames, encoded) = withLock {
             (count ?? batchSize,
              (silentUntilRestart || frozen) ? [] : Track.allCases.filter { !silencedTracks.contains($0) },
@@ -193,19 +231,15 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
         guard size > 0 else { return }
         for track in live {
             for _ in 0..<size {
-                let start: Int64 = withLock {
-                    let frame = nextFrame[track] ?? 0
-                    nextFrame[track] = frame + Int64(frames)
-                    return frame
-                }
-                let pts = CMTime(value: start, timescale: CMTimeScale(fmt.sampleRate))
+                let (start, length) = nextBuffer(for: track, frames: frames)
+                let pts = CMTime(value: Int64(start), timescale: CMTimeScale(fmt.sampleRate))
                 // The frame index and the presentation timestamp are the same number: the buffers of
                 // a track are contiguous from zero, so where a sample sits in the track is where the
                 // encoding says it sits.
                 let buffer = encoded
-                    ? makePositionEncodedSampleBuffer(track: track, startFrame: Int(start), pts: pts,
-                                                      frames: frames, format: fmt)
-                    : makeAudioSampleBuffer(pts: pts, frames: frames, format: fmt)
+                    ? makePositionEncodedSampleBuffer(track: track, startFrame: start, pts: pts,
+                                                      frames: length, format: fmt)
+                    : makeAudioSampleBuffer(pts: pts, frames: length, format: fmt)
                 guard let buffer else { continue }
                 let box = BufferBox(buffer: buffer)
                 queue(for: track).async { [weak self] in self?.deliver(track, box.buffer) }
@@ -220,6 +254,27 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    /// Where this track's next buffer starts and how long it is, and the bookkeeping that goes with
+    /// it. Without a fault the answer is always "where the last one ended, a full buffer long".
+    ///
+    /// With one, the buffer at the fault's index starts `frames` later and is `frames` shorter, while
+    /// `nextFrame` advances as if nothing had happened — so the audio in between exists nowhere, and
+    /// the buffers after it are still at the positions they were always going to be at. That is what
+    /// makes the hole's location something the test can name in advance.
+    private func nextBuffer(for track: Track,
+                            frames: AVAudioFrameCount) -> (start: Int, length: AVAudioFrameCount) {
+        withLock {
+            let index = emittedBuffers[track] ?? 0
+            emittedBuffers[track] = index + 1
+            let frame = Int(nextFrame[track] ?? 0)
+            nextFrame[track] = Int64(frame) + Int64(frames)
+            guard let fault, fault.bufferIndex == index, fault.frames < Int(frames) else {
+                return (frame, frames)
+            }
+            return (frame + fault.frames, frames - AVAudioFrameCount(fault.frames))
+        }
+    }
 
     private func queue(for track: Track) -> DispatchQueue {
         track == .system ? systemQueue : micQueue
@@ -241,94 +296,6 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return body()
-    }
-}
-
-// MARK: - Fake permissions
-
-/// `PermissionChecking` with no system dialog behind it: it answers granted/denied per permission
-/// and counts what was asked of it.
-final class FakePermissions: PermissionChecking, @unchecked Sendable {
-    private let lock = NSLock()
-    private var screenGranted: Bool
-    private var micStatus: AVAuthorizationStatus
-    /// What a `requestScreenRecording()` / `requestMicrophone()` turns the answer into — the user
-    /// agreeing in the dialog, or refusing.
-    private var grantsOnRequest: Bool
-    private var screenRequests = 0
-    private var micRequests = 0
-
-    init(screenGranted: Bool = true,
-         micStatus: AVAuthorizationStatus = .authorized,
-         grantsOnRequest: Bool = false) {
-        self.screenGranted = screenGranted
-        self.micStatus = micStatus
-        self.grantsOnRequest = grantsOnRequest
-    }
-
-    /// How many times the code asked the system to prompt, per permission. Requesting when nothing
-    /// needs requesting is a real bug — it is a dialog in the user's face on every restart.
-    var screenRequestCount: Int { withLock { screenRequests } }
-    var micRequestCount: Int { withLock { micRequests } }
-
-    /// The user taking a permission away in System Settings while the app is running. Without these,
-    /// an answer is fixed at construction and `SelfCheck`'s whole permission-diagnosis branch is
-    /// unreachable: `AudioRecorder` rejects a start that has no permissions, so the only way into that
-    /// code is a permission that disappears *after* the start.
-    func revokeScreenRecording() { withLock { screenGranted = false } }
-
-    /// The microphone answer going back to "never asked" — a TCC reset (`tccutil`, "Reset Location &
-    /// Privacy") mid-run. Rare, but it is what makes the two request flags observably independent.
-    func resetMicrophone() { withLock { micStatus = .notDetermined } }
-
-    var hasScreenRecording: Bool { withLock { screenGranted } }
-
-    @discardableResult
-    func requestScreenRecording() -> Bool {
-        withLock {
-            screenRequests += 1
-            if grantsOnRequest { screenGranted = true }
-            return screenGranted
-        }
-    }
-
-    var microphoneStatus: AVAuthorizationStatus { withLock { micStatus } }
-
-    func requestMicrophone() async -> Bool {
-        withLock {
-            micRequests += 1
-            if grantsOnRequest { micStatus = .authorized }
-            return micStatus == .authorized
-        }
-    }
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
-}
-
-// MARK: - Wake lock counting
-
-/// A `DisplayWakeLock` whose activity calls are counted rather than made — the only way to prove a
-/// failed start gave the assertion back, since a dropped token ends its activity by itself and the
-/// OS therefore cannot tell a correct release from a leak.
-final class CountingWakeLock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var begun = 0
-    private var ended = 0
-
-    var beginCount: Int { lock.withLock { begun } }
-    var endCount: Int { lock.withLock { ended } }
-
-    func makeWakeLock() -> DisplayWakeLock {
-        DisplayWakeLock(
-            begin: { _ in
-                self.lock.withLock { self.begun += 1 }
-                return NSObject()
-            },
-            end: { _ in self.lock.withLock { self.ended += 1 } })
     }
 }
 

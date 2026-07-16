@@ -147,6 +147,23 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
   startup probe, the watchdog's restart and its give-up — runs with no TCC prompt, no display, no
   audio device and no wall-clock waiting (`RecordingPipelineTests`, `RecordingPipelineFailureTests`).
   Only **real ScreenCaptureKit capture and the UI** are still manual.
+  **Crash recovery is automated too, by a process-based harness** — the one property that cannot be
+  tested in-process, because throwing, cancelling and dropping all run cleanup and `SIGKILL` does not.
+  `ActaTestRunner` **spawns itself**: `main.swift` branches on `--harness-child` / `--harness-recover`
+  *before* the swift-testing entry point (a child must never fall through into the suite — the suite
+  spawns children), so the child is the same binary re-invoked and `FakeCaptureSource` needs no
+  extraction. The child records through `RecordingController.start()`, publishes readiness by an
+  atomic rename once the **production recovery scan** sees a closed and an open segment per track, is
+  `SIGKILL`ed at the pid it published, and is recovered by a **fresh process** (`HarnessCrashTests`,
+  `HarnessPlumbingTests`, `HarnessProtocol`/`HarnessChild`/`HarnessSupervisor`). Assertions read only
+  durable filesystem state — in-memory state died with the child — and go through
+  `PositionEncodedAudio`, whose samples encode their own position, so a lost frame is named rather
+  than decoded past. Length is **bounded, not exact** (closed segments ≤ recovered ≤ the emitted count
+  published at readiness): a crash cannot be scheduled. A permanent negative control runs the same
+  harness against a child that drops audio in a *surviving* segment and requires the oracle's
+  **specific** verdict — an oracle that cannot fail rubber-stamps everything. ⚠️ This is
+  **approximate** E2E: it proves segmentation → `SIGKILL` → recovery → repair → assembly, **not** that
+  ScreenCaptureKit captures anything or that TCC prompts appear.
   **The controller's lifecycle above that pipeline is frozen as a characterization contract**:
   `RecordingController` is driven through the operations the UI calls (`start`, `stop`, `stopAndWait`,
   `onLaunch`, `onAppear`) over a temp archive with the same seams injected
@@ -194,5 +211,11 @@ both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission question
   TCC-authorized build, an audio device and a human watching the indicator. See Gotcha 4 in the
   `screencapturekit-audio` skill — the mitigation there is a workaround for a suspected macOS 26 SCK
   defect, so a regression here is silent and only a human can see it.
-- The crash scenario (`kill -9`) and auto-recovery on the next launch.
-- Validation Commands only check compilation/build/lint/unit logic.
+- The crash scenario **on real capture**. The `kill -9` → recover cycle itself is now automated
+  (`HarnessCrashTests`, see the tests bullet above), so a regression in the crash-safety machinery
+  fails the suite. What the harness cannot reach is what sits above its seams: a `kill -9` of the real
+  **app**, killed while a real `SCStream` is feeding it, recovered on the next real launch. Worth a
+  human's eyes when capture or recovery changes — the harness approximates that run, it does not
+  replace it.
+- Validation Commands check compilation/build/lint, unit logic, the in-process pipeline **and** the
+  process-based crash harness — but nothing above the seams: no ScreenCaptureKit, no TCC, no UI.

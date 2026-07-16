@@ -16,7 +16,7 @@ enum HarnessChild {
     /// runner and spawn children of its own.
     static func run(_ mode: Harness.Mode) async -> Never {
         switch mode {
-        case .record(let root): await record(root: root)
+        case .record(let root, let fault): await record(root: root, fault: fault)
         case .recover(let root): await recover(root: root)
         }
     }
@@ -24,13 +24,14 @@ enum HarnessChild {
     // MARK: - Record mode
 
     /// Record a real meeting into `<root>/archive`, publish readiness, then wait to be stopped or
-    /// killed.
-    private static func record(root: URL) async -> Never {
+    /// killed. A `fault` makes the source lose audio on the way — the negative control's run.
+    private static func record(root: URL, fault: Harness.Fault?) async -> Never {
         let archive = Harness.archiveRoot(in: root)
         try? FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
 
         let source = FakeCaptureSource()
         source.encodePositions()
+        if let fault { source.drop(fault) }
         let clock = TestClock()
         // Only for the startup probe. `SelfCheck` measures the counters across a window it sleeps
         // through, so with a clock that returns instantly the audio has to arrive from the sleep
