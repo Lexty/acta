@@ -20,6 +20,22 @@ struct ArchiveDocTests {
         (try? String(contentsOf: directory.appendingPathComponent("CLAUDE.md"), encoding: .utf8)) ?? ""
     }
 
+    /// What the pre-fence build wrote, transcribed from that build rather than read back from the
+    /// constant it is matched against. An independent copy is the point: a test that asked
+    /// `MeetingStore` for the literal would keep passing after someone edited it, while every archive
+    /// on disk still held these exact bytes.
+    private let legacyDoc = """
+        # Acta — meeting recordings archive
+
+        Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
+        - `system.wav` — the other participants' audio, `mic.wav` — the microphone,
+          `combined.wav` — the mix.
+        - `info.md` — metadata (YAML front-matter: title, date, source, duration, status).
+        - `session.json` — the internal recording-state marker.
+
+        Transcription/summarisation are done separately (locally, via `mlx_whisper`).
+        """
+
     @Test
     func writesTheArchiveDocIntoAFreshArchive() throws {
         try withTemporaryDirectory { directory in
@@ -53,6 +69,44 @@ struct ArchiveDocTests {
 
             #expect(doc(in: directory).contains("A mix is not produced"))
             #expect(doc(in: directory).contains("<!-- acta-archive-doc: begin -->"))
+        }
+    }
+
+    /// The upgrade every existing archive actually takes: the pre-fence build's own file, verbatim.
+    ///
+    /// Appending here would leave the doc asserting both "`combined.wav` — the mix" and "A mix is not
+    /// produced" — and `combined.wav` has not existed since the pipeline dropped it. This body is the
+    /// one unfenced text Acta can identify as its own, so it is replaced outright rather than kept out
+    /// of deference to prose nobody wrote.
+    @Test
+    func replacesTheUnfencedDocThePreFenceBuildWroteItself() throws {
+        try withTemporaryDirectory { directory in
+            let claudeMD = directory.appendingPathComponent("CLAUDE.md")
+            try (legacyDoc + "\n").write(to: claudeMD, atomically: true, encoding: .utf8)
+
+            try MeetingStore(archiveRoot: directory).ensureArchiveRoot()
+
+            let contents = doc(in: directory)
+            #expect(!contents.contains("combined.wav"))
+            #expect(contents.contains("A mix is not produced"))
+            // Replaced, not appended: the stale heading does not survive alongside the new block.
+            #expect(contents.components(separatedBy: "# Acta — meeting recordings archive").count == 2)
+        }
+    }
+
+    /// The safeguard on the replacement above: one edited line and the file is the user's again.
+    @Test
+    func appendsRatherThanReplacesOnceTheUserHasEditedTheLegacyDoc() throws {
+        try withTemporaryDirectory { directory in
+            let edited = legacyDoc + "\n\nMy note: transcribe system.wav first.\n"
+            let claudeMD = directory.appendingPathComponent("CLAUDE.md")
+            try edited.write(to: claudeMD, atomically: true, encoding: .utf8)
+
+            try MeetingStore(archiveRoot: directory).ensureArchiveRoot()
+
+            let contents = doc(in: directory)
+            #expect(contents.contains("My note: transcribe system.wav first."))
+            #expect(contents.contains("A mix is not produced"))
         }
     }
 

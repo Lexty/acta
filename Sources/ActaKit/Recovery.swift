@@ -77,7 +77,7 @@ public enum Recovery {
     /// preamble", it is audio we failed to place: `data` sitting past `headerProbeBytes` is the
     /// documented way this happens (see `headerProbeBytes`), and it costs whole segments at a time.
     ///
-    /// Two carve-outs keep the guard from firing on segments that never held audio, which would
+    /// Three carve-outs keep the guard from firing on segments that never held audio, which would
     /// retain the segments of an ordinary recording forever:
     ///
     /// - below `minValidSegmentBytes` the file is a bare stub — `AVAssetWriter` creates it before the
@@ -90,11 +90,19 @@ public enum Recovery {
     ///   segment rollover and its first buffer made `assemble` throw `segmentsUnrepairable` over a
     ///   file with nothing in it — three recovery attempts, a false "part of the audio could not be
     ///   assembled" in `info.md`, and permanently retained segments, while both tracks had in fact
-    ///   assembled whole.
+    ///   assembled whole;
+    /// - a preamble whose own write was **torn off** before its `data` chunk — a power loss inside the
+    ///   writer's first 4 KiB. It does not parse, so the carve-out above cannot spare it, and at
+    ///   64..4096 bytes it clears `minValidSegmentBytes` by two orders of magnitude. That left the
+    ///   whole band falling through to the same false "partially assembled" as the intact preamble
+    ///   once did.
     ///
-    /// What is left after those is the case the guard exists for: a header we could not parse at all,
-    /// over a file far too big to be empty — `data` sitting past `headerProbeBytes` is the documented
-    /// way that happens. That is audio, and we could not place it.
+    /// The last one is why the verdict cannot rest on `WAV.layout` alone: `layout` folds "no `data`
+    /// chunk here" together with "`fmt ` is not playable PCM", and those are opposite answers to the
+    /// question being asked — the second is a segment full of audio nobody can place, the first is an
+    /// empty header. `WAV.hasDataChunk` separates them, and the size check catches the remaining
+    /// shape, where `data` is real but sits past `headerProbeBytes` (see there — it is the documented
+    /// way whole segments go missing).
     public static func discardedSegmentCount(fromFileNames names: [String],
                                              sizeByFileName: [String: Int],
                                              headerByFileName: [String: Data]) -> Int {
@@ -107,7 +115,11 @@ public enum Recovery {
                 guard self.action(bytes: bytes, header: header) == nil else { return false }
                 // `action` returning nil past a parseable header means `headerRepair` found less than
                 // one whole frame of body — an empty preamble, not audio we failed to read.
-                return WAV.layout(header) == nil
+                guard WAV.layout(header) == nil else { return false }
+                // The header did not parse. It is a loss only if the audio is really there: a `data`
+                // chunk we walked to, or a file too big for its `data` to be anywhere but past the
+                // probe window.
+                return WAV.hasDataChunk(header) || bytes >= headerProbeBytes
             }
     }
 

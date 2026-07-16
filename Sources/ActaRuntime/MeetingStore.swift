@@ -105,12 +105,35 @@ public struct MeetingStore {
         \(archiveDocEndFence)
         """
 
+    /// The exact body the pre-fence build wrote, byte for byte.
+    ///
+    /// Kept as a literal because it is the one unfenced text Acta can positively identify as its own:
+    /// every archive from that build holds this and nothing else. Without it the upgrade appends, and
+    /// the file ends up asserting both "`combined.wav` — the mix" and "A mix is not produced" — an
+    /// archive doc that contradicts itself is worse than the stale one it replaced, and `combined.wav`
+    /// has not existed since the pipeline dropped it.
+    ///
+    /// An exact match is the whole safeguard: the moment a user edits a line, this stops matching and
+    /// the append path takes over, which is the behaviour we want for text that is theirs.
+    static let legacyArchiveDocBody = """
+        # Acta — meeting recordings archive
+
+        Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
+        - `system.wav` — the other participants' audio, `mic.wav` — the microphone,
+          `combined.wav` — the mix.
+        - `info.md` — metadata (YAML front-matter: title, date, source, duration, status).
+        - `session.json` — the internal recording-state marker.
+
+        Transcription/summarisation are done separately (locally, via `mlx_whisper`).
+        """
+
     /// Splice the current generated block into `existing`, leaving every line outside the fences as
     /// the user left it. Returns `nil` when the file already carries exactly this block — there is
     /// nothing to write, and rewriting would only churn the mtime.
     ///
     /// A file with no fences (written by a build that predated them, or by the user) is *appended*
-    /// to, never truncated: the text already there is not ours to judge.
+    /// to, never truncated: the text already there is not ours to judge — unless it is verbatim
+    /// `legacyArchiveDocBody`, which is Acta's own output and is replaced outright.
     ///
     /// A begin fence with no end fence is malformed — only a user's own hand puts it there — and the
     /// file is left exactly as it is. Appending to it would lay down a *second* begin fence, and the
@@ -121,6 +144,11 @@ public struct MeetingStore {
     static func archiveDocRefreshed(from existing: String?) -> String? {
         guard let existing, !existing.isEmpty else { return archiveDoc + "\n" }
         guard let begin = existing.range(of: archiveDocBeginFence) else {
+            // Whitespace-insensitive only at the edges: the write went through `atomic` and a trailing
+            // newline is the one byte an editor adds without the user meaning anything by it.
+            if existing.trimmingCharacters(in: .whitespacesAndNewlines) == legacyArchiveDocBody {
+                return archiveDoc + "\n"
+            }
             return existing.hasSuffix("\n")
                 ? existing + "\n" + archiveDoc + "\n"
                 : existing + "\n\n" + archiveDoc + "\n"

@@ -91,6 +91,29 @@ public enum WAV {
         return nil
     }
 
+    /// Is there a `data` chunk header within the read prefix at all?
+    ///
+    /// Deliberately blind to whether the file is *usable*: it walks chunk IDs and asks nothing of
+    /// `fmt `. That is the whole point — `layout` folds three different failures into one `nil`
+    /// ("not a RIFF", "`fmt ` is not playable PCM", "no `data` in the prefix"), and the retention
+    /// guard in `Recovery` has to tell the last one from the others. A segment with an unplayable
+    /// `fmt ` still holds audio nobody can place; a preamble torn off before its `data` chunk holds
+    /// none. Both come back `nil` from `layout`, and only this distinguishes them.
+    public static func hasDataChunk(_ header: Data) -> Bool {
+        let bytes = [UInt8](header)
+        guard bytes.count >= 12,
+              hasChunkID(bytes, at: 0, "RIFF"),
+              hasChunkID(bytes, at: 8, "WAVE") else { return false }
+
+        var offset = 12
+        while offset + 8 <= bytes.count {
+            if hasChunkID(bytes, at: offset, "data") { return true }
+            let size = Int(uint32(bytes, at: offset + 4))
+            offset += 8 + size + (size % 2) // chunks are padded to an even boundary
+        }
+        return false
+    }
+
     /// Duration of the audio the file really holds, seconds.
     ///
     /// Measured from the data, not from the clock: an unfinalised header declares zero bytes while

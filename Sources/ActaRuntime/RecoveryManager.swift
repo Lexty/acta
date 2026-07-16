@@ -178,9 +178,7 @@ public struct RecoveryManager {
         // already (`concatTrack` renames each into place before the throw). Short by the audio that
         // never assembled, but it is the length of the files the user actually has, and `info.md`
         // must match them.
-        let tracks = [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName]
-            .map { directory.appendingPathComponent($0) }
-            .filter { fileManager.fileExists(atPath: $0.path) }
+        let tracks = assembledTracks(in: directory)
         let duration = tracks.compactMap { SegmentAssembler.measuredDuration(of: $0) }.max()
 
         updated.status = .recovered
@@ -229,6 +227,13 @@ public struct RecoveryManager {
         `duration` above is the length of the assembled audio, not of the meeting.
         """
 
+    /// The final tracks sitting in a recording folder, in the order `info.md` would report them.
+    private func assembledTracks(in directory: URL) -> [URL] {
+        [SegmentLayout.systemTrackFileName, SegmentLayout.micTrackFileName]
+            .map { directory.appendingPathComponent($0) }
+            .filter { fileManager.fileExists(atPath: $0.path) }
+    }
+
     /// Close the marker of a folder with nothing to salvage: `recovered` with zero segments is a
     /// terminal status, so the next launch will not touch it again. We do not delete the folder
     /// itself: `info.md` with the meeting's title and time is the only trace that a recording was
@@ -244,7 +249,18 @@ public struct RecoveryManager {
         // Same rule as the give-up path: the marker is what makes this terminal, so if it did not
         // land the folder is still `recording` and `info.md` must not say otherwise.
         guard writeMarker(updated, to: directory) else { return }
-        updateInfo(in: directory, status: updated.status, durationSeconds: 0)
+        // "No segments" is not "no audio": a clean stop assembles the tracks and *then* deletes the
+        // segments, so a marker write that failed after that (a full disk, a transient I/O error —
+        // `RecordingSession.stop` swallows it) leaves exactly this shape, with two whole wavs next to
+        // it. Writing a flat zero here would then overwrite the real duration `performStop` had
+        // already recorded — an hour-long meeting reading `00:00:00` in the one file that is meant to
+        // outlive the app (SPEC §6). So measure what is on disk, as the give-up path does, and fall
+        // back to zero only when there genuinely is nothing to measure.
+        let duration = assembledTracks(in: directory)
+            .compactMap { SegmentAssembler.measuredDuration(of: $0) }
+            .max()
+        updateInfo(in: directory, status: updated.status,
+                   durationSeconds: duration.map { max(0, Int($0.rounded())) } ?? 0)
     }
 
     /// Persist the marker, logging a failure instead of swallowing it. `false` = the marker on disk

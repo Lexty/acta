@@ -259,6 +259,36 @@ func recoveryReportsAFolderWhoseAudioNeverReachedATrackAndSaysSoInInfo() throws 
     }
 }
 
+/// "No segments" is not "no audio", and `closeEmpty` must not write a flat zero over a real duration.
+///
+/// The shape is reachable from an ordinary clean stop: `assemble` succeeds, the segments are deleted,
+/// and the marker write that follows fails (a full disk, a transient I/O error — `RecordingSession`
+/// swallows it with `try?`). The folder is then two whole wavs, an `info.md` already carrying the real
+/// duration, and a `session.json` still reading `recording`. The next launch finds no segments and
+/// closes it — and a hardcoded zero would state `00:00:00` over an hour of audio sitting right there,
+/// in the one file meant to outlive the app (SPEC §6).
+@Test
+func closingAFolderWithNoSegmentsKeepsTheDurationOfTheTracksThatExist() throws {
+    try withRecordingDirectory { root in
+        let directory = root.appendingPathComponent("2026-07-15-1500-sync", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // A stop that assembled and deleted its segments, then failed to write the marker.
+        try makeRecording(in: directory, systemSegments: nil, micSegments: nil)
+        try writeWAV(to: directory.appendingPathComponent(SegmentLayout.systemTrackFileName),
+                     frames: 96_000) // 2 s @ 48 kHz
+        try writeInterruptedMarker(in: directory, title: "Sync", segmentCount: 4)
+
+        RecoveryManager(archiveRoot: root).recoverInterruptedSessions()
+
+        let manifest = try readManifest(in: directory)
+        #expect(manifest.status == .recovered) // still terminal: there is nothing left to assemble
+        let info = readInfo(in: directory)
+        #expect(info.contains("status: recovered"))
+        // Measured off the track on disk, not assumed to be zero because the segments are gone.
+        #expect(info.contains("duration: \"\(MeetingInfo.formatDuration(seconds: 2))\""))
+    }
+}
+
 /// The crash-time segment count is the last true one anybody wrote, and a terminal marker must not
 /// seal a number in the wrong unit over it: `tracks.count` would close a 2-segment meeting as
 /// `segment_count: 0`, and a 240-segment one as `2`.
