@@ -33,13 +33,30 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     // value and clear an already-restarted stream.
     private let streamLock = NSLock()
     private var currentStream: SCStream?
-    /// Streams that are no longer current but are still owed a microphone teardown. `didStopWithError`
-    /// drops a dead stream to keep `isStreaming` honest, but under this file's own premise — the tap
-    /// outlives `stopCapture()` and even the process — dropping the reference does **not** release the
-    /// microphone. Without this slot the watchdog path leaks a tap per restart: the stream errors out,
-    /// `restart()` calls `stop()`, `stop()` finds nothing to disable, and `start()` opens a second
-    /// mic-on stream. An array rather than one slot so a second error can never overwrite a pending
-    /// teardown, even though today's single-stream-at-a-time invariant makes that unreachable.
+    /// Streams that `didStopWithError` set aside — no longer current, never explicitly torn down.
+    /// Dropping the reference releases nothing under this file's own premise (the tap outlives
+    /// `stopCapture()` and even the process), so `stop()` is given the chance to attempt the mic-off
+    /// teardown on them rather than leaving the watchdog's error path with no teardown at all.
+    ///
+    /// ⚠️ **Best-effort, and strictly weaker than the teardown of a live stream — do not read this as
+    /// "the watchdog path is handled".** The mitigation needs a **live** stream (see
+    /// `disableMicrophone(on:)`), and ScreenCaptureKit has already stopped every stream that lands
+    /// here, so `updateConfiguration` will most likely throw and release nothing. Hence the `.info`
+    /// level `stop()` logs these failures at: on this path a failure is the expected outcome, and it
+    /// must not bury the real ones on the channel this bug was diagnosed from. The attempt is kept
+    /// because it is cheap and the premise is a *suspected* OS defect rather than documented behaviour
+    /// — not because it is known to help. If the live matrix in
+    /// `docs/plans/2026-07-16-microphone-release-on-stop.md` shows the watchdog restart still leaking,
+    /// this is the first thing to stop believing in: an already-dead stream is likely beyond any
+    /// API-level workaround, and that path needs the `AVCaptureSession` fallback parked in
+    /// `docs/backlog/acta-full-plan.md`.
+    ///
+    /// Note the *stall* restart — the more common watchdog trigger — does not come through here at all:
+    /// the stream stays live and current, so `stop()` finds it in `currentStream` and disables the mic
+    /// on a live stream, which is the mitigation as designed.
+    ///
+    /// An array rather than one slot so a second error can never overwrite a pending teardown, even
+    /// though today's single-stream-at-a-time invariant makes that unreachable.
     private var streamsAwaitingTeardown: [SCStream] = []
 
     // The handler is installed before `start()` and read from both sample-handler queues; the lock
@@ -61,8 +78,8 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// under a single lock, otherwise a restart with its new stream could slip in between them.
     ///
     /// The cleared stream is handed to `streamsAwaitingTeardown` rather than simply dropped: it is dead
-    /// as far as `isStreaming` is concerned, but its microphone tap is not, and only `stop()` can
-    /// dismantle that.
+    /// as far as `isStreaming` is concerned, but its microphone tap may well not be. See that property
+    /// for why the teardown `stop()` then attempts on it is best-effort at most.
     private func clearStream(ifIdentical stream: SCStream) {
         streamLock.lock()
         if currentStream === stream {
@@ -79,13 +96,17 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// the teardown's two suspension points: a restart storing a new stream mid-teardown would have had
     /// its stream cleared out from under it. The returned array is what keeps each stream alive through
     /// the awaits that follow.
-    private func takeStreamsForTeardown() -> [SCStream] {
+    ///
+    /// `wasLive` distinguishes the two, and governs **only the log level** of a failed teardown: on a
+    /// live stream a failure is a real one and the mitigation just lost, while on a set-aside stream it
+    /// is the expected outcome (see `streamsAwaitingTeardown`). The teardown itself is identical.
+    private func takeStreamsForTeardown() -> [(stream: SCStream, wasLive: Bool)] {
         streamLock.lock()
         defer { streamLock.unlock() }
-        var streams = streamsAwaitingTeardown
+        var streams = streamsAwaitingTeardown.map { (stream: $0, wasLive: false) }
         streamsAwaitingTeardown.removeAll()
         if let currentStream {
-            streams.append(currentStream)
+            streams.append((stream: currentStream, wasLive: true))
             self.currentStream = nil
         }
         return streams
@@ -190,20 +211,23 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     ///
     /// Its own `do`/`catch`, never combined with `stopCapture()`'s: a failure here must not skip the
     /// stop. Nothing is propagated — `stop()` is non-throwing by contract — but every failure is logged
-    /// distinctly, because the log is how this bug was found in the first place.
-    private func disableMicrophone(on stream: SCStream) async {
+    /// distinctly, because the log is how this bug was found in the first place. `level` is how a
+    /// caller says whether a failure would be surprising; it changes nothing else.
+    private func disableMicrophone(on stream: SCStream, level: OSLogType = .error) async {
         do {
             try await stream.updateConfiguration(makeConfiguration(captureMicrophone: false))
         } catch {
-            log.error("Disabling the microphone failed: \(error.localizedDescription, privacy: .public)")
+            log.log(level: level,
+                    "Disabling the microphone failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func stopCapture(_ stream: SCStream) async {
+    private func stopCapture(_ stream: SCStream, level: OSLogType = .error) async {
         do {
             try await stream.stopCapture()
         } catch {
-            log.error("Stopping the capture failed: \(error.localizedDescription, privacy: .public)")
+            log.log(level: level,
+                    "Stopping the capture failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -242,14 +266,17 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// current stream and any that `didStopWithError` set aside — the mic is disabled on the stream and
     /// awaited **before** its `stopCapture()` (see `disableMicrophone(on:)`). The array returned by
     /// `takeStreamsForTeardown()` retains each stream across both awaits, so none is released until its
-    /// teardown has run.
+    /// teardown has run. Only the **live** stream's teardown is the mitigation as designed; the
+    /// set-aside ones are a cheap best-effort attempt whose failure is expected — see
+    /// `streamsAwaitingTeardown` before trusting them.
     public func stop() async {
         // Gate first, before touching the stream: everything below is asynchronous, and every moment
         // the gate is open past this point is a moment a straggler can reach a writer being finalized.
         setStopped(true)
-        for stream in takeStreamsForTeardown() {
-            await disableMicrophone(on: stream)
-            await stopCapture(stream)
+        for (stream, wasLive) in takeStreamsForTeardown() {
+            let level: OSLogType = wasLive ? .error : .info
+            await disableMicrophone(on: stream, level: level)
+            await stopCapture(stream, level: level)
         }
         // Unconditional, including the no-stream path: `didStopWithError` clears the stream from its
         // own queue while leaving the gate open, so a delivery that observed the open gate can be in

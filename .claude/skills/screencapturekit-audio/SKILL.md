@@ -36,8 +36,17 @@ description: Capture system audio AND microphone with a single SCStream on macOS
   ```
   Each call needs its **own** `do`/`catch`: one combined `do` lets an update failure skip the stop.
   This applies to the failed-`start()` cleanup too (a partially-started stream may already own the
-  tap), and to any stream dropped by `didStopWithError` — dropping the reference releases nothing, so
-  such a stream must be set aside and torn down, or the watchdog leaks a tap per restart.
+  tap).
+  ⚠️ **"Still-live" is the whole mitigation, and it is what a stream dropped by `didStopWithError`
+  is not.** Dropping such a reference releases nothing, but neither, most likely, does setting it
+  aside and updating its configuration later — ScreenCaptureKit has already stopped it, so the update
+  is expected to throw. `SCKCaptureSource` does set them aside and attempt it anyway (cheap, and the
+  premise is a *suspected* OS defect), but logs those failures at `.info`, because on that path
+  failure is the expected outcome and must not bury real errors. Do not read that attempt as "the
+  watchdog error path is covered": if the live matrix shows it still leaking, an already-dead stream
+  is likely beyond any API-level workaround and the path needs an `AVCaptureSession` fallback. The
+  *stall* restart — the commoner watchdog trigger — is unaffected: the stream is still live and still
+  current, so it gets the real teardown.
 - **Gotcha 5 — `updateConfiguration` replaces, it does not merge.** The mic-off configuration must be
   the *complete* configuration with one field flipped; a bare `SCStreamConfiguration()` with only
   `captureMicrophone = false` silently drops the sample rate, the channel count and `capturesAudio`.
