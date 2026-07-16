@@ -115,14 +115,20 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
             log.info("Capture started")
         } catch {
             log.error("Stream creation failed: \(error.localizedDescription, privacy: .public)")
-            // Both halves matter, and neither is optional. The gate: it was opened above before
+            // All three halves matter, and none is optional. The gate: it was opened above before
             // `startCapture()`, and a failed start must leave it shut — otherwise a buffer from a
             // stream that reported failure still reaches `AudioRecorder`, and on the `restart()` path
             // it lands in a writer being finalized, which is the tail-loss the gate exists to
             // prevent. The teardown: the stream never became `activeStream`, so nothing else will
-            // ever stop it.
+            // ever stop it. The drain: for the same reason `stop()` needs one — closing the gate
+            // stops *later* callbacks, but a callback that read the gate as open before it shut is
+            // delivering right now, so a `start()` that threw would otherwise return with a delivery
+            // still in flight. Same order as `stop()`, and for the same reason: gate first, drain
+            // second.
             setStopped(true)
             if let created { try? await created.stopCapture() }
+            systemQueue.sync {}
+            micQueue.sync {}
             throw StartupFailure.streamNotStarted
         }
     }

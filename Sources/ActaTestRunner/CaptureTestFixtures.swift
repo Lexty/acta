@@ -4,6 +4,14 @@ import ActaRuntime
 import CoreMedia
 import Foundation
 
+/// Carries a `CMSampleBuffer` to a track queue. `CMSampleBuffer` is not `Sendable`, but the hand-off
+/// is the same one ScreenCaptureKit makes to `SCKCaptureSource`'s sample-handler queue: the buffer is
+/// created here, handed over exactly once, and never touched again on this side. The box states that
+/// where the compiler can check the shape of it, rather than leaving a warning to be read past.
+private struct BufferBox: @unchecked Sendable {
+    let buffer: CMSampleBuffer
+}
+
 // The seams Task B injects, driven from the test side: a scripted capture source, a permission
 // answerer that shows no dialog, and a clock that makes the self-diagnosis instant without making it
 // meaningless.
@@ -168,7 +176,8 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
                 }
                 let pts = CMTime(value: start, timescale: CMTimeScale(fmt.sampleRate))
                 guard let buffer = makeAudioSampleBuffer(pts: pts, frames: frames, format: fmt) else { continue }
-                queue(for: track).async { [weak self] in self?.deliver(track, buffer) }
+                let box = BufferBox(buffer: buffer)
+                queue(for: track).async { [weak self] in self?.deliver(track, box.buffer) }
             }
         }
     }
