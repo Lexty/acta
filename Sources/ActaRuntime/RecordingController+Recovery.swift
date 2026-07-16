@@ -53,3 +53,20 @@ extension RecordingController {
     /// recovering a crashed archive needs exactly that, and cannot read it off the disk.
     public func awaitRecovery() async -> RecoveryOutcome? { await recoveryTask?.value }
 }
+
+/// The pass's other reading: not the harness's verdict but the user's sentence.
+///
+/// Here rather than at the call site, and next to `RecoveryOutcome` on purpose — the two are the same
+/// mapping read twice, and both have to read *all five* lists. Spelling the counts out in
+/// `runRecovery` is how three of them once reached the reporter while `retrying` and `lost` reached
+/// only the log: a pass that lost a meeting said nothing, exactly like a pass with nothing to do.
+/// A list added to `Outcome` and forgotten here now fails to compile instead of going quiet.
+extension RecoveryManager.Outcome {
+    /// What to tell the user about this pass, or `nil` when it changed nothing and there is nothing
+    /// to say.
+    var report: RecoveryReport.Message? {
+        RecoveryReport.message(recovered: recovered.count, partial: partial.count,
+                               unassembled: unassembled.count, retrying: retrying.count,
+                               lost: lost.count)
+    }
+}

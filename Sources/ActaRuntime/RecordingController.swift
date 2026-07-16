@@ -156,7 +156,7 @@ public final class RecordingController: ObservableObject {
             \(partial, privacy: .public) partial, \(unassembled, privacy: .public) unassembled, \
             \(outcome.retrying.count, privacy: .public) retrying, \(outcome.lost.count, privacy: .public) lost
             """)
-        if let message = RecoveryReport.message(recovered: recovered, partial: partial, unassembled: unassembled) {
+        if let message = outcome.report {
             recoveredBanner = message.body
             Notifier.notify(title: message.title, body: message.body)
             refresh()

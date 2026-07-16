@@ -31,7 +31,14 @@ extension HarnessTests {
         /// segment finalisation and a real `ffmpeg` concat on a loaded machine are not fast — but
         /// asserted, because the failure this bounds is a hang, and a hang with no bound is a suite that
         /// never returns.
-        private static let wallClockBudgetSeconds = 120.0
+        ///
+        /// **Derived from the waits it bounds, never restated as a number** — the same rule the crash
+        /// scenario's budget follows, and for the same reason. This round trip waits out readiness and
+        /// then a recover-mode process, so a run that spends every second the harness itself allows is
+        /// slow, not broken. A flat 120 was *under* `readinessWaitSeconds` alone: a load-delayed
+        /// success would have failed here and blamed the harness for the machine.
+        private static let wallClockBudgetSeconds =
+            Harness.readinessWaitSeconds + Harness.recoveryTimeoutSeconds + 30.0
 
         @Test("The parser sends a harness flag to the harness and everything else to the tests")
         func argumentsBranchBeforeTheTestRunner() {
