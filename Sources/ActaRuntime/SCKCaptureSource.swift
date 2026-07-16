@@ -75,10 +75,16 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     }
 
     /// Build the stream configuration. Extracted to keep the capture "magic" in one place.
-    private func makeConfiguration() -> SCStreamConfiguration {
+    ///
+    /// The microphone flag is a parameter because the teardown re-applies this configuration with the
+    /// microphone off (see `stop()`). `updateConfiguration` **replaces** the configuration rather than
+    /// merging into it, so the mic-off variant must be this same complete object with one field
+    /// flipped — a bare `SCStreamConfiguration()` with only `captureMicrophone = false` would silently
+    /// drop the sample rate, the channel count and the audio capture itself.
+    private func makeConfiguration(captureMicrophone: Bool) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.captureMicrophone = true
+        config.captureMicrophone = captureMicrophone
         config.excludesCurrentProcessAudio = true
         config.sampleRate = 48_000
         config.channelCount = 2
@@ -103,7 +109,9 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
             guard let display = content.displays.first else { throw StartupFailure.streamNotStarted }
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
-            let stream = SCStream(filter: filter, configuration: makeConfiguration(), delegate: self)
+            let stream = SCStream(filter: filter,
+                                  configuration: makeConfiguration(captureMicrophone: true),
+                                  delegate: self)
             created = stream
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: micQueue)
@@ -126,11 +134,56 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
             // still in flight. Same order as `stop()`, and for the same reason: gate first, drain
             // second.
             setStopped(true)
-            if let created { try? await created.stopCapture() }
-            systemQueue.sync {}
-            micQueue.sync {}
+            // The same teardown as `stop()`, and for the same reason: a partially-started stream may
+            // already own the microphone tap, and nothing else will ever stop this stream. The mic-off
+            // update may legitimately fail on a stream whose `startCapture()` never reached a running
+            // state — `disableMicrophone` logs that and moves on, so the cleanup failure never
+            // obscures the start failure below.
+            if let created {
+                await disableMicrophone(on: created)
+                await stopCapture(created)
+            }
+            drainSampleHandlerQueues()
             throw StartupFailure.streamNotStarted
         }
+    }
+
+    /// Disable the microphone on a live stream, awaited. This is the actual mitigation: `stopCapture()`
+    /// alone does not appear to dismantle the macOS 26 ScreenCaptureKit microphone tap (the indicator
+    /// and Control Center's attribution to Acta survive even process exit), and the configuration is
+    /// the API-level state that says whether the mic is captured. So we turn it off while the stream is
+    /// still alive, *then* stop.
+    ///
+    /// Its own `do`/`catch`, never combined with `stopCapture()`'s: a failure here must not skip the
+    /// stop. Nothing is propagated — `stop()` is non-throwing by contract — but every failure is logged
+    /// distinctly, because the log is how this bug was found in the first place.
+    private func disableMicrophone(on stream: SCStream) async {
+        do {
+            try await stream.updateConfiguration(makeConfiguration(captureMicrophone: false))
+        } catch {
+            log.error("Disabling the microphone failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func stopCapture(_ stream: SCStream) async {
+        do {
+            try await stream.stopCapture()
+        } catch {
+            log.error("Stopping the capture failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Wait out any callback already in flight on the sample-handler queues. All three, including
+    /// `screenQueue`: it delivers nothing, but the drain is about the queues the framework calls us
+    /// on, not about the tracks we forward.
+    ///
+    /// ⚠️ Must never run on one of these queues — a synchronous drain of the queue you are on
+    /// deadlocks. Both callers reach here from `AudioRecorder`'s serialized context (the Swift
+    /// concurrency pool), never from a sample handler; keep it that way.
+    private func drainSampleHandlerQueues() {
+        systemQueue.sync {}
+        micQueue.sync {}
+        screenQueue.sync {}
     }
 
     /// Stop the stream, guaranteeing **no delivery after an awaited `stop()`** — the contract
@@ -150,14 +203,26 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// that `AudioRecorder` is concurrently finalizing — deleting the segment being closed. That is
     /// precisely the tail-loss `isFinished` describes, and it used to be prevented by finalizing
     /// *on* these queues.
+    ///
+    /// Between the two steps sits the microphone teardown: the mic is disabled on the live stream and
+    /// awaited **before** `stopCapture()`, and the stream is released **last** so it stays alive
+    /// through both calls (see `disableMicrophone(on:)`). `isStreaming` therefore reads `true` slightly
+    /// longer than it used to — harmless, because `AudioRecorder` serializes `stop()` against
+    /// start/restart and the self-check.
     public func stop() async {
-        if let stream = activeStream {
-            try? await stream.stopCapture()
-        }
-        activeStream = nil
+        // Gate first, before touching the stream: everything below is asynchronous, and every moment
+        // the gate is open past this point is a moment a straggler can reach a writer being finalized.
         setStopped(true)
-        systemQueue.sync {}
-        micQueue.sync {}
+        if let stream = activeStream {
+            await disableMicrophone(on: stream)
+            await stopCapture(stream)
+            activeStream = nil
+        }
+        // Unconditional, including the no-stream path: `didStopWithError` clears the stream from its
+        // own queue while leaving the gate open, so a delivery that observed the open gate can be in
+        // flight even when there is nothing left to stop. Returning without the drain would break the
+        // guarantee exactly there.
+        drainSampleHandlerQueues()
     }
 
     // MARK: - SCStreamOutput
