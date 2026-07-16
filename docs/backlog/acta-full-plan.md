@@ -130,6 +130,33 @@ categories on the `errorMessage` string paths, one state stream the UI and tests
 to consume it, and a health/recovery signal that needs new plumbing through `SelfCheck`. Promote that
 only after the characterization contract lands, and let the contract catch any behaviour drift.
 
+**Update 2026-07-16 — reordered after `ControlAPI`, `ControlAPI` comes just before the socket.** A Codex
+design consult found the intended order (ControlAPI → crash harness) wrong: the crash harness needs a
+canonical entry point + SIGKILL + durable/persisted assertions + fresh-process recovery, all of which
+`RecordingController` already provides — and in-memory `ControlState` is irrelevant after `SIGKILL`
+(crash evidence is persisted filesystem state). `ControlAPI`'s real value (a typed, serializable surface
+for multiple clients) is created by the **socket transport**, not the harness. So the crash harness went
+first (`docs/plans/2026-07-16-crash-recovery-harness.md`), and `ControlAPI` now lands **just before** the
+socket/CLI transport.
+
+**Design decisions for `ControlAPI` when its turn comes (from the same Codex consult):**
+- **Wrap, do not replace.** `ControlAPI` is a new `@MainActor` façade around an **unchanged**
+  `RecordingController`, so the frozen characterization tests keep exercising the exact object the UI
+  calls. Renaming/reshaping the controller would change the subject *and* the assertions at once.
+- **`ControlState` is an orthogonal struct, not a lifecycle mega-enum:** an `operation` enum
+  (`idle/starting/recording(elapsedSeconds:)/saving`) **plus** independent `lifecycleFailure` and
+  `notice` fields (so a fatal stall = `.saving` + failure, an `openArchive` error = operation unchanged
+  + notice). Do **not** put `.error` inside `operation`. Carry elapsed **seconds** only, not a formatted
+  string. **Omit health** this round (no truthful signal without new `SelfCheck` plumbing).
+- **State stream:** a replay-current `AsyncStream<ControlState>` created on the main actor (register +
+  yield current atomically); do **not** `.bufferingNewest(1)` (it drops a brief `.saving`). SwiftUI
+  consumes it through a small UI-owned `@Observable` adapter. **Do not migrate the UI in the same change
+  that introduces the façade** — build and test the façade first, migrate second.
+- **Typed errors only where truthful:** type `StartupFailure` (start/stall) and archive-open as a
+  notice; keep one `.assemblyFailed` category (the "ffmpeg missing vs failed" distinction is a
+  post-failure environment probe, not typed pipeline data — do not pull a typed assembly result out of
+  `RecordingSession` here). Preserve exact display strings so characterization stays green.
+
 The original review notes below still apply to the parked façade half:
 
 Pulled OUT of an overnight plan on 2026-07-15 after external review — it contained a criterion no
