@@ -332,10 +332,9 @@ public final class RecordingController: ObservableObject {
         self.startedAt = nil
         elapsedSeconds = 0
 
-        // The assembly failed (no ffmpeg / ffmpeg crashed): there are no final wav files, the marker
-        // stayed `recording`, the segments are intact and recovery will pick them up on the next
-        // launch. Saying "saved" here is the same as showing a "mute" recording: the state would not
-        // match what is actually on disk.
+        // The assembly failed (no ffmpeg / ffmpeg crashed / segments that would not repair): the marker stayed
+        // `recording` and the segments are intact. Saying "saved" here is showing a "mute" recording — the state
+        // would not match what is on disk. The two branches below differ in what recovery can honestly promise.
         guard result != nil else {
             try? store.writeInfo(
                 MeetingInfo(title: stoppedTitle, date: startedAt, source: currentSource,
@@ -343,11 +342,12 @@ public final class RecordingController: ObservableObject {
                 to: directory)
             phase = .error
             errorMessage = SegmentAssembler.locateFFmpeg() == nil
-                ? "Recording stopped, but there is nothing to build the final file with: ffmpeg was "
-                    + "not found (install it: brew install ffmpeg). The segments are saved — recovery "
-                    + "will assemble them on the next launch."
-                : "Recording stopped, but the assembly failed. The segments are saved — recovery "
-                    + "will assemble them on the next launch."
+                ? "Recording stopped, but there is nothing to build the final file with: ffmpeg was not found (install "
+                    + "it: brew install ffmpeg). The segments are saved — recovery will assemble them on the next launch."
+                // Not "will assemble on the next launch": `RecoveryManager` bounds its attempts, and these causes are
+                // the ones it treats as non-transient — promising a fix we may never deliver is the same over-claim.
+                : "Recording stopped, but the assembly failed. The segments are saved — recovery will retry on the "
+                    + "next launches; if it still cannot assemble them, the raw segments are kept (see info.md)."
             log.error("Recording stopped, but the assembly failed — leaving the segments to recovery")
             refresh()
             return

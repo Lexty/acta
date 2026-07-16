@@ -51,6 +51,28 @@ func writeUnfinalizedWAV(to url: URL, frames: Int = 24_000) throws {
     try Data(bytes).write(to: url)
 }
 
+/// A segment whose `data` chunk sits past `Recovery.headerProbeBytes`, pushed there by an oversized
+/// padding chunk — every size written through, real audio inside, and still invisible to the plan.
+///
+/// This is not a hypothetical shape: `Recovery.headerProbeBytes` documents it as the live risk it
+/// was widened for. A real `AVAssetWriter` puts `data` at 4088..4096 behind an `FLLR` chunk, so a
+/// different `sourceFormatHint` or an alignment change in a new macOS moves it — and the plan then
+/// discards whole segments of audio without a word. The probe is a fixed window; this is what lies
+/// beyond it.
+func writeWAVWithDataBeyondProbe(to url: URL, frames: Int = 24_000) throws {
+    let fmtBody = pcmFormatBody()
+    let audio = [UInt8](repeating: 0, count: frames * 4) // 2 ch x 16 bit
+    let padding = [UInt8](repeating: 0, count: Recovery.headerProbeBytes + 4_096)
+
+    var body: [UInt8] = Array("WAVE".utf8)
+    body += Array("fmt ".utf8) + le32(fmtBody.count) + fmtBody
+    body += Array("FLLR".utf8) + le32(padding.count) + padding
+    body += Array("data".utf8) + le32(audio.count) + audio
+
+    let bytes = Array("RIFF".utf8) + le32(body.count) + body
+    try Data(bytes).write(to: url)
+}
+
 /// A recording folder with the requested number of valid segments per track. A track given `nil`
 /// still gets its (empty) directory — that is what the writers create before the first buffer.
 func makeRecording(in directory: URL, systemSegments: Int?, micSegments: Int?) throws {

@@ -1,25 +1,13 @@
 import Testing
 import ActaKit
 
-// Pure logic for building ffmpeg arguments (assembly/mix) - an acceptance criterion of Task 2.
+// Pure logic for building ffmpeg arguments (assembly) - an acceptance criterion of Task 2.
 
 @Test
 func concatArgsAreCopyMuxWithSafeZero() {
     let args = FFmpeg.concatArgs(listPath: "/tmp/list.txt", outputPath: "/tmp/system.wav")
     #expect(args == ["-y", "-xerror", "-f", "concat", "-safe", "0",
                      "-i", "/tmp/list.txt", "-c", "copy", "/tmp/system.wav"])
-}
-
-@Test
-func mixArgsUseAmixLongestWithoutNormalize() {
-    let args = FFmpeg.mixArgs(systemPath: "/a/system.wav", micPath: "/a/mic.wav", outputPath: "/a/combined.wav")
-    #expect(args == [
-        "-y",
-        "-i", "/a/system.wav",
-        "-i", "/a/mic.wav",
-        "-filter_complex", "amix=inputs=2:duration=longest:normalize=0",
-        "/a/combined.wav"
-    ])
 }
 
 @Test

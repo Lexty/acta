@@ -26,7 +26,9 @@ private func header(riffSize: Int, dataSize: Int) -> Data {
 }
 
 /// Headers for a set of valid segments of the same size.
-private func headers(_ names: [String], fileSize: Int) -> [String: Data] {
+///
+/// Internal rather than private: `RecoveryPlanLossTests` builds the same headers.
+func headers(_ names: [String], fileSize: Int) -> [String: Data] {
     Dictionary(uniqueKeysWithValues: names.map { ($0, finalizedHeader(fileSize: fileSize)) })
 }
 

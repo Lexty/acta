@@ -87,11 +87,12 @@ public struct SegmentAssembler {
         let system = try systemOutcome.get()
         let mic = try micOutcome.get()
 
-        // A planned segment that failed its repair means audio the plan saw and vouched for reached
-        // no final file, and the segment is its only copy. That is the same statement whether the
-        // track around it came out empty or assembled happily, so it takes the same exit: returning
-        // success on the partial case would hand the caller a `Result` indistinguishable from a
-        // clean one, and the caller's next move is to close the folder for good.
+        // A segment big enough to hold audio that the plan discarded, or that failed its repair,
+        // means audio reached no final file and the segment is its only copy. That is the same
+        // statement whether the track around it came out empty or assembled happily, so it takes the
+        // same exit: returning success on the partial case would hand the caller a `Result`
+        // indistinguishable from a clean one, and the caller's next move is to close the folder for
+        // good.
         //
         // Throwing here is what keeps the segments, too: every deletion below sits past this point.
         if system.retainedSegments || mic.retainedSegments {
@@ -141,8 +142,8 @@ public struct SegmentAssembler {
         var url: URL?
         /// How many segments went into it.
         var count: Int
-        /// The track lost audio the plan had vouched for: a planned segment failed its repair, so
-        /// its bytes are in no final file and its segment file is the only copy left.
+        /// The track lost audio: a segment was discarded by the plan or failed its repair, so its
+        /// bytes are in no final file and its segment file is the only copy left.
         ///
         /// `url == nil` cannot carry this on its own — an empty track and a track whose every
         /// segment failed to repair both come back `nil`, and only the second must survive the
@@ -158,15 +159,26 @@ public struct SegmentAssembler {
     private func concatTrack(dirName: String, outputName: String, in directory: URL,
                              ffmpeg: String) throws -> TrackResult {
         let trackDir = directory.appendingPathComponent(dirName)
-        let planned = Self.plannedSegments(inTrackDir: trackDir)
+        let scan = Self.scanTrack(inTrackDir: trackDir)
+        let planned = scan.plan
         let plan = prepareSegments(planned, inTrackDir: trackDir)
-        // The plan lists only segments with usable audio in them, so anything that drops out here
-        // dropped out of the *output*, not out of a set of empty files.
-        let retainedSegments = plan.count < planned.count
+        // Audio goes missing at two steps, and both have to count here — the guard exists to stop the
+        // caller deleting the only copy of audio that reached no final file.
+        //
+        // The plan lists only segments with usable audio in them, so anything that drops out of
+        // `prepareSegments` dropped out of the *output*, not out of a set of empty files. But a
+        // segment can also be discarded a step earlier, by the plan itself, and `planned` cannot show
+        // that: `recoveryPlan` has already dropped it. Measuring only `plan.count < planned.count`
+        // left that half invisible — a segment whose `data` chunk sits past `Recovery.headerProbeBytes`
+        // is dropped silently, the surviving segments concat fine, and the deletion below then takes
+        // the dropped audio with it.
+        let lostInRepair = planned.count - plan.count
+        let lostInPlan = scan.discardedWithAudio
+        let retainedSegments = lostInRepair + lostInPlan > 0
         if retainedSegments {
             log.error("""
-                Track \(dirName, privacy: .public): \(planned.count - plan.count) segment(s) held \
-                audio that could not be repaired into the assembly — keeping the segments
+                Track \(dirName, privacy: .public): \(lostInPlan) segment(s) unreadable and \
+                \(lostInRepair) unrepairable — that audio is in no final file, keeping the segments
                 """)
         }
         guard !plan.isEmpty else {
@@ -223,6 +235,23 @@ public struct SegmentAssembler {
     /// first buffer, so a check like "a file named NNNN.wav exists" would mistake an empty preamble
     /// for audio.
     static func plannedSegments(inTrackDir trackDir: URL) -> [Recovery.PlannedSegment] {
+        scanTrack(inTrackDir: trackDir).plan
+    }
+
+    /// What a track's segment directory holds: the plan, and how much audio the plan could not take.
+    struct TrackScan {
+        /// The segments to assemble, in order.
+        var plan: [Recovery.PlannedSegment]
+        /// Segments large enough to hold audio that the plan discarded anyway
+        /// (`Recovery.discardedSegmentCount`).
+        var discardedWithAudio: Int
+    }
+
+    /// Read the track directory once and derive both the plan and its losses from the same scan.
+    ///
+    /// One scan, not two: the headers cost `Recovery.headerProbeBytes` per segment, and a long
+    /// meeting has hundreds of them.
+    static func scanTrack(inTrackDir trackDir: URL) -> TrackScan {
         let fileManager = FileManager.default
         let names = (try? fileManager.contentsOfDirectory(atPath: trackDir.path)) ?? []
 
@@ -234,8 +263,12 @@ public struct SegmentAssembler {
             sizes[name] = (attrs?[.size] as? Int) ?? 0
             headers[name] = headerPrefix(of: url)
         }
-        return Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
-                                     headerByFileName: headers)
+        return TrackScan(
+            plan: Recovery.recoveryPlan(fromFileNames: names, sizeByFileName: sizes,
+                                        headerByFileName: headers),
+            discardedWithAudio: Recovery.discardedSegmentCount(fromFileNames: names,
+                                                               sizeByFileName: sizes,
+                                                               headerByFileName: headers))
     }
 
     /// Names of the track's segments ready for assembly: the plan + in-place repair of unfinalized

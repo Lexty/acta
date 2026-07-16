@@ -174,8 +174,13 @@ func assembleThrowsSegmentsUnrepairableWhenEveryTrackHeldAudioThatFailedRepair()
 /// segment `ffmpeg` would choke on never reaches it — `WAV.layout` refuses a `fmt ` that does not
 /// describe playable PCM, so the segment drops out of the plan rather than sinking the whole
 /// track's concat.
+///
+/// Dropping it out of the *plan* is not licence to drop it off the *disk*, though: the file is
+/// segment-sized, so whatever is inside it is audio we failed to place, and the assembly says so
+/// rather than reporting a clean run. The good segment still gets its track — the drop keeps costing
+/// the bad segment its place in the output, exactly as before.
 @Test
-func assembleDropsASegmentWhoseFormatIsNotPlayablePCM() throws {
+func assembleAssemblesTheGoodSegmentButReportsTheUnplayableOneAsALoss() throws {
     try withRecordingDirectory { directory in
         // The counts are deliberately lopsided. `segmentCount` is `max(system, mic)`, so with two
         // segments per track it reads 2 whether or not the bad one drops — the assertion would pass
@@ -187,15 +192,13 @@ func assembleDropsASegmentWhoseFormatIsNotPlayablePCM() throws {
         try writeWAV(to: systemDir.appendingPathComponent("0001.wav"), frames: 24_000,
                      format: 0, channels: 0, sampleRate: 0, bitsPerSample: 0)
 
-        let result = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+        #expect(throws: SegmentAssembler.AssembleError.segmentsUnrepairable) {
+            try SegmentAssembler().assemble(in: directory, deleteSegments: false)
+        }
 
-        // The good segment still assembles; only the unusable one is left out.
-        #expect(result.systemWAV != nil)
-        #expect(result.segmentCount == 1) // the good system segment; the bad one never entered the plan
+        // The good segment still assembled; only the unusable one was left out.
         #expect(finalFileNames(in: directory) == ["system.wav", "mic.wav"])
-        // And the audio proves it: one segment's worth reached the track, not two.
-        let systemWAV = try #require(result.systemWAV)
-        let duration = try #require(durationOfWAV(at: systemWAV))
+        let duration = try #require(durationOfWAV(at: directory.appendingPathComponent("system.wav")))
         #expect(abs(duration - 0.5) < 0.05)
     }
 }

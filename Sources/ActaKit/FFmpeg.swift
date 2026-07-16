@@ -32,21 +32,6 @@ public enum FFmpeg {
         ["-y", "-xerror", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]
     }
 
-    /// Arguments that mix the two tracks (system + microphone) into a combined file.
-    ///
-    /// `amix=inputs=2:duration=longest` — the duration follows the longest track. `normalize=0`
-    /// disables dividing the amplitude by the number of inputs (otherwise the mix sounds half as
-    /// loud).
-    public static func mixArgs(systemPath: String, micPath: String, outputPath: String) -> [String] {
-        [
-            "-y",
-            "-i", systemPath,
-            "-i", micPath,
-            "-filter_complex", "amix=inputs=2:duration=longest:normalize=0",
-            outputPath
-        ]
-    }
-
     /// Escaping of a single quote for a `file '...'` line of the concat list.
     static func escapeForConcatList(_ path: String) -> String {
         path.replacingOccurrences(of: "'", with: "'\\''")

@@ -233,12 +233,16 @@ reason to write a third file on every recording.
 > `2f1a816`), which was carved out of here for an unattended run. What is left below is the
 > **Export mix** feature — the "mix on demand" half. Do **not** re-derive the deletion checkboxes
 > from this list: the mix is already gone from the pipeline, and a literal reading of the struck
-> items would re-add it. `FFmpeg.mixArgs` and its tests were deliberately kept for this task.
+> items would re-add it. `FFmpeg.mixArgs` and its test were kept for this task at first, then
+> removed in review: an argument builder for a file nothing produces reads as live code, and the
+> `amix=inputs=2:duration=longest:normalize=0` recipe it held is recorded above — this task
+> re-adds it against a real export path rather than inheriting a stub.
 >
 > Landed as Task 12: ~~the `SegmentAssembler` mix removal and its deletion guards~~;
 > ~~`RecordingSettings`/`TrackSelection` removal~~; ~~the "Save tracks" Settings section~~;
-> ~~the recovery path~~; ~~the generated `~/Acta/CLAUDE.md`~~ (new archives only — an existing
-> `CLAUDE.md` is never rewritten, by design); ~~the test updates~~; ~~the identifier grep~~ — which
+> ~~the recovery path~~; ~~the generated `~/Acta/CLAUDE.md`~~ (Acta's own block is fenced with
+> `<!-- acta-archive-doc: begin/end -->` and refreshed in place on every launch; anything the user
+> wrote outside the fences is left alone); ~~the test updates~~; ~~the identifier grep~~ — which
 > must be scoped to `Sources/Acta Sources/ActaRuntime Sources/ActaKit`, since the decode-only
 > migration test legitimately carries the old keys as literal JSON.
 

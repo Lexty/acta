@@ -74,16 +74,18 @@ public struct MeetingStore {
             .sorted { $0.directory.lastPathComponent > $1.directory.lastPathComponent }
     }
 
-    /// Marker identifying the revision of the generated archive doc that is on disk. Bumped whenever
-    /// `archiveDoc` changes, so an archive written by an older build can be told apart from a current
-    /// one — without it, `ensureArchiveRoot` only ever reached a brand-new archive and every existing
-    /// one kept describing a layout that no longer ships (`combined.wav`, which the pipeline dropped).
-    static let archiveDocMarker = "<!-- acta-archive-doc: v2 -->"
+    /// Fences around the part of `~/Acta/CLAUDE.md` that Acta generates.
+    ///
+    /// Everything between them is Acta's own account of a layout Acta decides, so it is regenerated:
+    /// a stale copy misinforms the one consumer it exists for. Everything **outside** them is the
+    /// user's and is never touched — this is a `CLAUDE.md` in the user's home, the obvious place to
+    /// keep one's own `mlx_whisper` notes, and rewriting the whole file to fix one stale sentence
+    /// would trade unbounded user text for it.
+    static let archiveDocBeginFence = "<!-- acta-archive-doc: begin -->"
+    static let archiveDocEndFence = "<!-- acta-archive-doc: end -->"
 
-    /// The description of the archive Acta writes for the user's Claude Code (`SPEC.md` §6). This
-    /// file is Acta's own account of a layout Acta decides, so it is regenerated rather than treated
-    /// as the user's to edit: a stale copy misinforms the one consumer it exists for.
-    static let archiveDoc = """
+    /// The description of the archive Acta writes for the user's Claude Code (`SPEC.md` §6).
+    static let archiveDocBody = """
         # Acta — meeting recordings archive
 
         Each subfolder is one meeting (`YYYY-MM-DD_HHMM__<slug>/`):
@@ -94,13 +96,37 @@ public struct MeetingStore {
         - `session.json` — the internal recording-state marker.
 
         Transcription/summarisation are done separately (locally, via `mlx_whisper`).
-
-        \(archiveDocMarker)
         """
 
+    /// The generated block as it appears on disk, fences included.
+    static let archiveDoc = """
+        \(archiveDocBeginFence)
+        \(archiveDocBody)
+        \(archiveDocEndFence)
+        """
+
+    /// Splice the current generated block into `existing`, leaving every line outside the fences as
+    /// the user left it. Returns `nil` when the file already carries exactly this block — there is
+    /// nothing to write, and rewriting would only churn the mtime.
+    ///
+    /// A file with no fences (written by a build that predated them, or by the user) is *appended*
+    /// to, never truncated: the text already there is not ours to judge.
+    static func archiveDocRefreshed(from existing: String?) -> String? {
+        guard let existing, !existing.isEmpty else { return archiveDoc + "\n" }
+        guard let begin = existing.range(of: archiveDocBeginFence),
+              let end = existing.range(of: archiveDocEndFence, range: begin.upperBound..<existing.endIndex)
+        else {
+            return existing.hasSuffix("\n")
+                ? existing + "\n" + archiveDoc + "\n"
+                : existing + "\n\n" + archiveDoc + "\n"
+        }
+        guard String(existing[begin.lowerBound..<end.upperBound]) != archiveDoc else { return nil }
+        return existing.replacingCharacters(in: begin.lowerBound..<end.upperBound, with: archiveDoc)
+    }
+
     /// Guarantee that the archive root exists and drop a description for the user's Claude Code into
-    /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6), refreshing it when the copy on disk predates the
-    /// current layout.
+    /// it (`~/Acta/CLAUDE.md`, see `SPEC.md` §6), refreshing the generated block when the copy on
+    /// disk predates the current layout.
     ///
     /// Also called before opening the archive in Finder: until the first recording the root does not
     /// exist, and opening a missing path is a silent no-op — the button would look broken on a fresh
@@ -108,10 +134,8 @@ public struct MeetingStore {
     public func ensureArchiveRoot() throws {
         try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let claudeMD = archiveRoot.appendingPathComponent("CLAUDE.md")
-        // Rewrite unless the current marker is already there: absent = a fresh archive, stale/missing
-        // marker = written by a build whose layout has since changed.
         let existing = try? String(contentsOf: claudeMD, encoding: .utf8)
-        guard existing?.contains(Self.archiveDocMarker) != true else { return }
-        try? Self.archiveDoc.data(using: .utf8)?.write(to: claudeMD, options: .atomic)
+        guard let refreshed = Self.archiveDocRefreshed(from: existing) else { return }
+        try? refreshed.data(using: .utf8)?.write(to: claudeMD, options: .atomic)
     }
 }

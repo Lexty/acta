@@ -69,6 +69,29 @@ public enum Recovery {
             }
     }
 
+    /// How many segments the plan discarded even though they are big enough to hold audio.
+    ///
+    /// `recoveryPlan` drops such a segment silently (`action` → `nil`), so a caller that measures its
+    /// losses against the plan cannot see them at all — and deleting the segments then destroys the
+    /// only copy of that audio. A file this size whose header cannot be read is not "an empty
+    /// preamble", it is audio we failed to place: `data` sitting past `headerProbeBytes` is the
+    /// documented way this happens (see `headerProbeBytes`), and it costs whole segments at a time.
+    ///
+    /// The cutoff is the carve-out: below `minValidSegmentBytes` there is genuinely nothing inside —
+    /// `AVAssetWriter` creates the file before the first buffer — and those must keep dropping
+    /// quietly, or every recording would end up retaining its segments forever.
+    public static func discardedSegmentCount(fromFileNames names: [String],
+                                             sizeByFileName: [String: Int],
+                                             headerByFileName: [String: Data]) -> Int {
+        SegmentLayout.orderedSegments(fromFileNames: names)
+            .map(\.fileName)
+            .count { name in
+                let bytes = sizeByFileName[name] ?? 0
+                guard bytes >= minValidSegmentBytes else { return false }
+                return self.action(bytes: bytes, header: headerByFileName[name] ?? Data()) == nil
+            }
+    }
+
     /// What to do with a segment: include it as is, repair its header, or discard it (`nil`).
     ///
     /// The order is deliberate: first try to accept the file, then to rescue it, and only if there

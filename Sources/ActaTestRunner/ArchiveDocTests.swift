@@ -34,8 +34,12 @@ struct ArchiveDocTests {
     }
 
     /// The bug this whole change exists for: an archive left by an older build gets the current doc.
+    ///
+    /// An unfenced file predates the fences, so the current block is *appended* — the stale prose is
+    /// left in place rather than truncated, because at this point Acta cannot tell its own old output
+    /// from the user's own notes.
     @Test
-    func refreshesADocLeftByAnOlderBuild() throws {
+    func appendsTheCurrentDocToAFileLeftByAnOlderBuild() throws {
         try withTemporaryDirectory { directory in
             let stale = """
                 # Acta — meeting recordings archive
@@ -47,12 +51,61 @@ struct ArchiveDocTests {
 
             try MeetingStore(archiveRoot: directory).ensureArchiveRoot()
 
-            #expect(!doc(in: directory).contains("combined.wav"))
             #expect(doc(in: directory).contains("A mix is not produced"))
+            #expect(doc(in: directory).contains("<!-- acta-archive-doc: begin -->"))
         }
     }
 
-    /// The marker has to stop the rewrite, or every launch would clobber the file it just wrote.
+    /// A stale generated block is replaced in place, and only it.
+    @Test
+    func refreshesOnlyTheFencedBlock() throws {
+        try withTemporaryDirectory { directory in
+            let existing = """
+                # My notes
+
+                Transcribe with `mlx_whisper --model large-v3`.
+
+                <!-- acta-archive-doc: begin -->
+                Old and wrong: `combined.wav` is the mix.
+                <!-- acta-archive-doc: end -->
+
+                Trailing notes of mine.
+                """
+            let claudeMD = directory.appendingPathComponent("CLAUDE.md")
+            try existing.write(to: claudeMD, atomically: true, encoding: .utf8)
+
+            try MeetingStore(archiveRoot: directory).ensureArchiveRoot()
+
+            let contents = doc(in: directory)
+            #expect(!contents.contains("combined.wav"))
+            #expect(contents.contains("A mix is not produced"))
+            // The user's text, on both sides of the fence, survived.
+            #expect(contents.contains("mlx_whisper --model large-v3"))
+            #expect(contents.contains("Trailing notes of mine."))
+            #expect(contents.contains("# My notes"))
+        }
+    }
+
+    /// The whole point of the fences: a user's `CLAUDE.md` is never destroyed to fix Acta's block.
+    @Test
+    func neverDiscardsTextTheUserWrote() throws {
+        try withTemporaryDirectory { directory in
+            let mine = "# My own notes\n\nRun mlx_whisper over system.wav first.\n"
+            let claudeMD = directory.appendingPathComponent("CLAUDE.md")
+            try mine.write(to: claudeMD, atomically: true, encoding: .utf8)
+
+            let store = MeetingStore(archiveRoot: directory)
+            try store.ensureArchiveRoot()
+            try store.ensureArchiveRoot()
+
+            let contents = doc(in: directory)
+            #expect(contents.contains("Run mlx_whisper over system.wav first."))
+            // Appended once, not once per launch.
+            #expect(contents.components(separatedBy: "<!-- acta-archive-doc: begin -->").count == 2)
+        }
+    }
+
+    /// An up-to-date block stops the rewrite, or every launch would clobber the file it just wrote.
     @Test
     func leavesTheCurrentDocAlone() throws {
         try withTemporaryDirectory { directory in
