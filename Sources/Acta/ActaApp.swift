@@ -41,7 +41,7 @@ struct ActaApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
-            RecordingController.shared.onLaunch()
+            ControlAPI.shared.recover()
         }
     }
 
@@ -52,12 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// honestly finished and assembled.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard #available(macOS 15.0, *) else { return .terminateNow }
-        // AppKit calls this method on the main thread, which is where the controller lives.
+        // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
-            let controller = RecordingController.shared
-            guard controller.hasWorkInFlight else { return .terminateNow }
+            guard ControlAPI.shared.state.hasWorkInFlight else { return .terminateNow }
             Task {
-                await controller.stopAndWait()
+                await ControlAPI.shared.stopAndWait()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
@@ -85,22 +84,26 @@ struct UnsupportedContent: View {
 /// prominent display of self-diagnosis errors (Task 6).
 @available(macOS 15.0, *)
 struct MenuContent: View {
-    // The instance is shared with `AppDelegate` (which kicks off recovery at startup), hence
-    // `Observed` rather than `StateObject`: the view does not own its lifetime.
-    @ObservedObject private var controller = RecordingController.shared
+    // The view owns the adapter, so `@StateObject`: it subscribes to `ControlAPI.shared.states()` and
+    // renders the `ControlState` it delivers. No view here touches the recording controller or the
+    // pipeline — every read is on `state`, every action is a `ControlAPI` command.
+    @StateObject private var model = ControlViewModel()
     @State private var settingsExpanded = false
+
+    /// The current typed state — the single thing every view below reads.
+    private var state: ControlState { model.state }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
 
-            if !controller.recoveredBanner.isEmpty {
-                banner(controller.recoveredBanner, systemImage: "arrow.clockwise.circle.fill",
-                       tint: .orange) { controller.dismissRecoveredBanner() }
+            if let recovery = state.recoveryNotice {
+                banner(recovery.message, systemImage: "arrow.clockwise.circle.fill",
+                       tint: .orange) { model.dismissRecoveryNotice() }
             }
-            if !controller.errorMessage.isEmpty {
-                banner(controller.errorMessage, systemImage: "exclamationmark.triangle.fill",
+            if let errorText = errorBannerText {
+                banner(errorText, systemImage: "exclamationmark.triangle.fill",
                        tint: .red, dismiss: nil)
             }
 
@@ -115,7 +118,7 @@ struct MenuContent: View {
 
             Divider()
             HStack {
-                Button("Open Archive") { controller.openArchive() }
+                Button("Open Archive") { model.openArchive() }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }
@@ -123,10 +126,21 @@ struct MenuContent: View {
         }
         .padding(12)
         .frame(width: 300)
-        .onAppear { controller.onAppear() }
+        .onAppear { model.refresh() }
+        // Auto-cancelled when the menu closes, so repeated opens do not accumulate subscriptions.
+        .task { await model.subscribe() }
     }
 
     // MARK: - Sections
+
+    /// The single red banner: the controller has one `errorMessage`, so at most one of a lifecycle
+    /// failure or a notice is present — both carry it verbatim.
+    private var errorBannerText: String? {
+        state.lifecycleFailure?.displayMessage ?? state.notice?.displayMessage
+    }
+
+    /// Whether editing the title and settings is blocked — today's `isBusy`, restated over `operation`.
+    private var isBusy: Bool { state.operation != .idle }
 
     private var header: some View {
         HStack(spacing: 8) {
@@ -141,8 +155,9 @@ struct MenuContent: View {
                 }
             }
             Spacer()
-            if controller.isRecording {
-                Text(controller.elapsedString)
+            if case .recording(let elapsedSeconds) = state.operation {
+                // Ticks because each `elapsedSeconds` tick is a distinct `ControlState` the stream emits.
+                Text(MeetingInfo.formatDuration(seconds: elapsedSeconds))
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.red)
             }
@@ -152,40 +167,39 @@ struct MenuContent: View {
     private var titleField: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Title").font(.caption).foregroundStyle(.secondary)
-            TextField(controller.suggestedTitle.isEmpty ? "Meeting title"
-                                                        : controller.suggestedTitle,
-                      text: $controller.title)
+            TextField(state.suggestedTitle.isEmpty ? "Meeting title" : state.suggestedTitle,
+                      text: model.titleBinding)
                 .textFieldStyle(.roundedBorder)
-                .disabled(controller.isBusy)
+                .disabled(isBusy)
         }
     }
 
     private var controls: some View {
         HStack {
-            if controller.isStarting {
-                // `SCStream` is already capturing into segments here, while `phase` is still `.idle`
-                // (it flips only at the end of `performStart`, after the ~2 s self-check). Showing an
-                // enabled "Start Recording" would be a dead click on a live recording.
+            switch state.operation {
+            case .starting:
+                // Capture is already writing segments here, while the operation is `.starting`.
+                // Showing an enabled "Start Recording" would be a dead click on a live recording.
                 Button {} label: {
                     Label("Starting…", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }
                 .disabled(true)
-            } else if controller.isSaving {
+            case .saving:
                 Button {} label: {
                     Label("Saving…", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
                 .disabled(true)
-            } else if controller.isRecording {
+            case .recording:
                 Button {
-                    controller.stop()
+                    model.stop()
                 } label: {
                     Label("Stop", systemImage: "stop.fill").frame(maxWidth: .infinity)
                 }
                 .tint(.red)
-            } else {
+            case .idle:
                 Button {
-                    controller.start()
+                    model.start()
                 } label: {
                     Label("Start Recording", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }
@@ -199,10 +213,10 @@ struct MenuContent: View {
     private var recordingsList: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Recent Recordings").font(.caption).foregroundStyle(.secondary)
-            if controller.recordings.isEmpty {
+            if state.recordings.isEmpty {
                 Text("No recordings yet").font(.caption).foregroundStyle(.tertiary)
             } else {
-                ForEach(controller.recordings.prefix(5), id: \.directory) { recording in
+                ForEach(state.recordings.prefix(5), id: \.directory) { recording in
                     recordingRow(recording)
                 }
             }
@@ -223,7 +237,7 @@ struct MenuContent: View {
             }
             Spacer()
             Button {
-                controller.openInFinder(recording.directory)
+                model.openInFinder(recording.directory)
             } label: {
                 Image(systemName: "folder")
             }
@@ -239,24 +253,24 @@ struct MenuContent: View {
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Archive folder").font(.caption2).foregroundStyle(.secondary)
-                    TextField("~/Acta", text: $controller.settings.archivePath)
+                    // The bindings merge each field into the authoritative settings and save on change,
+                    // so no `.onChange` is needed here.
+                    TextField("~/Acta", text: model.archivePathBinding)
                         .textFieldStyle(.roundedBorder)
                 }
 
-                Stepper(value: $controller.settings.segmentSeconds,
+                Stepper(value: model.segmentSecondsBinding,
                         in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
                         step: 5) {
-                    Text("Segment length: \(controller.settings.segmentSeconds) s").font(.caption)
+                    Text("Segment length: \(state.settings.segmentSeconds) s").font(.caption)
                 }
 
-                Toggle("Delete segments after assembly",
-                       isOn: $controller.settings.deleteSegmentsAfterAssembly)
+                Toggle("Delete segments after assembly", isOn: model.deleteSegmentsBinding)
                     .toggleStyle(.checkbox)
                     .font(.caption)
             }
             .padding(.top, 6)
-            .disabled(controller.isBusy)
-            .onChange(of: controller.settings) { controller.saveSettings() }
+            .disabled(isBusy)
         } label: {
             Label("Settings", systemImage: "gearshape").font(.caption)
         }
@@ -281,30 +295,33 @@ struct MenuContent: View {
 
     // MARK: - Status presentation
 
+    /// The status header is derived from `ControlState`, reproducing today's phase-driven header: a
+    /// lifecycle failure reads as "Error" (a fatal stall shows it while the operation is still
+    /// `.saving`, exactly as `phase == .error` did); otherwise the operation drives it, and
+    /// `.starting` keeps the idle header just as the controller kept `phase == .idle` during a start.
     private var statusIcon: String {
-        switch controller.phase {
-        case .idle: return "waveform"
+        if state.lifecycleFailure != nil { return "exclamationmark.triangle.fill" }
+        switch state.operation {
+        case .idle, .starting: return "waveform"
         case .recording: return "record.circle.fill"
         case .saving: return "square.and.arrow.down"
-        case .error: return "exclamationmark.triangle.fill"
         }
     }
 
     private var statusColor: Color {
-        switch controller.phase {
-        case .idle: return .secondary
+        if state.lifecycleFailure != nil { return .red }
+        switch state.operation {
+        case .idle, .starting, .saving: return .secondary
         case .recording: return .red
-        case .saving: return .secondary
-        case .error: return .red
         }
     }
 
     private var statusText: String {
-        switch controller.phase {
-        case .idle: return "Ready to record"
+        if state.lifecycleFailure != nil { return "Error" }
+        switch state.operation {
+        case .idle, .starting: return "Ready to record"
         case .recording: return "Recording"
         case .saving: return "Saving…"
-        case .error: return "Error"
         }
     }
 

@@ -65,6 +65,50 @@ func normalizeLeavesEverythingButTheSegmentLengthAlone() {
     #expect(!s.deleteSegmentsAfterAssembly)
 }
 
+// MARK: - Merging one field (the settings anti-clobber primitive)
+
+@Test
+func mergingReplacesOnlyTheNamedField() {
+    let base = RecordingSettings(archivePath: "~/Meetings", segmentSeconds: 30,
+                                 deleteSegmentsAfterAssembly: true)
+
+    let path = base.merging(.archivePath("~/Other"))
+    #expect(path.archivePath == "~/Other")
+    #expect(path.segmentSeconds == 30)
+    #expect(path.deleteSegmentsAfterAssembly)
+
+    let segment = base.merging(.segmentSeconds(45))
+    #expect(segment.segmentSeconds == 45)
+    #expect(segment.archivePath == "~/Meetings")
+    #expect(segment.deleteSegmentsAfterAssembly)
+
+    let toggle = base.merging(.deleteSegmentsAfterAssembly(false))
+    #expect(!toggle.deleteSegmentsAfterAssembly)
+    #expect(toggle.archivePath == "~/Meetings")
+    #expect(toggle.segmentSeconds == 30)
+}
+
+/// The reason `merging(_:)` exists: a setter must fold its one field into the authoritative current
+/// settings, not into a stale snapshot, so a sibling edit not yet delivered is not clobbered. This
+/// models the hazard — a recent path edit followed by a segment-length edit against the authoritative
+/// value — and asserts both survive.
+@Test
+func mergingSequentialFieldEditsDoNotClobberEachOther() {
+    var authoritative = RecordingSettings.default
+    authoritative = authoritative.merging(.archivePath("~/Meetings"))
+    authoritative = authoritative.merging(.segmentSeconds(45))
+    #expect(authoritative.archivePath == "~/Meetings")
+    #expect(authoritative.segmentSeconds == 45)
+    #expect(authoritative.deleteSegmentsAfterAssembly)
+}
+
+@Test
+func mergingLeavesTheBaseUnchanged() {
+    let base = RecordingSettings(archivePath: "~/Meetings", segmentSeconds: 30)
+    _ = base.merging(.segmentSeconds(45))
+    #expect(base.segmentSeconds == 30)
+}
+
 // MARK: - Resolving the archive path
 
 @Test

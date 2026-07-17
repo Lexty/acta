@@ -49,6 +49,29 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         min(maxSegmentSeconds, max(minSegmentSeconds, value))
     }
 
+    /// One editable settings field, carrying its new value. The UI edits exactly one field per action,
+    /// and `merging(_:)` folds that field into a base value.
+    public enum Field: Equatable, Sendable {
+        case archivePath(String)
+        case segmentSeconds(Int)
+        case deleteSegmentsAfterAssembly(Bool)
+    }
+
+    /// A copy of `self` with one field replaced — the anti-clobber primitive for the two-way settings
+    /// controls. Each setter merges into the **authoritative** current settings rather than a lagging
+    /// UI snapshot, so a recent sibling-field edit not yet reflected in the snapshot is preserved
+    /// instead of overwritten. Pure and total, so the clobber logic is covered by a unit test rather
+    /// than living only in a review.
+    public func merging(_ field: Field) -> RecordingSettings {
+        var copy = self
+        switch field {
+        case .archivePath(let value): copy.archivePath = value
+        case .segmentSeconds(let value): copy.segmentSeconds = value
+        case .deleteSegmentsAfterAssembly(let value): copy.deleteSegmentsAfterAssembly = value
+        }
+        return copy
+    }
+
     /// A normalised copy: the segment length within range.
     public func normalized() -> RecordingSettings {
         var s = self
