@@ -22,13 +22,22 @@ public enum RecordingID {
     }
 
     /// The inverse of `make(directoryName:)`: recover the directory name from a wire id, or `nil` if the
-    /// id does not carry the current prefix or does not base64url-decode to valid UTF-8. A `nil` here is
-    /// the caller's cue to answer `unknown_recording` — never to trap.
+    /// id does not carry the current prefix, does not base64url-decode to valid UTF-8, or is not the
+    /// **canonical** encoding of the name it decodes to. A `nil` here is the caller's cue to answer
+    /// `unknown_recording` — never to trap.
+    ///
+    /// ⚠️ **The canonicality re-check is what makes the bijection true rather than merely claimed.**
+    /// `Data(base64Encoded:)` accepts encodings whose unused trailing bits are non-zero, so `v1:QQ`,
+    /// `v1:QR`, `v1:QV` and `v1:Qf` all decode to `"A"` — four ids for one directory. Re-encoding through
+    /// the one encoder and demanding the id back collapses those aliases to `nil`, and it does so by
+    /// *reusing* `make`, so the two halves still cannot drift.
     public static func directoryName(fromID id: String) -> String? {
         guard id.hasPrefix(prefix) else { return nil }
         let body = String(id.dropFirst(prefix.count))
-        guard let data = base64URLDecode(body) else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let data = base64URLDecode(body),
+              let name = String(data: data, encoding: .utf8),
+              make(directoryName: name) == id else { return nil }
+        return name
     }
 
     // MARK: - base64url (RFC 4648 §5), no padding

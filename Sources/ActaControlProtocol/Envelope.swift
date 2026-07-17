@@ -78,14 +78,21 @@ extension WireResponse: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(Int.self, forKey: .version)
         id = try c.decode(String.self, forKey: .id)
-        if let result = try c.decodeIfPresent(CommandResult.self, forKey: .result) {
+        // "Never both" is enforced, not just stated. Checking `result` first and returning on the first
+        // hit would decode a `{result, error}` response as a success and drop the error on the floor —
+        // rendering a server's failure as `ok`. This encoder cannot emit both, so only a broken or
+        // hostile peer produces one; that is exactly the case worth refusing rather than reinterpreting.
+        let result = try c.decodeIfPresent(CommandResult.self, forKey: .result)
+        let error = try c.decodeIfPresent(WireError.self, forKey: .error)
+        switch (result, error) {
+        case (let result?, nil):
             payload = .result(result)
-        } else if let error = try c.decodeIfPresent(WireError.self, forKey: .error) {
+        case (nil, let error?):
             payload = .error(error)
-        } else {
+        default:
             throw DecodingError.dataCorruptedError(
                 forKey: .result, in: c,
-                debugDescription: "response carries neither a result nor an error")
+                debugDescription: "response must carry exactly one of result or error")
         }
     }
 

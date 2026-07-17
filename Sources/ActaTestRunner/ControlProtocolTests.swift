@@ -54,6 +54,19 @@ func recordingIDRejectsAMalformedOrWrongPrefixID() {
     #expect(RecordingID.directoryName(fromID: "v1:!!!!") == nil)
 }
 
+// The bijection the type's doc promises is not free: `Data(base64Encoded:)` ignores the unused trailing
+// bits, so every id below decodes to "A" and only the first is the one `make` mints. A round-trip test
+// cannot see this — it only ever feeds back ids `make` produced — so the aliases are named explicitly.
+@Test(arguments: ["v1:QR", "v1:QV", "v1:Qf"])
+func recordingIDRejectsANonCanonicalEncodingOfANameItWouldOtherwiseResolve(alias: String) {
+    // The canonical id for "A" resolves, which is what makes the aliases' rejection meaningful rather
+    // than the decoder simply being broken for short names.
+    #expect(RecordingID.directoryName(fromID: "v1:QQ") == "A")
+    #expect(RecordingID.make(directoryName: "A") == "v1:QQ")
+    // ...and the alias, which decodes to "A" byte-for-byte, is refused rather than aliasing onto it.
+    #expect(RecordingID.directoryName(fromID: alias) == nil)
+}
+
 // MARK: - Command golden fixtures + custom decoding
 
 @Test
@@ -295,6 +308,19 @@ func anUndecodableCommandReasonDoesNotLeakDecoderInternals() {
 func aResponseCarryingNeitherAResultNorAnErrorIsRejected() {
     // The shape an older client meets when a server is broken — exactly when a clear error matters.
     let data = Data(#"{"id":"1","version":1}"#.utf8)
+    #expect(throws: (any Error).self) {
+        try ControlProtocolCodec.decode(WireResponse.self, from: data)
+    }
+}
+
+// The twin of the case above, and the one that actually bites: "never both" was prose the decoder did not
+// enforce. Checking `result` first and returning on the first hit renders a server's error as `ok` — a
+// client told its command succeeded when the same payload carried the failure.
+@Test
+func aResponseCarryingBothAResultAndAnErrorIsRejectedRatherThanReadAsSuccess() {
+    let data = Data(#"""
+    {"id":"1","version":1,"result":{"type":"ok"},"error":{"code":"internal","message":"boom"}}
+    """#.utf8)
     #expect(throws: (any Error).self) {
         try ControlProtocolCodec.decode(WireResponse.self, from: data)
     }
