@@ -67,10 +67,21 @@ public final class ControlDispatcher: ControlRequestHandling {
     /// ⚠️ **Why it is cleared on completion.** Concurrent `stopAndWait`s for the *same* stop must share
     /// one task (one underlying stop, one answer). But a *later* recording's `stopAndWait` must not
     /// reuse a completed task and return instantly having stopped nothing — so the task clears itself
-    /// as its final act, inside its own body, before any awaiter resumes. A stale hit is therefore not
-    /// merely unlikely; it is unreachable — so the body clears unconditionally, with no id to compare
-    /// against. A guard there could only ever be true, and a guard that cannot fail reads as though the
-    /// race it names were possible.
+    /// as its final act, inside its own body, before any awaiter resumes (`awaitAbandonably` waits on
+    /// `task.value`, which completes only after the assignment).
+    ///
+    /// ⚠️ **The window that leaves open, stated rather than denied.** `await service.stopAndWait()` is a
+    /// main-actor suspension point: other main-actor jobs run between the callee returning and
+    /// `finalisation = nil` executing. In that gap the slot is non-nil while its stop is already
+    /// finished, so a `stopAndWait` arriving there joins a spent task and returns having stopped
+    /// nothing. It only *matters* if a new recording started in that same gap — otherwise the
+    /// `hasWorkInFlight` guard turns it away and the answer is right anyway. An identity check here
+    /// would not close it: a joiner in that window finds the slot occupied by the very task that put it
+    /// there, so any comparison passes. Closing it properly means re-checking `hasWorkInFlight` after
+    /// the join and minting a fresh stop — which changes what `stopAndWait` promises (it would then
+    /// stop a recording that began after the request arrived) and belongs in a plan, not a comment.
+    /// Accepted as-is: it needs a stop to finish, a start to land, and a `stopAndWait` to arrive, all
+    /// inside one scheduling gap.
     private var finalisation: Task<Void, Never>?
 
     /// - Parameter service: the recorder. Production passes `ControlAPI.shared` — the menu's own
@@ -192,7 +203,7 @@ public final class ControlDispatcher: ControlRequestHandling {
             // whose ordering against the awaiters would be a race. The task cannot begin before this
             // synchronous region suspends, so `finalisation` is assigned by the time the body reads it —
             // and since a second task can only be minted once this one has cleared the slot, the task
-            // running here is always the one in it.
+            // running here is always the one in it. See `finalisation` for the one window this leaves.
             let created = Task { @MainActor [weak self, service] in
                 await service.stopAndWait()
                 self?.finalisation = nil

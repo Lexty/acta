@@ -305,16 +305,26 @@ func aResponseCarryingNeitherAResultNorAnErrorIsRejected() {
 @Test
 func controlProtocolSourcesImportOnlyFoundation() throws {
     // Structural isolation is enforced by Package.swift (no package dependency); this guards the other
-    // half — no AppKit/SwiftUI/runtime imports, which compile even without a package dep.
+    // half — an `import AppKit` compiles without any package dep at all.
+    //
+    // ⚠️ An **allowlist**, deliberately: a denylist of known-bad modules passes `import Darwin`, and the
+    // framer is exactly where someone reaches for it (its `EINTR` note is out of scope for that reason).
+    // Read `^import` lines rather than substrings, so a doc comment naming AppKit does not fail a build.
     let dir = "Sources/ActaControlProtocol"
     let files = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasSuffix(".swift") }
     #expect(!files.isEmpty)
-    let forbidden = ["import AppKit", "import SwiftUI", "import ActaKit", "import ActaRuntime",
-                     "import ScreenCaptureKit", "import Combine"]
     for file in files {
         let text = try String(contentsOfFile: "\(dir)/\(file)", encoding: .utf8)
-        for token in forbidden {
-            #expect(!text.contains(token), "\(file) must not contain '\(token)'")
+        let imported = text.split(separator: "\n").compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("import ") else { return nil }
+            // `import struct Foundation.Data` — drop the optional kind keyword, keep the module.
+            let rest = trimmed.dropFirst("import ".count).trimmingCharacters(in: .whitespaces)
+            let kinds = ["struct", "class", "enum", "protocol", "typealias", "func", "var", "let"]
+            let words = rest.split(separator: " ").map(String.init)
+            let module = kinds.contains(words.first ?? "") ? words.dropFirst().first ?? "" : words.first ?? ""
+            return module.split(separator: ".").first.map(String.init)
         }
+        #expect(Set(imported) == ["Foundation"], "\(file) must import Foundation and nothing else, got \(imported)")
     }
 }
