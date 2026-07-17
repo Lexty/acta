@@ -348,6 +348,15 @@ func aResponseCarryingBothAResultAndAnErrorIsRejectedRatherThanReadAsSuccess() {
     }
 }
 
+// The exact-version rule (see `ProtocolVersion`) holds on responses/events too, not just requests: both check `version` before the payload.
+@Test
+func aNonCurrentVersionIsRejectedOnBothResponseAndEvent() {
+    let response = Data(#"{"id":"1","version":2,"result":{"type":"ok"}}"#.utf8)
+    let event = Data(#"{"id":"sub","version":2,"event":{}}"#.utf8)
+    #expect(throws: (any Error).self) { try ControlProtocolCodec.decode(WireResponse.self, from: response) }
+    #expect(throws: (any Error).self) { try ControlProtocolCodec.decode(WireEvent.self, from: event) }
+}
+
 // MARK: - The dependency confinement
 
 @Test

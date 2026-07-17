@@ -17,7 +17,10 @@ import Foundation
 /// `CommandResult`'s `type`, `WireError`'s `code`) is **response-direction** and decodes with a plain
 /// `decode`, which **throws** on a discriminator this build does not know. That is tolerable only
 /// because `version` is matched exactly: a peer that could send a new `status` value is by definition
-/// not v1, and is refused before any of it is decoded. It is *not* a licence to add a value to one of
+/// not v1, and is refused before any of it is decoded. That match is enforced on **both** directions,
+/// not only requests: `decodeRequest` refuses a non-current request (preserving its id for the
+/// `unsupported_version` reply), and `WireResponse`/`WireEvent` reject a non-current `version` in their
+/// decoders before touching the payload — the direction a future `actactl` reads. It is *not* a licence to add a value to one of
 /// those enums within v1 — doing so would make the whole enclosing response undecodable to an older
 /// `actactl`, not just the one field. `WireError.unsupportedValue` is **reserved for the first
 /// request-direction enum** and has no producer today; do not read its presence as a claim that
@@ -25,6 +28,21 @@ import Foundation
 public enum ProtocolVersion {
     public static let current = 1
     public static let supported = [1]
+
+    /// Decode a `version` field and refuse anything but `current`, throwing before the rest of the
+    /// envelope is read. Used by the response and event decoders so the exact-version rule holds on the
+    /// direction a client reads, mirroring `decodeRequest` on the server side.
+    static func decodeCurrent<K: CodingKey>(
+        from container: KeyedDecodingContainer<K>, forKey key: K
+    ) throws -> Int {
+        let version = try container.decode(Int.self, forKey: key)
+        guard version == current else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key, in: container,
+                debugDescription: "unsupported protocol version \(version); this build speaks \(current)")
+        }
+        return version
+    }
 }
 
 /// A request envelope: `{version, id, command}`.
@@ -76,7 +94,7 @@ extension WireResponse: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decode(Int.self, forKey: .version)
+        version = try ProtocolVersion.decodeCurrent(from: c, forKey: .version)
         id = try c.decode(String.self, forKey: .id)
         // "Never both" is enforced, not just stated. Checking `result` first and returning on the first
         // hit would decode a `{result, error}` response as a success and drop the error on the floor —
@@ -109,7 +127,7 @@ extension WireResponse: Codable {
 
 /// One `watch` event, wrapped in its own envelope: `{version, id, event}`. The `id` echoes the
 /// originating `watch` request's id, so a client can demultiplex events per subscription.
-public struct WireEvent: Equatable, Sendable, Codable {
+public struct WireEvent: Equatable, Sendable {
     public var version: Int
     public var id: String
     public var event: WatchEvent
@@ -118,6 +136,31 @@ public struct WireEvent: Equatable, Sendable, Codable {
         self.version = version
         self.id = id
         self.event = event
+    }
+}
+
+extension WireEvent: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case id
+        case event
+    }
+
+    // Not synthesized: the exact-version rule (see `ProtocolVersion`) has to hold on the event
+    // direction too, so a v2 event is refused before any of its payload — which may carry an enum
+    // value this build cannot know — is decoded.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try ProtocolVersion.decodeCurrent(from: c, forKey: .version)
+        id = try c.decode(String.self, forKey: .id)
+        event = try c.decode(WatchEvent.self, forKey: .event)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(id, forKey: .id)
+        try c.encode(event, forKey: .event)
     }
 }
 
