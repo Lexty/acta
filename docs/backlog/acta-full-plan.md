@@ -469,6 +469,24 @@ the listed defects as part of promoting it.
 
 ---
 
+## Socket transport — split into three plans (2026-07-17)
+
+External review found the single socket/CLI plan too large and security-critical (it could land green while letting one Acta instance sever another's live socket). Split, per the convergence discipline: **Plan 1 mounted** — `docs/plans/2026-07-17-control-protocol-and-dispatcher.md`, the pure wire protocol + `@MainActor` dispatcher, all in-process (Codex-approved over three rounds). Two plans remain, each to be hardened on its own:
+
+**Plan 2 — the POSIX Unix-socket transport hosted in the app**, depending on the `ControlRequestHandling` abstraction Plan 1 exposes (not the singleton). Security-critical specifics Codex flagged, to bake in:
+- `AF_UNIX`/`SOCK_STREAM` only; no TCP/Bonjour/network fallback; no token (file perms are the boundary).
+- Path `~/Library/Application Support/<bundle-id>/control.sock`; parent dir `0700` (open with `O_DIRECTORY|O_NOFOLLOW`, `fstat`-verify real dir owned by current UID); socket `0600` `chmod`ed after bind.
+- ⚠️ A **`flock`-held initialization lock** over the whole probe/stale-unlink/bind/chmod/listen sequence, re-validating under the lock — else two instances racing `bind`→`connect`-probe→`unlink` can sever each other's **live** socket. Unlink only a path that is a **socket**, owned by the current UID, whose probe `connect` failed with **`ECONNREFUSED`** specifically (never on timeout/`EACCES`/exhaustion/`EINPROGRESS`/unknown); never a regular file or symlink; record dev/inode after bind and on shutdown unlink only if still that socket.
+- ⚠️ **Non-blocking descriptors via `kqueue`/Dispatch I/O** — a blocked POSIX syscall on a cooperative Swift task starves the executor even off the main actor; cancellation must `close()`/`shutdown()` the descriptor (cancelling a `Task` does not interrupt a blocking syscall), and shutdown tests must prove blocked `accept`/`read`/`write` exit.
+- Darwin **`SO_NOSIGPIPE`** (not the Linux `MSG_NOSIGNAL`); test a peer disconnect mid-write.
+- Correct `sockaddr_un`: zero-init, set `sun_len`, reject a path whose UTF-8 bytes + NUL exceed `sun_path`, pass the right address length (not `MemoryLayout.size`), safe pointer rebinding; test a non-ASCII path component. `EINTR` retry lives here (the pure framer in Plan 1 deliberately excludes it).
+- Per-connection read/idle/write deadlines and a connection cap (~16); the **server lifecycle owner in `ActaRuntime`** (SwiftPM cannot import the `Acta` executable where `AppDelegate` lives), stopped on **every** termination route — note there is no `applicationWillTerminate` today, and `applicationShouldTerminate` has a `.terminateNow` path; on quit do not wait for clients (recording finalisation takes priority).
+- The privacy framing is accurate-only: the transport drives `ControlAPI.shared` (no hidden second pipeline); state is visible in the menu **when opened** — there is no persistent menu-bar recording indicator, so do not claim one.
+
+**Plan 3 — the `actactl` CLI**: CLI logic in a library `ActaCLI` (unit-tested in-process) + a thin `actactl` entry point; ⚠️ `Scripts/test.sh` must **explicitly build/locate `actactl`** and pass its path for the one real subprocess test (never `swift run actactl`, which nests a build); **mandatory `--stable`/`--dev`** (no default that could address the wrong running app; no dev↔stable fallback); **no launch-on-demand** and no `NSWorkspace`/`open`/LaunchServices/`NSRunningApplication`/activation in discovery or retry (an absent socket / `ENOENT` is a hard "not running", `start` included); stable per-condition exit codes; a bundled-app + real-capture check stays manual (CI never starts real capture).
+
+---
+
 ## Parked: external transport for the control API (agterm-style automation)
 
 Requested by the user while re-planning: make Acta drivable by agents and automation, the way
