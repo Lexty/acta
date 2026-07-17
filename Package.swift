@@ -100,9 +100,12 @@ let package = Package(
             name: "ActaControlProtocol",
             path: "Sources/ActaControlProtocol"
         ),
+        // Depends on ActaControlProtocol, never the other way round: the projection
+        // (ControlState → WireControlState) and the dispatcher need both sides visible, while the wire
+        // target must stay unable to see the runtime at all.
         .target(
             name: "ActaRuntime",
-            dependencies: ["ActaKit"],
+            dependencies: ["ActaKit", "ActaControlProtocol"],
             path: "Sources/ActaRuntime"
         ),
         .executableTarget(
