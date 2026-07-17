@@ -112,7 +112,11 @@ Consequences to keep in mind:
   target**: while this code lived in `Sources/Acta`, nothing above pure logic could be reached from a
   test at all. A library target may import AppKit/SwiftUI, so the AppKit-touching types live here too.
 - `Sources/Acta/` — the executable and nothing else: `ActaApp.swift` (`@main`, the SwiftUI menu bar
-  and its views). New non-UI code belongs in `ActaRuntime`, not here.
+  and its views) and `ControlViewModel.swift` (the UI-owned `ControlAPI` adapter — `@MainActor`
+  `ObservableObject`, owned by `MenuContent` as `@StateObject`; seeds its `state` synchronously from
+  `ControlAPI.shared.state` so the first frame is not blank, subscribes to `states()` from the view's
+  `.task {}`, and keeps an optimistic local title reconciled against the pending write). New non-UI
+  code belongs in `ActaRuntime`, not here.
 - `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via
   `bash Scripts/test.sh`).
 - `Tests/ActaTests/` — **a stub only**, so `swift test` compiles. Never add real tests here: under
@@ -215,9 +219,11 @@ reached the log while the other three reached the user.
   still writing, `start()` clears both banners, `.error` is not a latch. ⚠️ Those assertions **are the
   contract, not bugs to fix** — they exist to catch the next refactor, and the first one has landed:
   the **`ControlAPI` façade** (`ControlAPI`/`ControlState`) wraps this controller *unchanged*, which is
-  what makes those frozen assertions the thing the façade is checked against. Still parked in
-  `docs/backlog/` is the **UI migration** — `ActaApp.swift` talks to `RecordingController.shared`
-  directly to this day, so the façade currently has no production caller. Assert only through the
+  what makes those frozen assertions the thing the façade is checked against. The **UI migration has
+  landed**: `ActaApp.swift`/`MenuContent` now read `ControlState` and issue commands through
+  `ControlAPI.shared` (via the UI-owned `ControlViewModel` adapter), so the SwiftUI menu is the
+  façade's first production client. What stays parked in `docs/backlog/` is the socket/CLI transport —
+  a *second* client of the same boundary. Assert only through the
   public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
   computed properties with no publisher, so `$phase` is subscribed while the flags are **sampled**
@@ -242,10 +248,10 @@ reached the log while the other three reached the user.
   harness depends on, runs no teardown at all). Nothing needs the persistence — settings are read back
   by the process that wrote them, and the harness's two processes agree on the archive through
   `--root`.
-- **`ControlAPI.shared` wraps `RecordingController.shared` — never a second controller.** The menu
-  reads the controller directly, so a façade over its own instance would record into the archive with
-  the menu showing nothing: an API-initiated recording no one on the machine can see, which the privacy
-  rule forbids. **No test can guard this** — `.shared` reaches for the real `~/Acta`, real TCC and real
+- **`ControlAPI.shared` wraps `RecordingController.shared` — never a second controller.** The menu now
+  observes `ControlAPI.shared` (which wraps that one controller), so a façade over any *other*
+  controller instance would record into the archive with the menu showing nothing: an API-initiated
+  recording no one on the machine can see, which the privacy rule forbids. **No test can guard this** — `.shared` reaches for the real `~/Acta`, real TCC and real
   time, so every test injects its own controller and none may touch `.shared`. It is a review-only
   invariant.
 - **Two confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
