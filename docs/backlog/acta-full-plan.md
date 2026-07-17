@@ -139,7 +139,7 @@ for multiple clients) is created by the **socket transport**, not the harness. S
 first (`docs/plans/2026-07-16-crash-recovery-harness.md`), and `ControlAPI` now lands **just before** the
 socket/CLI transport.
 
-**Promoted 2026-07-16 (façade only):** `docs/plans/2026-07-16-controlapi-facade.md` builds and tests the `ControlAPI` façade over an unchanged `RecordingController` (Codex-approved over three rounds; a pure `ControlState(from:)` mapping tested exhaustively, then the observing façade). **Still parked:** migrating the SwiftUI menu to consume it (next), then the socket/CLI transport. The design notes below were folded into that plan.
+**Promoted 2026-07-17 (UI migration):** `docs/plans/2026-07-17-ui-migration-to-controlapi.md` migrates the SwiftUI menu + `AppDelegate` to consume `ControlAPI.shared` via a `@StateObject` adapter (Codex-approved over three rounds; the SwiftUI glue is verified by review + a hazard-exercising morning check since the executable target is not test-importable, with the pure settings-merge unit-tested). **Still parked, and the last agent-interface step:** the socket/CLI transport. **Promoted 2026-07-16 (façade only):** `docs/plans/2026-07-16-controlapi-facade.md` builds and tests the `ControlAPI` façade over an unchanged `RecordingController` (Codex-approved over three rounds; a pure `ControlState(from:)` mapping tested exhaustively, then the observing façade). **Still parked:** migrating the SwiftUI menu to consume it (next), then the socket/CLI transport. The design notes below were folded into that plan.
 
 **Design decisions for `ControlAPI` when its turn comes (from the same Codex consult):**
 - **Wrap, do not replace.** `ControlAPI` is a new `@MainActor` façade around an **unchanged**
