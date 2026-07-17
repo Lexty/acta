@@ -41,20 +41,33 @@ public protocol ControlRequestHandling: AnyObject {
 /// - **`status`/`list` never call `refresh()`.** A read that mutates is a read a client cannot poll.
 /// - **`openInFinder` resolves an opaque id, never a path.**
 ///
-/// ⚠️ **`settingsSet` is the one command that does take a caller-supplied path, and Plan 2 must decide
-/// what that means.** `ControlRecordingLookup`'s rule — "the only thing a client may name is an id it
-/// was given" — holds for `openInFinder` and is silent here: `archive_path` is written through verbatim,
-/// and `RecordingSettings.normalized()` clamps only `segmentSeconds`. So `settingsSet` + `refresh` +
-/// `list` enumerates any readable directory, and a later `start` records into it. That is exactly the
-/// authority the *menu* already has, which is why it is not a defect today — in-process, the only client
-/// is the UI, and a human is holding it. It stops being equivalent the moment a socket makes it a
-/// one-line request from any process on the machine. The choice (constrain the path, drop it from the
-/// wire schema, or accept it and say so) belongs with the transport's permissioning, not here — but it
-/// must be a **choice**, not an oversight, so it is written down at the point that would inherit it.
+/// ⚠️ **`settingsSet` is the one command that takes a caller-supplied path, and Plan 2 has decided what
+/// that means: `Confinement`.** `ControlRecordingLookup`'s rule — "the only thing a client may name is
+/// an id it was given" — holds for `openInFinder`; `archive_path`, left alone, is written through
+/// verbatim, so `settingsSet` + `refresh` + `list` would enumerate any readable directory and a later
+/// `start` would record into it. That is exactly the authority the *menu* already has — fine in-process,
+/// where the only client is the UI and a human is holding it — and it stops being equivalent the moment
+/// a socket makes it a one-line request from any process. So the dispatcher is **configured** at
+/// construction: a `.trusted` (in-process) dispatcher is unrestricted, while a `.socket` dispatcher
+/// **ignores the wire `archive_path` and substitutes the current authoritative one** on `settingsSet`
+/// (ignore-and-substitute, not a path compare — race-free and free of spelling ambiguity), and rejects
+/// any over-long or control-character-bearing wire string (`ControlStringPolicy`). Because the socket
+/// can never make the in-memory `archivePath` anything but the current one, `settingsSave` persisting
+/// the current settings can never persist a smuggled path — no separate guard is needed there.
 @available(macOS 15.0, *)
 @MainActor
 public final class ControlDispatcher: ControlRequestHandling {
+    /// How much authority this dispatcher grants its client — the whole of Plan 2's settings policy.
+    public enum Confinement: Sendable {
+        /// The in-process UI. Unrestricted: a human relocating their own archive is fine.
+        case trusted
+        /// A socket client. Cannot relocate the archive; every caller-supplied wire string is bounded
+        /// and validated.
+        case socket
+    }
+
     private let service: any ControlServing
+    private let confinement: Confinement
 
     /// The finalisation currently in flight, if any — the whole of `stopAndWait`'s ownership model.
     ///
@@ -84,10 +97,14 @@ public final class ControlDispatcher: ControlRequestHandling {
     /// inside one scheduling gap.
     private var finalisation: Task<Void, Never>?
 
-    /// - Parameter service: the recorder. Production passes `ControlAPI.shared` — the menu's own
-    ///   controller, per the privacy invariant. A test passes a fake.
-    public init(service: any ControlServing) {
+    /// - Parameters:
+    ///   - service: the recorder. Production passes `ControlAPI.shared` — the menu's own controller,
+    ///     per the privacy invariant. A test passes a fake.
+    ///   - confinement: `.trusted` for the in-process UI (the default), `.socket` for a dispatcher a
+    ///     socket transport hands untrusted requests.
+    public init(service: any ControlServing, confinement: Confinement = .trusted) {
         self.service = service
+        self.confinement = confinement
     }
 
     // MARK: - Dispatch
@@ -96,6 +113,12 @@ public final class ControlDispatcher: ControlRequestHandling {
     // going quietly unanswered.
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     public func handle(_ command: Command) async -> ControlResponse {
+        // A `.socket` dispatcher validates every caller-supplied string before the command is acted on,
+        // so an over-long or control-character title can never reach the recorder's state. `.trusted`
+        // (the UI) skips this: it never drives an adversarial string.
+        if let rejection = wireStringRejection(in: command) {
+            return .error(rejection)
+        }
         switch command {
         case .status:
             // A snapshot, and nothing else — deliberately no `refresh()`.
@@ -152,7 +175,7 @@ public final class ControlDispatcher: ControlRequestHandling {
             return .result(.settings(WireSettings(service.settings)))
 
         case .settingsSet(let wire):
-            service.settings = RecordingSettings(wire)
+            service.settings = appliedSettings(from: wire)
             return .result(.ok)
 
         case .settingsSave:
@@ -209,6 +232,44 @@ public final class ControlDispatcher: ControlRequestHandling {
     }
 
     private var wireState: WireControlState { WireControlState(state: service.state) }
+
+    // MARK: - Confinement policy
+
+    /// The settings a `settingsSet` actually applies. A `.socket` dispatcher **ignores** the wire
+    /// `archive_path` and substitutes the current authoritative one, read on this same main-actor turn;
+    /// only `segmentSeconds`/`deleteSegmentsAfterAssembly` come from the wire. A `.trusted` dispatcher
+    /// takes the wire settings whole, exactly as the menu's bindings do.
+    private func appliedSettings(from wire: WireSettings) -> RecordingSettings {
+        var applied = RecordingSettings(wire)
+        if confinement == .socket {
+            applied.archivePath = service.settings.archivePath
+        }
+        return applied
+    }
+
+    /// For a `.socket` dispatcher, the first caller-supplied string in `command` that
+    /// `ControlStringPolicy` rejects, as a `bad_request` naming the offending field; `nil` when every
+    /// string is acceptable or the dispatcher is `.trusted`.
+    private func wireStringRejection(in command: Command) -> WireError? {
+        guard confinement == .socket else { return nil }
+        func check(_ field: String, _ value: String?) -> WireError? {
+            guard let value, let rejection = ControlStringPolicy.validate(value) else { return nil }
+            return .badRequest(reason: Self.reason(field: field, rejection))
+        }
+        switch command {
+        case .start(let title): return check("title", title)
+        case .titleSet(let title): return check("title", title)
+        case .openInFinder(let id): return check("id", id)
+        default: return nil
+        }
+    }
+
+    private static func reason(field: String, _ rejection: ControlStringPolicy.Rejection) -> String {
+        switch rejection {
+        case .tooLong(let max): return "\(field) exceeds \(max) characters"
+        case .controlCharacter: return "\(field) contains a control character"
+        }
+    }
 
     // MARK: - stopAndWait
 
