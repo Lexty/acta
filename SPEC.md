@@ -66,13 +66,25 @@ everything builds without full Xcode.
 
 ```
 acta/
-  Package.swift                     # Acta executable + ActaKit + ActaRuntime + ActaTestRunner + ActaTests; no external deps
+  Package.swift                     # Acta executable + ActaControlProtocol + ActaKit + ActaRuntime + ActaTestRunner + ActaTests; no external deps
   Sources/Acta/
     ActaApp.swift                   # @main, MenuBarExtra, state idle/recording/error/recovered — the ONLY file here
+  Sources/ActaControlProtocol/      # the wire protocol; Foundation-only, declares NO package dependencies
+    Envelope.swift                  # {version,id,command/result/error/event}, exact-version policy, the JSON codec
+    Command.swift                   # the command algebra; an unknown `type` decodes to .unsupportedCommand
+    CommandResult.swift             # the result algebra (state/recordings/settings/title/ok)
+    WireError.swift                 # the complete, frozen error-code set
+    WireValues.swift                # WireControlState, WireSettings, RecordingSummary
+    WireMessageCode.swift           # the stable machine codes for ControllerMessage prose
+    RecordingID.swift               # the opaque "v1:<base64url>" recording id
+    JSONLinesFramer.swift           # FrameReader/FrameWriter — payload + LF, directional size limits
   Sources/ActaRuntime/              # the pipeline (a library: SwiftPM cannot import an executable target)
     ControlAPI.swift                # typed @MainActor façade over RecordingController: commands + states()
     ControlState.swift              # the typed state (operation/lifecycleFailure/notice/recoveryNotice)
     ControlState+Mapping.swift      # pure ControllerSnapshot → ControlState translation
+    ControlServing.swift            # the narrow surface a transport may reach for; ControlAPI conforms
+    ControlDispatcher.swift         # Command → ControlServing call → CommandResult; the transport policy
+    WireProjection.swift            # pure ControlState → WireControlState projection + ControlRecordingLookup
     RecordingController.swift       # UI-facing observable state, start/stop wiring
     RecordingSession.swift          # one recording's lifecycle: marker, capture, assembly, wake lock
     AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush

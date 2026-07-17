@@ -47,9 +47,20 @@ public enum FramingError: Error, Equatable, Sendable {
 /// Reads length-delimited JSON frames — one UTF-8 JSON object then exactly one `LF` — from an injected
 /// byte source. Handles a newline that spans reads, several frames in one read, and a reader that
 /// over-delivers; fails immediately on an over-limit frame and reports a truncated tail at EOF.
+///
+/// ⚠️ **A framing failure is terminal and sticky.** Once `next()` has thrown a `FramingError`, every
+/// later `next()` re-throws the same error rather than resuming at the following frame. The alternative
+/// is worse than it looks: `takeFrame` removes the offending frame *before* validating it, so without
+/// the latch an over-limit frame would be silently discarded and the *next* frame returned — precisely
+/// the "skip a frame and resume" behaviour `oversizedFrame` documents as not happening. That also kept
+/// the error honest in only half the cases: an over-limit tail whose `LF` had not arrived yet is caught
+/// by the buffer check, which drains nothing and so re-threw, while the same violation with its `LF`
+/// present did not — one error value meaning two different things. Errors thrown by the *source* are not
+/// latched: those are the transport's to interpret, not the framing's.
 public struct FrameReader {
     private var buffer = Data()
     private var reachedEOF = false
+    private var failure: FramingError?
     private let reader: ByteReading
     private let maxPayloadBytes: Int
     private let maxReadChunkBytes: Int
@@ -65,8 +76,19 @@ public struct FrameReader {
     /// The next frame's payload (the bytes before its `LF`), `nil` at a clean EOF (no partial tail).
     ///
     /// Throws `oversizedFrame` the moment the buffered bytes cannot fit the limit, `emptyLine` for a
-    /// bare `LF`, and `truncatedFrame` when EOF leaves a non-empty unterminated tail.
+    /// bare `LF`, and `truncatedFrame` when EOF leaves a non-empty unterminated tail. Any of the three
+    /// fails the reader for good: every later call re-throws it.
     public mutating func next() throws -> Data? {
+        if let failure { throw failure }
+        do {
+            return try nextFrame()
+        } catch let error as FramingError {
+            failure = error
+            throw error
+        }
+    }
+
+    private mutating func nextFrame() throws -> Data? {
         while true {
             if let frame = try takeFrame() {
                 return frame
@@ -116,16 +138,41 @@ public struct FrameReader {
 
 /// Writes length-delimited JSON frames — a payload then exactly one `LF` — to an injected byte sink,
 /// looping over short writes until the whole frame has landed.
+///
+/// **The writer validates against the same limit its reader does**, and takes it explicitly for the same
+/// reason `FrameReader` does: the limits are *directional*, so only the caller knows which side of the
+/// hop it is on. Without the check, a producer could emit a frame that no conforming reader will accept
+/// — the violation would then surface at the far end, as a framing error on a stream that had already
+/// been failed, rather than at the one place that can still do something about it. `emptyLine` is
+/// rejected here for the same reason: the reader treats a bare `LF` as fatal, so a writer that can emit
+/// one is a latent stream-killer.
+///
+/// ⚠️ A limit rejection at write time is **not** a fix for an unbounded payload — it converts a far-end
+/// framing failure into a near-end error the server can classify, and nothing more. A response that
+/// genuinely does not fit (a `list` over a large enough archive) still has no answer in v1; bounding
+/// that payload is Plan 2's problem, and `WireError` has no code for it yet.
 public struct FrameWriter {
     private let writer: ByteWriting
+    private let maxPayloadBytes: Int
 
-    public init(writer: ByteWriting) {
+    public init(writer: ByteWriting, maxPayloadBytes: Int) {
         self.writer = writer
+        self.maxPayloadBytes = maxPayloadBytes
     }
 
     /// Write one frame: `payload` followed by a single `LF`. Never assumes one `write` sends the whole
     /// frame — it loops until every byte is delivered.
+    ///
+    /// Throws `emptyLine` for an empty payload and `oversizedFrame` for one past the limit — the two
+    /// frames a conforming `FrameReader` would reject — and `writeStalled` if the sink stops making
+    /// progress.
     public func write(payload: Data) throws {
+        if payload.isEmpty {
+            throw FramingError.emptyLine
+        }
+        if payload.count > maxPayloadBytes {
+            throw FramingError.oversizedFrame(limit: maxPayloadBytes)
+        }
         // Build the frame fresh so its indices are zero-based regardless of whether `payload` was a
         // slice, keeping the offset arithmetic below unambiguous.
         var frame = Data()
@@ -133,8 +180,12 @@ public struct FrameWriter {
         frame.append(lineFeed)
         var offset = 0
         while offset < frame.count {
+            let remaining = frame.count - offset
             let written = try writer.write(frame.subdata(in: offset..<frame.count))
-            guard written > 0 else { throw FramingError.writeStalled }
+            // A sink that over-reports is not trusted, mirroring the reader's defence against a source
+            // that over-delivers: taking the count at face value would push `offset` past the end and
+            // exit the loop as though the frame had landed.
+            guard written > 0, written <= remaining else { throw FramingError.writeStalled }
             offset += written
         }
     }

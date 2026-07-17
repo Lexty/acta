@@ -3,8 +3,8 @@ import Foundation
 import ActaControlProtocol
 
 // The dependency-free wire protocol (Plan 1, Task 1): the Codable envelope + command/result/error
-// algebra, the opaque recording id, the wire value types, and the JSON-lines framer. All in-process,
-// no socket — golden fixtures pin the wire shape, and an injected reader/writer drives the framer.
+// algebra, the opaque recording id and the wire value types. All in-process, no socket — golden
+// fixtures pin the wire shape. The framer lives in `ControlFramerTests`.
 
 // MARK: - Helpers
 
@@ -13,31 +13,6 @@ import ActaControlProtocol
 private func jsonString<T: Encodable>(_ value: T) throws -> String {
     String(data: try ControlProtocolCodec.encode(value), encoding: .utf8)!
 }
-
-/// A `ByteReading` that hands back scripted chunks in order, then an empty `Data` at EOF. It ignores
-/// `maxBytes` on purpose — that is how a reader "returning a larger chunk than asked" is exercised.
-private final class ScriptedReader: ByteReading {
-    private var chunks: [Data]
-    init(_ chunks: [Data]) { self.chunks = chunks }
-    func read(maxBytes: Int) throws -> Data {
-        guard !chunks.isEmpty else { return Data() }
-        return chunks.removeFirst()
-    }
-}
-
-/// A `ByteWriting` that records everything written and can be told to accept only `chunkLimit` bytes per
-/// call — the short-write simulation.
-private final class CollectingWriter: ByteWriting {
-    private(set) var written = Data()
-    var chunkLimit: Int?
-    func write(_ data: Data) throws -> Int {
-        let n = chunkLimit.map { min($0, data.count) } ?? data.count
-        written.append(data.prefix(n))
-        return n
-    }
-}
-
-private func frame(_ s: String) -> Data { Data((s + "\n").utf8) }
 
 // MARK: - Opaque recording id
 
@@ -50,15 +25,25 @@ func recordingIDRoundTripsThroughBase64URL() {
 }
 
 @Test
-func recordingIDUsesURLSafeAlphabetWithNoPadding() {
-    // A name whose UTF-8 bytes force `+`/`/` and `=` padding in standard base64, so the URL-safe
-    // substitution and the stripped padding are actually observed.
+func recordingIDUsesTheURLSafeAlphabet() {
+    // `???>>>` is chosen because its UTF-8 bytes force both `+` and `/` in standard base64 ("Pz8/Pj4+").
     let id = RecordingID.make(directoryName: "???>>>")
     let body = String(id.dropFirst("v1:".count))
     #expect(!body.contains("+"))
     #expect(!body.contains("/"))
-    #expect(!body.contains("="))
     #expect(RecordingID.directoryName(fromID: id) == "???>>>")
+}
+
+// Padding appears only when the input length is not a multiple of 3 — one `=` at 2 mod 3, two at 1 mod 3
+// — so a length ≡ 0 pins nothing. Covering all three residues is what makes deleting the padding strip in
+// `RecordingID.make` fail: the previous fixture here was 6 bytes, base64 emitted no `=` for it at all,
+// and its `#expect(!body.contains("="))` passed whether or not the strip existed.
+@Test(arguments: ["ab", "abc", "abcd"])
+func recordingIDStripsBase64PaddingAtEveryLengthResidue(name: String) {
+    let id = RecordingID.make(directoryName: name)
+    #expect(!id.contains("="), "padding must be stripped for a \(name.utf8.count)-byte name")
+    // The decoder has to re-add what `make` removed, or a stripped id would not survive the round trip.
+    #expect(RecordingID.directoryName(fromID: id) == name)
 }
 
 @Test
@@ -279,107 +264,43 @@ func nonEnvelopeBytesAreMalformed() {
     }
 }
 
-// MARK: - The JSON-lines framer
-
-@Test
-func framerReadsOneFramePerLine() throws {
-    var reader = FrameReader(reader: ScriptedReader([frame("hello"), frame("world")]),
-                             maxPayloadBytes: FramingLimits.maxRequestPayloadBytes)
-    #expect(try reader.next() == Data("hello".utf8))
-    #expect(try reader.next() == Data("world".utf8))
-    #expect(try reader.next() == nil)
+// A known command tag with a bad payload — the ordinary client bug. The envelope decoded, so the id is
+// in hand and the reply can be addressed; answering `.malformed` here would strand the request on a
+// socket carrying several at once.
+@Test(arguments: [#"{"command":{"type":"title_set"},"id":"7","version":1}"#,
+                  #"{"command":{"type":"open_in_finder"},"id":"7","version":1}"#])
+func aV1EnvelopeWithAnUndecodableCommandKeepsItsID(json: String) {
+    guard case .undecodableCommand(let id, _) = ControlProtocolCodec.decodeRequest(from: Data(json.utf8))
+    else {
+        Issue.record("expected .undecodableCommand for \(json)"); return
+    }
+    #expect(id == "7")
 }
 
 @Test
-func framerHandlesMultipleFramesInOneRead() throws {
-    var reader = FrameReader(reader: ScriptedReader([Data("a\nbb\nccc\n".utf8)]),
-                             maxPayloadBytes: FramingLimits.maxRequestPayloadBytes)
-    #expect(try reader.next() == Data("a".utf8))
-    #expect(try reader.next() == Data("bb".utf8))
-    #expect(try reader.next() == Data("ccc".utf8))
-    #expect(try reader.next() == nil)
+func anUndecodableCommandReasonDoesNotLeakDecoderInternals() {
+    let data = Data(#"{"command":{"type":"title_set"},"id":"7","version":1}"#.utf8)
+    guard case .undecodableCommand(_, let reason) = ControlProtocolCodec.decodeRequest(from: data) else {
+        Issue.record("expected .undecodableCommand"); return
+    }
+    // A raw `DecodingError` description carries coding paths and debug prose; a client gets a stable
+    // reason instead.
+    #expect(!reason.contains("CodingKeys"))
+    #expect(!reason.contains("debugDescription"))
 }
 
-@Test
-func framerReassemblesAFrameAndItsNewlineSplitAcrossReads() throws {
-    // The payload is fragmented AND the terminating LF arrives in a later read than its payload.
-    var reader = FrameReader(reader: ScriptedReader([Data("hel".utf8), Data("lo".utf8), Data("\n".utf8)]),
-                             maxPayloadBytes: FramingLimits.maxRequestPayloadBytes)
-    #expect(try reader.next() == Data("hello".utf8))
-    #expect(try reader.next() == nil)
-}
+// MARK: - Response envelope decoding
 
 @Test
-func framerRejectsAnEmptyLine() {
-    var reader = FrameReader(reader: ScriptedReader([Data("\n".utf8)]),
-                             maxPayloadBytes: FramingLimits.maxRequestPayloadBytes)
-    #expect(throws: FramingError.emptyLine) { try reader.next() }
+func aResponseCarryingNeitherAResultNorAnErrorIsRejected() {
+    // The shape an older client meets when a server is broken — exactly when a clear error matters.
+    let data = Data(#"{"id":"1","version":1}"#.utf8)
+    #expect(throws: (any Error).self) {
+        try ControlProtocolCodec.decode(WireResponse.self, from: data)
+    }
 }
 
-@Test
-func framerRejectsATruncatedFrameAtEOF() {
-    var reader = FrameReader(reader: ScriptedReader([Data("abc".utf8)]),
-                             maxPayloadBytes: FramingLimits.maxRequestPayloadBytes)
-    #expect(throws: FramingError.truncatedFrame) { try reader.next() }
-}
-
-@Test
-func framerAcceptsAPayloadExactlyAtTheLimit() throws {
-    let payload = String(repeating: "x", count: 8)
-    var reader = FrameReader(reader: ScriptedReader([frame(payload)]), maxPayloadBytes: 8)
-    #expect(try reader.next() == Data(payload.utf8))
-}
-
-@Test
-func framerFailsImmediatelyOnAnOverLimitFrame() {
-    // Nine payload bytes against a limit of eight — rejected the moment the buffer passes the limit,
-    // without discarding to the next LF.
-    var reader = FrameReader(reader: ScriptedReader([frame("xxxxxxxxx")]), maxPayloadBytes: 8)
-    #expect(throws: FramingError.oversizedFrame(limit: 8)) { try reader.next() }
-}
-
-@Test
-func framerFailsOnAnOverLimitTailEvenBeforeItsNewlineArrives() {
-    // No LF yet, but the buffer already exceeds the limit: fail now rather than read on forever.
-    var reader = FrameReader(reader: ScriptedReader([Data("xxxxxxxxx".utf8)]), maxPayloadBytes: 8)
-    #expect(throws: FramingError.oversizedFrame(limit: 8)) { try reader.next() }
-}
-
-@Test
-func framerBuffersAReaderThatOverDeliversWithoutLosingBytes() throws {
-    // The reader ignores `maxBytes` and dumps a chunk larger than the read-chunk cap; the framer must
-    // buffer all of it, not slice-and-drop.
-    let big = Data(String(repeating: "z", count: 200_000).utf8)
-    var reader = FrameReader(reader: ScriptedReader([big + Data("\n".utf8)]),
-                             maxPayloadBytes: 1_048_576,
-                             maxReadChunkBytes: 4096)
-    #expect(try reader.next() == big)
-}
-
-@Test
-func writerLoopsOverShortWrites() throws {
-    let sink = CollectingWriter()
-    sink.chunkLimit = 1 // one byte per write call
-    let writer = FrameWriter(writer: sink)
-    try writer.write(payload: Data("hello".utf8))
-    #expect(sink.written == Data("hello\n".utf8))
-}
-
-@Test
-func writerThenReaderRoundTripAFrame() throws {
-    let sink = CollectingWriter()
-    try FrameWriter(writer: sink).write(payload: Data(#"{"type":"ok"}"#.utf8))
-    var reader = FrameReader(reader: ScriptedReader([sink.written]),
-                             maxPayloadBytes: FramingLimits.maxResponsePayloadBytes)
-    #expect(try reader.next() == Data(#"{"type":"ok"}"#.utf8))
-}
-
-@Test
-func framingLimitsAreTheFrozenDirectionalConstants() {
-    #expect(FramingLimits.maxRequestPayloadBytes == 65536)
-    #expect(FramingLimits.maxResponsePayloadBytes == 1_048_576)
-    #expect(FramingLimits.maxReadChunkBytes == 65536)
-}
+// MARK: - The dependency confinement
 
 @Test
 func controlProtocolSourcesImportOnlyFoundation() throws {

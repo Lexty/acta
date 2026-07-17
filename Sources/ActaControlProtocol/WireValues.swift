@@ -75,6 +75,8 @@ public struct RecordingSummary: Codable, Equatable, Sendable {
         self.assemblyAttempts = assemblyAttempts
     }
 
+    // Synthesised `Codable`: the optionals are omitted rather than encoded as null, which is what the
+    // synthesised `encode` already does for an `Optional` property. The golden fixtures pin that shape.
     private enum CodingKeys: String, CodingKey {
         case id
         case directoryName = "directory_name"
@@ -84,32 +86,6 @@ public struct RecordingSummary: Codable, Equatable, Sendable {
         case segmentSeconds = "segment_seconds"
         case segmentCount = "segment_count"
         case assemblyAttempts = "assembly_attempts"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        directoryName = try c.decode(String.self, forKey: .directoryName)
-        path = try c.decode(String.self, forKey: .path)
-        status = try c.decode(Status.self, forKey: .status)
-        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
-        segmentSeconds = try c.decodeIfPresent(Int.self, forKey: .segmentSeconds)
-        segmentCount = try c.decodeIfPresent(Int.self, forKey: .segmentCount)
-        assemblyAttempts = try c.decodeIfPresent(Int.self, forKey: .assemblyAttempts)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(directoryName, forKey: .directoryName)
-        try c.encode(path, forKey: .path)
-        try c.encode(status, forKey: .status)
-        // Optionals are OMITTED, not encoded as null, so a missing-manifest summary carries only the
-        // fields it actually knows.
-        try c.encodeIfPresent(startedAt, forKey: .startedAt)
-        try c.encodeIfPresent(segmentSeconds, forKey: .segmentSeconds)
-        try c.encodeIfPresent(segmentCount, forKey: .segmentCount)
-        try c.encodeIfPresent(assemblyAttempts, forKey: .assemblyAttempts)
     }
 }
 
@@ -137,18 +113,6 @@ public struct WireControlState: Codable, Equatable, Sendable {
         private enum CodingKeys: String, CodingKey {
             case kind
             case elapsedSeconds = "elapsed_seconds"
-        }
-
-        public init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            kind = try c.decode(Kind.self, forKey: .kind)
-            elapsedSeconds = try c.decodeIfPresent(Int.self, forKey: .elapsedSeconds)
-        }
-
-        public func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            try c.encode(kind, forKey: .kind)
-            try c.encodeIfPresent(elapsedSeconds, forKey: .elapsedSeconds)
         }
     }
 
@@ -207,34 +171,6 @@ public struct WireControlState: Codable, Equatable, Sendable {
         case recordings
         case canStart = "can_start"
         case canStop = "can_stop"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        operation = try c.decode(Operation.self, forKey: .operation)
-        lifecycleFailure = try c.decodeIfPresent(Message.self, forKey: .lifecycleFailure)
-        notice = try c.decodeIfPresent(Message.self, forKey: .notice)
-        recoveryNotice = try c.decodeIfPresent(Message.self, forKey: .recoveryNotice)
-        title = try c.decode(String.self, forKey: .title)
-        suggestedTitle = try c.decode(String.self, forKey: .suggestedTitle)
-        settings = try c.decode(WireSettings.self, forKey: .settings)
-        recordings = try c.decode([RecordingSummary].self, forKey: .recordings)
-        canStart = try c.decode(Bool.self, forKey: .canStart)
-        canStop = try c.decode(Bool.self, forKey: .canStop)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(operation, forKey: .operation)
-        try c.encodeIfPresent(lifecycleFailure, forKey: .lifecycleFailure)
-        try c.encodeIfPresent(notice, forKey: .notice)
-        try c.encodeIfPresent(recoveryNotice, forKey: .recoveryNotice)
-        try c.encode(title, forKey: .title)
-        try c.encode(suggestedTitle, forKey: .suggestedTitle)
-        try c.encode(settings, forKey: .settings)
-        try c.encode(recordings, forKey: .recordings)
-        try c.encode(canStart, forKey: .canStart)
-        try c.encode(canStop, forKey: .canStop)
     }
 }
 

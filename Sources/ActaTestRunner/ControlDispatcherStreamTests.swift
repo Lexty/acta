@@ -256,34 +256,10 @@ func aCancelledWatchLetsGoOfTheUpstreamSubscription() async {
 }
 
 // MARK: - The isolation claim
-
-@MainActor
-@available(macOS 15.0, *)
-@Test
-func everyControlServingAccessHappensOnTheMainActor() async {
-    let (dispatcher, fake) = makeDispatcher(ControlState(operation: .recording(elapsedSeconds: 1),
-                                                         recordings: [fixtureRecording("a")]))
-    // Every command, including the ones that cross a suspension point — which is exactly where an
-    // "the actor serializes it" assumption would have been wrong.
-    _ = await dispatcher.handle(.status)
-    _ = await dispatcher.handle(.list)
-    _ = await dispatcher.handle(.titleGet)
-    _ = await dispatcher.handle(.titleSet("Weekly sync"))
-    _ = await dispatcher.handle(.settingsGet)
-    _ = await dispatcher.handle(.settingsSet(WireSettings(.default)))
-    _ = await dispatcher.handle(.settingsSave)
-    _ = await dispatcher.handle(.openInFinder(id: RecordingID.make(directoryName: "a")))
-    _ = await dispatcher.handle(.recover)
-    _ = await dispatcher.handle(.refresh)
-    _ = await dispatcher.handle(.openArchive)
-    _ = await dispatcher.handle(.dismissRecoveryNotice)
-    _ = await dispatcher.handle(.stop)
-
-    let stopping = Task { @MainActor in await dispatcher.handle(.stopAndWait) }
-    await waitUntil("the stop to be in flight") { fake.stopIsInFlight }
-    fake.finishStop()
-    _ = await stopping.value
-
-    #expect(!fake.sawOffMainActorAccess)
-    #expect(!fake.calls.isEmpty)
-}
+//
+// There was a `everyControlServingAccessHappensOnTheMainActor` test here: it drove thirteen commands and
+// asserted a `Thread.isMainThread` flag the fake set. `ControlServing` is `@MainActor`, so an off-actor
+// access is a compile error — the flag could not be set, and the test could not fail. It is deleted
+// rather than repaired because the compiler makes the claim it was making, and better than it did (it
+// silently omitted `.watch` and `.start`). The one access that genuinely escapes its request's turn, the
+// `watch` pump, is `Task { @MainActor in ... }` and is covered by the stream tests above.

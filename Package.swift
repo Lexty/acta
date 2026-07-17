@@ -6,6 +6,13 @@ import Foundation
 // No external dependencies (there is no transcription → WhisperKit is not needed).
 //
 // Target layout (important for testability in a Command-Line-Tools-ONLY environment):
+//   • ActaControlProtocol
+//                    — the control wire protocol: envelopes, commands, results, errors, the JSON-lines
+//                      framer. It declares NO dependencies, and that emptiness is the design: the app
+//                      and the future `actactl` binary must share one definition of the schema, and a
+//                      target that cannot see ActaKit or ActaRuntime cannot weld the wire format to the
+//                      runtime's representation. Do not add a dependency here to "reuse" a runtime type
+//                      — the projection lives in ActaRuntime, pointing this way.
 //   • ActaKit        — the library holding the pure logic (this is what we test; it grows in
 //                      Task 2–7).
 //   • ActaRuntime    — the library holding the recording pipeline: RecordingController,

@@ -8,7 +8,12 @@ import Foundation
 /// - `command_rejected` — `reason`: a start (or other command) the recorder's own guard refused.
 /// - `unknown_recording` — `id`: an `openInFinder` id that matches no current recording.
 /// - `unsupported_command` — `raw`: a command `type` tag this build does not know.
-/// - `unsupported_value` — `field`, `raw`: an enum discriminator this build does not know.
+/// - `unsupported_value` — `field`, `raw`: an enum discriminator this build does not know. ⚠️ **Reserved
+///   — nothing produces it yet.** The one request-direction enum is the command `type`, which has its own
+///   code (`unsupported_command`); every other enum is response-direction and throws on an unknown
+///   discriminator, guarded by the exact-version match rather than by this code (see `ProtocolVersion`).
+///   It is kept because the code set is frozen, and it is where the first request-direction enum will
+///   land — not because a tolerant decode path exists.
 /// - `unsupported_version` — `supported_versions`: the envelope `version` did not match.
 /// - `not_recording` — no extra field: an operation that needs a live recording, when there is none.
 /// - `internal` — no extra field: an unexpected failure the server could not classify.

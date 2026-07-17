@@ -79,6 +79,21 @@ Consequences to keep in mind:
   `.info`/`.debug` are not persisted by `os_log`, hence the flags; lifecycle events are `.notice`.
 
 ## Project structure
+- `Sources/ActaControlProtocol/` — **the wire protocol and nothing else**: `Envelope` (`WireRequest`/
+  `WireResponse`/`WireEvent`/`ProtocolVersion`/`ControlProtocolCodec`), `Command`, `CommandResult`,
+  `WireError`, `WireValues` (`WireControlState`/`WireSettings`/`RecordingSummary`), `WireMessageCode`,
+  `RecordingID`, `JSONLinesFramer`. **It declares no dependencies in `Package.swift`, deliberately** —
+  Foundation alone, no `ActaKit`, no `ActaRuntime`, no AppKit. That is what lets the app and the future
+  `actactl` share one definition, and what stops a runtime rename from silently renaming a wire key.
+  **It is not `ActaKit`, even though it is pure**: `ActaKit`'s rule is "no I/O" and it may freely name
+  runtime-adjacent types; the rule here is **dependency-free and frozen**, because a separate binary
+  decodes this schema. Do not move wire types into `ActaKit` because "they're pure", and do not reach for
+  a runtime type from here — the package graph will refuse, which is the point.
+  ⚠️ **The forward-compat rules in `ProtocolVersion` are narrower than they read.** Only the command
+  `type` tag decodes tolerantly (to `.unsupportedCommand`); every response-direction enum throws on an
+  unknown discriminator, and the **exact-version match** is what makes that safe. Adding a case to
+  `RecordingSummary.Status` or `Operation.Kind` within v1 would make the whole enclosing response
+  undecodable to an older client — that is a version bump, not an additive change.
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
   `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`. Anything worth testing goes here —
@@ -97,7 +112,10 @@ Consequences to keep in mind:
 - `Sources/ActaRuntime/` — the recording pipeline: `RecordingController`, `RecordingSession`,
   `AudioRecorder`, `SegmentWriter`, `SegmentAssembler`, `RecoveryManager`, `SelfCheck`,
   `MeetingStore`, `DisplayWakeLock`, the typed boundary — `ControlAPI`/`ControlState`/
-  `ControlState+Mapping` — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
+  `ControlState+Mapping` — the transport boundary above it — `WireProjection` (the pure
+  `ControlState` → `WireControlState` projection, plus `ControlRecordingLookup`), `ControlServing` (the
+  narrow surface a transport may reach for; `ControlAPI` conforms) and `ControlDispatcher` (`@MainActor`,
+  conforms to `ControlRequestHandling`) — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
   `PermissionChecking`/`SystemPermissions`, `SelfCheckClock`/`SystemClock`, `RecordingDependencies`
   — FS, `powerd` and process I/O. Kept thin; decisions are delegated to ActaKit.
   **A pure function may live here when its *types* cannot leave.** `ControllerSnapshot` and
@@ -106,6 +124,16 @@ Consequences to keep in mind:
   and inherit the phase's macOS 15 availability, so `ActaKit` cannot hold them. The rule that binds is
   "no I/O", not "in `ActaKit`": purity is what makes the mapping exhaustively testable, and the target
   it sits in does not change that. Do not cite this to move I/O-touching code into `ActaKit`.
+  **`WireProjection` is that same rule's second instance, not a new exception**: it is pure
+  (`WireProjectionTests` drives it from literals), but it names `ControlState`/`MeetingStore.Recording`/
+  `RecordingSettings`, so `ActaControlProtocol` cannot hold it. ⚠️ It is a **projection — never a
+  `Codable` conformance on the runtime types**: conforming `ControlState` to `Codable` would let a
+  field rename in the runtime silently rename a wire key.
+  **A transport depends on `ControlRequestHandling`, never on `ControlDispatcher` or `ControlAPI.shared`**
+  — the seam exists so descriptor code (`flock`, `sockaddr_un`, `SO_NOSIGPIPE`) is testable against a
+  handler returning canned results and can reach nothing in the recorder. It **inherits** the
+  `ControlAPI.shared` invariant below: the dispatcher production constructs is the one over
+  `ControlAPI.shared`, and no test may touch it.
   **`SCStream` no longer permeates the target**: it lives *only* in `SCKCaptureSource`, behind the
   `CaptureSource` protocol. `AudioRecorder` sees `(Track, CMSampleBuffer)` and nothing more.
   It is a **library**, not part of the executable, because **SwiftPM cannot import an executable
@@ -222,8 +250,11 @@ reached the log while the other three reached the user.
   what makes those frozen assertions the thing the façade is checked against. The **UI migration has
   landed**: `ActaApp.swift`/`MenuContent` now read `ControlState` and issue commands through
   `ControlAPI.shared` (via the UI-owned `ControlViewModel` adapter), so the SwiftUI menu is the
-  façade's first production client. What stays parked in `docs/backlog/` is the socket/CLI transport —
-  a *second* client of the same boundary. Assert only through the
+  façade's first production client. The **wire protocol and dispatcher have landed** too
+  (`ActaControlProtocol`, `ControlDispatcher` over `ControlServing`, with `ControlDispatcherTestSupport`'s
+  `FakeControlServing` injected by every dispatcher test) — the boundary's second client, in-process and
+  socket-free. What stays parked in `docs/backlog/` is the POSIX socket transport and the `actactl` CLI.
+  Assert only through the
   public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
   computed properties with no publisher, so `$phase` is subscribed while the flags are **sampled**
@@ -254,13 +285,17 @@ reached the log while the other three reached the user.
   recording no one on the machine can see, which the privacy rule forbids. **No test can guard this** — `.shared` reaches for the real `~/Acta`, real TCC and real
   time, so every test injects its own controller and none may touch `.shared`. It is a review-only
   invariant.
-- **Two confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
+- **Three confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
   ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
   `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,
   `CGRequestScreenCaptureAccess`, `AVCaptureDevice`) only in `SystemPermissions.swift`. That is what
   makes the fakes answer the questions production actually asks instead of bypassing them. Match type
   references, not prose — doc comments legitimately name `SCStream`. Never contort code to satisfy
-  the grep; move the comment instead.
+  the grep; move the comment instead. The third: `Sources/ActaControlProtocol/` imports **Foundation and
+  nothing else** (`grep -rn '^import' Sources/ActaControlProtocol/`), and the target lists **no
+  dependencies** in `Package.swift`. The package graph enforces the hard half — it cannot see `ActaKit`
+  or `ActaRuntime` — and `controlProtocolSourcesImportOnlyFoundation` catches the rest, since an
+  `import AppKit` compiles without any package dep at all.
 - A test may shell out to a system tool (`/usr/bin/pmset`) when only the OS can answer the question.
   Two rules learned the hard way: **scope the query to the runner's own pid** — `pmset -g assertions`
   is machine-wide, so a real recording would otherwise fail the suite — and mark such a suite

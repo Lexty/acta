@@ -24,8 +24,6 @@ import Testing
 final class FakeControlServing: ControlServing {
     /// What the dispatcher asked for, in order.
     private(set) var calls: [String] = []
-    /// Set by any access that did not happen on the main actor. See `everyAccessOnMainActor`.
-    private(set) var sawOffMainActorAccess = false
 
     var currentState = ControlState()
     /// How many times `stopAndWait()` was actually entered — the count that distinguishes "shared one
@@ -53,10 +51,11 @@ final class FakeControlServing: ControlServing {
     /// one stop" could pass while two of them had simply not run yet.
     var stateReads: Int { calls.filter { $0 == "state" }.count }
 
+    // `ControlServing` is `@MainActor`, so an off-actor access does not compile. There was a
+    // `sawOffMainActorAccess` flag here, checked with `Thread.isMainThread`; it could only ever have
+    // fired if the compiler were broken, and a test that cannot fail reads as a guarantee while
+    // guaranteeing nothing.
     private func record(_ name: String) {
-        // The protocol is `@MainActor`, so the compiler already forbids an off-actor call — but the
-        // claim the plan makes is about *every* access, and a claim worth stating is worth observing.
-        if !Thread.isMainThread { sawOffMainActorAccess = true }
         calls.append(name)
     }
 

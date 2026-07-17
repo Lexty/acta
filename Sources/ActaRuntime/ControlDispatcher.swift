@@ -40,6 +40,17 @@ public protocol ControlRequestHandling: AnyObject {
 ///   the claim by awaiting one.
 /// - **`status`/`list` never call `refresh()`.** A read that mutates is a read a client cannot poll.
 /// - **`openInFinder` resolves an opaque id, never a path.**
+///
+/// ⚠️ **`settingsSet` is the one command that does take a caller-supplied path, and Plan 2 must decide
+/// what that means.** `ControlRecordingLookup`'s rule — "the only thing a client may name is an id it
+/// was given" — holds for `openInFinder` and is silent here: `archive_path` is written through verbatim,
+/// and `RecordingSettings.normalized()` clamps only `segmentSeconds`. So `settingsSet` + `refresh` +
+/// `list` enumerates any readable directory, and a later `start` records into it. That is exactly the
+/// authority the *menu* already has, which is why it is not a defect today — in-process, the only client
+/// is the UI, and a human is holding it. It stops being equivalent the moment a socket makes it a
+/// one-line request from any process on the machine. The choice (constrain the path, drop it from the
+/// wire schema, or accept it and say so) belongs with the transport's permissioning, not here — but it
+/// must be a **choice**, not an oversight, so it is written down at the point that would inherit it.
 @available(macOS 15.0, *)
 @MainActor
 public final class ControlDispatcher: ControlRequestHandling {
@@ -57,10 +68,10 @@ public final class ControlDispatcher: ControlRequestHandling {
     /// one task (one underlying stop, one answer). But a *later* recording's `stopAndWait` must not
     /// reuse a completed task and return instantly having stopped nothing — so the task clears itself
     /// as its final act, inside its own body, before any awaiter resumes. A stale hit is therefore not
-    /// merely unlikely; it is unreachable.
+    /// merely unlikely; it is unreachable — so the body clears unconditionally, with no id to compare
+    /// against. A guard there could only ever be true, and a guard that cannot fail reads as though the
+    /// race it names were possible.
     private var finalisation: Task<Void, Never>?
-    /// Identifies the current finalisation so the task clears only *itself*.
-    private var finalisationID: UUID?
 
     /// - Parameter service: the recorder. Production passes `ControlAPI.shared` — the menu's own
     ///   controller, per the privacy invariant. A test passes a fake.
@@ -176,17 +187,15 @@ public final class ControlDispatcher: ControlRequestHandling {
             // A stop is already in flight — join it. One stop, one answer, however many clients ask.
             task = existing
         } else {
-            let id = UUID()
-            finalisationID = id
             // The body clears the dispatcher's reference as its final act, *before* resuming any
             // awaiter, so the "cleared when it completes" rule holds without a second observer task
             // whose ordering against the awaiters would be a race. The task cannot begin before this
-            // synchronous region suspends, so `finalisation` is assigned by the time the body reads it.
+            // synchronous region suspends, so `finalisation` is assigned by the time the body reads it —
+            // and since a second task can only be minted once this one has cleared the slot, the task
+            // running here is always the one in it.
             let created = Task { @MainActor [weak self, service] in
                 await service.stopAndWait()
-                guard let self, self.finalisationID == id else { return }
-                self.finalisation = nil
-                self.finalisationID = nil
+                self?.finalisation = nil
             }
             finalisation = created
             task = created

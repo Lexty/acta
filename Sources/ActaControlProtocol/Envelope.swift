@@ -6,9 +6,22 @@ import Foundation
 /// Forward-compat rules for v1 (stated; no adapters are built):
 /// - Unknown JSON keys are ignored (a keyed container drops them).
 /// - Only **optional** fields may be added within v1.
-/// - An unknown command `type` decodes to `.unsupportedCommand`; an unknown enum discriminator becomes
-///   an `unsupported_value` error — never a decode crash.
+/// - An unknown command `type` decodes to `.unsupportedCommand` — data, never a throw — because the
+///   server has to answer it.
+/// - A well-formed envelope whose command payload does not decode keeps its id
+///   (`.undecodableCommand`), so the error reply can be addressed.
 /// - A version mismatch yields `unsupported_version` carrying `supported`.
+///
+/// ⚠️ **The enum rule is narrower than it looks, and the exact-version match is what carries it.** Every
+/// *other* enum in the protocol (`RecordingSummary.Status`, `WireControlState.Operation.Kind`,
+/// `CommandResult`'s `type`, `WireError`'s `code`) is **response-direction** and decodes with a plain
+/// `decode`, which **throws** on a discriminator this build does not know. That is tolerable only
+/// because `version` is matched exactly: a peer that could send a new `status` value is by definition
+/// not v1, and is refused before any of it is decoded. It is *not* a licence to add a value to one of
+/// those enums within v1 — doing so would make the whole enclosing response undecodable to an older
+/// `actactl`, not just the one field. `WireError.unsupportedValue` is **reserved for the first
+/// request-direction enum** and has no producer today; do not read its presence as a claim that
+/// tolerant decoding exists.
 public enum ProtocolVersion {
     public static let current = 1
     public static let supported = [1]
@@ -145,8 +158,11 @@ public enum ControlProtocolCodec {
     /// - `.request` — a v1 request that decoded.
     /// - `.versionMismatch` — the envelope carried a different `version`; the id is preserved so the
     ///   server can reply `unsupported_version`.
-    /// - `.malformed` — the bytes are not even a `{version, id, …}` envelope, so there is no id to reply
-    ///   to.
+    /// - `.undecodableCommand` — a well-formed v1 envelope whose `command` payload did not decode (a
+    ///   known `type` missing a required field). The id is preserved: the header decoded, so the server
+    ///   can and must address its error reply.
+    /// - `.malformed` — the bytes are not even a `{version, id, …}` envelope, so there really is no id
+    ///   to reply to. This is the *only* outcome for which that is true.
     public static func decodeRequest(from data: Data) -> RequestDecodeOutcome {
         // First read only the envelope header, so a request whose *command* shape is newer than v1
         // still yields its id and version for the mismatch reply.
@@ -159,7 +175,13 @@ public enum ControlProtocolCodec {
         do {
             return .request(try makeDecoder().decode(WireRequest.self, from: data))
         } catch {
-            return .malformed("could not decode command: \(error)")
+            // `header.id` decoded a line ago and is right here: answering `.malformed` would throw away
+            // an id the server holds, leaving an ordinary client bug (a `title_set` with no `title`)
+            // uncorrelatable on a socket carrying several requests at once. An unknown command *tag* does
+            // not reach this path at all — `Command` decodes that to `.unsupportedCommand`, which is data.
+            // The reason is deliberately not the `DecodingError`, whose description carries coding paths
+            // and debug prose a client has no use for and should not be handed.
+            return .undecodableCommand(id: header.id, reason: "could not decode command")
         }
     }
 
@@ -173,5 +195,6 @@ public enum ControlProtocolCodec {
 public enum RequestDecodeOutcome: Equatable, Sendable {
     case request(WireRequest)
     case versionMismatch(id: String, requested: Int)
+    case undecodableCommand(id: String, reason: String)
     case malformed(String)
 }
