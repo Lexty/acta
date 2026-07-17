@@ -33,6 +33,12 @@ public final class ControlSocketServer: @unchecked Sendable {
     private var started = false
     private var shuttingDown = false
 
+    /// Signalled by the accept source's cancellation handler, once the listener has been removed. It lets
+    /// `shutdown()` be **synchronous**: an orderly quit (`applicationWillTerminate` is not an async
+    /// suspension point) must not race the process exit and leave a stale socket behind. The wait is over
+    /// exactly one bounded step — `unlinkat` + two `close`s — and never over the client tasks.
+    private let listenerRemoved = DispatchSemaphore(value: 0)
+
     /// The socket path the server is bound to (for logging).
     public var socketPath: String { bound.path }
 
@@ -57,10 +63,11 @@ public final class ControlSocketServer: @unchecked Sendable {
             let source = DispatchSource.makeReadSource(fileDescriptor: bound.fileDescriptor,
                                                        queue: acceptQueue)
             source.setEventHandler { [weak self] in self?.acceptReady() }
-            source.setCancelHandler { [bound] in
+            source.setCancelHandler { [bound, listenerRemoved] in
                 // The one safe moment to remove the listener: the source that watched it is fully torn
                 // down. `remove()` unlinks the socket (device/inode-checked) and closes the descriptor.
                 bound.remove()
+                listenerRemoved.signal()
             }
             acceptSource = source
             source.resume()
@@ -71,13 +78,16 @@ public final class ControlSocketServer: @unchecked Sendable {
     /// idempotent, and does **not** await the connection tasks — a client must never be able to delay
     /// the app's teardown. A cancelled connection unwinds and closes its own descriptor.
     public func shutdown() {
+        var awaitListenerRemoval = false
         acceptQueue.sync {
             guard !shuttingDown else { return }
             shuttingDown = true
             if let source = acceptSource {
-                // Its cancellation handler removes the listener — the one safe close point.
+                // Its cancellation handler removes the listener — the one safe close point — and signals
+                // `listenerRemoved`. We wait on that below so teardown is synchronous.
                 source.cancel()
                 acceptSource = nil
+                awaitListenerRemoval = true
             } else {
                 // Never started (no source ever watched the descriptor): safe to remove it directly.
                 bound.remove()
@@ -85,6 +95,9 @@ public final class ControlSocketServer: @unchecked Sendable {
             for task in connections.values { task.cancel() }
             connections.removeAll()
         }
+        // Bounded: the cancellation handler runs next on `acceptQueue` (this `sync` block just left it)
+        // and does nothing but remove the listener. Client tasks are only cancelled, never awaited.
+        if awaitListenerRemoval { listenerRemoved.wait() }
     }
 
     // MARK: - Accept loop (serial on `acceptQueue`)

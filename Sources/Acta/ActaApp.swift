@@ -1,6 +1,7 @@
 import SwiftUI
 import ActaKit
 import ActaRuntime
+import os
 
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
@@ -39,9 +40,34 @@ struct ActaApp: App {
 /// `menuBarExtraStyle(.window)` builds its content only when the user clicks — no SwiftUI hook
 /// fires before the menu is opened for the first time.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The control-socket lifecycle owner (`ControlSocketHost`), type-erased because that type is
+    /// macOS 15+ and this delegate is not gated. Nil on macOS 14, or if the bind was refused.
+    private var socketHost: AnyObject?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
+            // Recovery of interrupted recordings must run first (SPEC §7).
             ControlAPI.shared.recover()
+            // Then host the control socket. A bind refusal (another instance already owns the path) is
+            // logged and swallowed — the app runs fine without a socket; only `actactl` cannot reach it.
+            let host = ControlSocketHost.live()
+            do {
+                try host.start()
+                socketHost = host
+            } catch {
+                Logger(subsystem: BuildFlavor.logSubsystem, category: "AppDelegate")
+                    .error("control socket not hosted: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    /// Tear the control socket down on every **orderly** termination route. AppKit calls this after
+    /// `applicationShouldTerminate` has approved the quit — for **both** its `.terminateNow` and
+    /// `.terminateLater` replies (the latter after `stopAndWait()` finalises the recording) — so this one
+    /// hook covers both. It cannot cover `SIGKILL`/crash; stale-socket recovery handles those.
+    func applicationWillTerminate(_ notification: Notification) {
+        if #available(macOS 15.0, *) {
+            (socketHost as? ControlSocketHost)?.teardown()
         }
     }
 

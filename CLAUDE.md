@@ -115,7 +115,10 @@ Consequences to keep in mind:
   `ControlState+Mapping` — the transport boundary above it — `WireProjection` (the pure
   `ControlState` → `WireControlState` projection, plus `ControlRecordingLookup`), `ControlServing` (the
   narrow surface a transport may reach for; `ControlAPI` conforms) and `ControlDispatcher` (`@MainActor`,
-  conforms to `ControlRequestHandling`) — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
+  conforms to `ControlRequestHandling`) — the Unix-socket transport over it —
+  `ControlEndpoint`/`BoundSocket`/`ControlSocketAddress` (the secure bind),
+  `ControlSocketServer`/`ControlConnection`/`ControlConnectionIO` (non-blocking serving) and
+  `ControlSocketHost` (the app-side lifecycle owner) — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
   `PermissionChecking`/`SystemPermissions`, `SelfCheckClock`/`SystemClock`, `RecordingDependencies`
   — FS, `powerd` and process I/O. Kept thin; decisions are delegated to ActaKit.
   **A pure function may live here when its *types* cannot leave.** `ControllerSnapshot` and
@@ -253,7 +256,23 @@ reached the log while the other three reached the user.
   façade's first production client. The **wire protocol and dispatcher have landed** too
   (`ActaControlProtocol`, `ControlDispatcher` over `ControlServing`, with `ControlDispatcherTestSupport`'s
   `FakeControlServing` injected by every dispatcher test) — the boundary's second client, in-process and
-  socket-free. What stays parked in `docs/backlog/` is the POSIX socket transport and the `actactl` CLI.
+  socket-free. The **POSIX socket transport has landed** too: the app hosts **exactly one** Unix control
+  socket at `~/Library/Application Support/<bundle-id>/control.sock` (`0600`, in a verified `0700` current-UID
+  parent), so a future `actactl` can reach the running app. **The trust boundary is the filesystem and
+  only that** — `AF_UNIX`/`SOCK_STREAM` only (never TCP, Bonjour or a network fallback), **no token** (a
+  `0600` socket in a `0700` user-private directory is the whole boundary; any same-UID process can already
+  act as the user), and no launch-on-demand (an absent socket means "not running"). The pieces:
+  `ControlEndpoint`/`BoundSocket`/`ControlSocketAddress` (the secure bind — `flock`ed init, exact
+  stale-socket recovery that never severs a live server nor removes a non-socket, device/inode-checked
+  teardown), `ControlSocketServer`/`ControlConnection`/`ControlConnectionIO` (non-blocking `DispatchSource`
+  I/O with single-owner descriptors, `SO_NOSIGPIPE`, deadlines, a ~16 connection cap, `watch` coalescing
+  to the newest state), and `ControlSocketHost` (the `ActaRuntime` lifecycle owner — `AppDelegate` is thin
+  wiring — with a **synchronous, bounded `teardown()`** because `applicationWillTerminate` is not an async
+  suspension point). ⚠️ **A socket dispatcher is `.socket`-confined, the in-process UI one `.trusted`**: a
+  socket client **cannot relocate the archive** (`settingsSet` ignores the wire `archive_path` and
+  substitutes the current authoritative one) and every caller-supplied wire string is length-bounded and
+  rejected for control characters (`ControlStringPolicy`); a human relocating their own archive through the
+  menu is fine. What stays parked in `docs/backlog/` is the `actactl` CLI (Plan 3).
   Assert only through the
   public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
@@ -319,5 +338,9 @@ reached the log while the other three reached the user.
   **app**, killed while a real `SCStream` is feeding it, recovered on the next real launch. Worth a
   human's eyes when capture or recovery changes — the harness approximates that run, it does not
   replace it.
+- The control socket **hosted by a bundled app**. `ControlSocketHost` is driven in-process against a
+  fake handler (`ControlSocketHostTests`), but the real launch/quit lifecycle is not: that a bundled
+  `Acta Dev.app` creates the socket at the dev path on launch, that a second launch refuses, and that
+  quitting removes it, needs a human (a full `actactl` round-trip is Plan 3).
 - Validation Commands check compilation/build/lint, unit logic, the in-process pipeline **and** the
   process-based crash harness — but nothing above the seams: no ScreenCaptureKit, no TCC, no UI.
