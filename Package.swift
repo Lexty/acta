@@ -92,6 +92,14 @@ let package = Package(
             name: "ActaKit",
             path: "Sources/ActaKit"
         ),
+        // The dependency-free wire protocol for `actactl`. It lists NO `dependencies` ON PURPOSE:
+        // the structural isolation (it cannot import ActaKit/ActaRuntime/AppKit/SwiftUI, so the wire
+        // schema stays decoupled from the runtime representation) is enforced here, not only by an
+        // import grep. It imports Foundation alone.
+        .target(
+            name: "ActaControlProtocol",
+            path: "Sources/ActaControlProtocol"
+        ),
         .target(
             name: "ActaRuntime",
             dependencies: ["ActaKit"],
@@ -104,7 +112,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ActaTestRunner",
-            dependencies: ["ActaKit", "ActaRuntime"],
+            dependencies: ["ActaKit", "ActaRuntime", "ActaControlProtocol"],
             path: "Sources/ActaTestRunner",
             swiftSettings: testing.swift,
             linkerSettings: testing.linker
