@@ -151,10 +151,29 @@ func stopInitiatesAndAnswersImmediately() async {
 
 @MainActor
 @available(macOS 15.0, *)
-@Test(arguments: [ControlState.Operation.idle, .starting, .saving])
-func stopWithNothingToStopIsNotRecording(operation: ControlState.Operation) async {
-    let (dispatcher, fake) = makeDispatcher(ControlState(operation: operation))
+@Test
+func stopWithNothingInFlightIsNotRecording() async {
+    let (dispatcher, fake) = makeDispatcher(ControlState(operation: .idle))
     let response = await dispatcher.handle(.stop)
     #expect(response.wireError?.code == "not_recording")
+    #expect(!fake.calls.contains("stop"))
+}
+
+@MainActor
+@available(macOS 15.0, *)
+@Test(arguments: [(ControlState.Operation.starting, ControlDispatcher.Rejection.starting),
+                  (.saving, ControlDispatcher.Rejection.saving)])
+func stopWithWorkInFlightIsRefusedWithoutDenyingTheRecordingExists(
+    operation: ControlState.Operation, reason: String
+) async {
+    // The controller stops only from `.recording`, so the command is still refused — but `not_recording`
+    // would be a false statement here. `.starting` has capture already writing segments (the frozen
+    // controller contract), and `.saving` means a stop already landed; telling a client "there is no
+    // recording in progress" contradicts the state this same dispatcher projects and invites it to
+    // abandon a recording that keeps running to disk.
+    let (dispatcher, fake) = makeDispatcher(ControlState(operation: operation))
+    let response = await dispatcher.handle(.stop)
+    #expect(response.wireError?.code == "command_rejected")
+    #expect(response.wireError == .commandRejected(reason: reason))
     #expect(!fake.calls.contains("stop"))
 }

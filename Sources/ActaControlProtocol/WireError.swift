@@ -5,6 +5,14 @@ import Foundation
 /// machine string a client branches on; `message` is human-facing prose it never parses.
 ///
 /// The cases and their extra fields:
+/// - `bad_request` — `reason`: the request did not decode. ⚠️ **The one code that blames the client for
+///   the bytes, and the reason it exists here rather than in the transport.** `decodeRequest` produces
+///   `.undecodableCommand(id:reason:)` and goes out of its way to keep the id precisely so the failure
+///   can be answered — but a decode failure is neither the recorder's guard refusing
+///   (`command_rejected` never reached the recorder at all) nor a server fault (`internal`, which an
+///   agent may sensibly retry — and would then retry a malformed request forever). A code set that is
+///   frozen must cover the outcomes its own decoder can produce, so it is minted now, while minting is
+///   free. `reason` carries the decoder's sanitized summary, never a `DecodingError` description.
 /// - `command_rejected` — `reason`: a start (or other command) the recorder's own guard refused.
 /// - `unknown_recording` — `id`: an `openInFinder` id that matches no current recording.
 /// - `unsupported_command` — `raw`: a command `type` tag this build does not know.
@@ -18,6 +26,7 @@ import Foundation
 /// - `not_recording` — no extra field: an operation that needs a live recording, when there is none.
 /// - `internal` — no extra field: an unexpected failure the server could not classify.
 public enum WireError: Error, Equatable, Sendable {
+    case badRequest(reason: String, message: String)
     case commandRejected(reason: String, message: String)
     case unknownRecording(id: String, message: String)
     case unsupportedCommand(raw: String, message: String)
@@ -28,6 +37,7 @@ public enum WireError: Error, Equatable, Sendable {
 
     /// The frozen wire `code` strings.
     public enum Code {
+        public static let badRequest = "bad_request"
         public static let commandRejected = "command_rejected"
         public static let unknownRecording = "unknown_recording"
         public static let unsupportedCommand = "unsupported_command"
@@ -40,6 +50,7 @@ public enum WireError: Error, Equatable, Sendable {
     /// This error's stable machine code.
     public var code: String {
         switch self {
+        case .badRequest: return Code.badRequest
         case .commandRejected: return Code.commandRejected
         case .unknownRecording: return Code.unknownRecording
         case .unsupportedCommand: return Code.unsupportedCommand
@@ -53,7 +64,8 @@ public enum WireError: Error, Equatable, Sendable {
     /// The human-facing message.
     public var message: String {
         switch self {
-        case .commandRejected(_, let message),
+        case .badRequest(_, let message),
+             .commandRejected(_, let message),
              .unknownRecording(_, let message),
              .unsupportedCommand(_, let message),
              .unsupportedValue(_, _, let message),
@@ -65,6 +77,10 @@ public enum WireError: Error, Equatable, Sendable {
     }
 
     // MARK: - Convenience constructors with default messages
+
+    public static func badRequest(reason: String) -> WireError {
+        .badRequest(reason: reason, message: "The request could not be decoded: \(reason)")
+    }
 
     public static func commandRejected(reason: String) -> WireError {
         .commandRejected(reason: reason, message: "The command was rejected: \(reason)")
@@ -114,6 +130,8 @@ extension WireError: Codable {
         let code = try c.decode(String.self, forKey: .code)
         let message = try c.decode(String.self, forKey: .message)
         switch code {
+        case Code.badRequest:
+            self = .badRequest(reason: try c.decode(String.self, forKey: .reason), message: message)
         case Code.commandRejected:
             self = .commandRejected(reason: try c.decode(String.self, forKey: .reason), message: message)
         case Code.unknownRecording:
@@ -143,7 +161,8 @@ extension WireError: Codable {
         try c.encode(code, forKey: .code)
         try c.encode(message, forKey: .message)
         switch self {
-        case .commandRejected(let reason, _):
+        case .badRequest(let reason, _),
+             .commandRejected(let reason, _):
             try c.encode(reason, forKey: .reason)
         case .unknownRecording(let id, _):
             try c.encode(id, forKey: .id)

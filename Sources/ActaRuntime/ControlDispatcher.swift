@@ -118,7 +118,7 @@ public final class ControlDispatcher: ControlRequestHandling {
 
         case .stop:
             guard service.state.canStop else {
-                return .error(.notRecording())
+                return .error(Self.refusalToStop(service.state))
             }
             service.stop()
             // "Stop initiated". The assembly is still ahead; the state says `.saving` when it starts.
@@ -181,6 +181,31 @@ public final class ControlDispatcher: ControlRequestHandling {
     public enum Rejection {
         /// A `start` while the recorder is not idle.
         public static let busy = "a recording is already in flight"
+        /// A `stop` during the startup probe.
+        public static let starting = "the recording is still starting"
+        /// A `stop` while the assembly is already running.
+        public static let saving = "a stop is already in flight"
+    }
+
+    /// Why a `stop` was refused — and specifically **when `not_recording` is a true statement**.
+    ///
+    /// The controller stops only from `phase == .recording`, so a `stop` outside it is refused either
+    /// way; what is not free is *which* refusal. `not_recording`'s frozen message is "There is no
+    /// recording in progress.", and during `.starting` that is simply false — the frozen controller
+    /// contract has capture already writing segments while the startup probe runs, and `.saving` means a
+    /// stop already happened. Answering either with `not_recording` tells a client that the recording it
+    /// just started does not exist, contradicting the `.starting` the same dispatcher projected a turn
+    /// earlier and inviting it to walk away from a recording that keeps running to disk. It also split
+    /// `stop` from `stop_and_wait`, which guards on `hasWorkInFlight` and gets this right. So the code is
+    /// reserved for the one state it describes — nothing in flight — and the other two are
+    /// `command_rejected` with a reason that names the state rather than denying it.
+    private static func refusalToStop(_ state: ControlState) -> WireError {
+        switch state.operation {
+        case .idle: return .notRecording()
+        case .starting: return .commandRejected(reason: Rejection.starting)
+        case .saving: return .commandRejected(reason: Rejection.saving)
+        case .recording: return .notRecording() // unreachable: `canStop` is exactly this case.
+        }
     }
 
     private var wireState: WireControlState { WireControlState(state: service.state) }

@@ -168,6 +168,27 @@ func commandRejectedErrorPinsItsCodeSpecificField() throws {
 }
 
 @Test
+func everyDecodeOutcomeThatKeepsAnIDHasAnErrorCodeToAnswerItWith() throws {
+    // The frozen set must cover what the decoder can actually produce. `.undecodableCommand` preserves
+    // the id precisely so the transport can address a reply — this pins the code that reply carries, so
+    // the transport cannot be pushed into blaming the server (`internal`, which invites a retry loop on
+    // a malformed request) or the recorder's guard (`command_rejected`, which never saw the command).
+    let outcome = ControlProtocolCodec.decodeRequest(from: Data(#"""
+    {"version":1,"id":"7","command":{"type":"title_set"}}
+    """#.utf8))
+    guard case .undecodableCommand(let id, let reason) = outcome else {
+        Issue.record("expected .undecodableCommand, got \(outcome)")
+        return
+    }
+    #expect(id == "7")
+    let json = try jsonString(WireResponse.error(id: id, .badRequest(reason: reason)))
+    #expect(json.contains(#""code":"bad_request""#))
+    #expect(json.contains(#""reason":"could not decode command""#))
+    // The reason stays free of decoder internals — no coding paths, no debug prose.
+    #expect(!json.contains("CodingKeys"))
+}
+
+@Test
 func unsupportedVersionErrorCarriesTheSupportedVersions() throws {
     let json = try jsonString(WireResponse.error(id: "1", .unsupportedVersion(supportedVersions: [1])))
     #expect(json.contains(#""code":"unsupported_version""#))
@@ -177,6 +198,7 @@ func unsupportedVersionErrorCarriesTheSupportedVersions() throws {
 @Test
 func everyErrorRoundTrips() throws {
     let errors: [WireError] = [
+        .badRequest(reason: "could not decode command"),
         .commandRejected(reason: "busy"),
         .unknownRecording(id: "v1:AAAA"),
         .unsupportedCommand(raw: "teleport"),
@@ -336,11 +358,23 @@ func controlProtocolSourcesImportOnlyFoundation() throws {
     // ⚠️ An **allowlist**, deliberately: a denylist of known-bad modules passes `import Darwin`, and the
     // framer is exactly where someone reaches for it (its `EINTR` note is out of scope for that reason).
     // Read `^import` lines rather than substrings, so a doc comment naming AppKit does not fail a build.
-    let dir = "Sources/ActaControlProtocol"
-    let files = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasSuffix(".swift") }
+    //
+    // ⚠️ **Recursive, and anchored to `#filePath` rather than the cwd.** `contentsOfDirectory` reads one
+    // level, so a file under `ActaControlProtocol/Sub/` would clear both halves of the invariant while
+    // importing anything it liked — `Darwin` and `AppKit` need no package dependency, which is the whole
+    // reason this test exists alongside the package graph. And a relative path makes the guard a claim
+    // about the runner's working directory: this suite is the only thing standing behind the rule, so it
+    // resolves the target from its own source location instead.
+    let root = URL(fileURLWithPath: #filePath)       // …/Sources/ActaTestRunner/ControlProtocolTests.swift
+        .deletingLastPathComponent()                 // …/Sources/ActaTestRunner
+        .deletingLastPathComponent()                 // …/Sources
+        .appendingPathComponent("ActaControlProtocol")
+    let enumerator = try #require(FileManager.default.enumerator(at: root,
+                                                                includingPropertiesForKeys: nil))
+    let files = enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
     #expect(!files.isEmpty)
     for file in files {
-        let text = try String(contentsOfFile: "\(dir)/\(file)", encoding: .utf8)
+        let text = try String(contentsOf: file, encoding: .utf8)
         let imported = text.split(separator: "\n").compactMap { line -> String? in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard trimmed.hasPrefix("import ") else { return nil }
@@ -351,6 +385,7 @@ func controlProtocolSourcesImportOnlyFoundation() throws {
             let module = kinds.contains(words.first ?? "") ? words.dropFirst().first ?? "" : words.first ?? ""
             return module.split(separator: ".").first.map(String.init)
         }
-        #expect(Set(imported) == ["Foundation"], "\(file) must import Foundation and nothing else, got \(imported)")
+        #expect(Set(imported) == ["Foundation"],
+                "\(file.lastPathComponent) must import Foundation and nothing else, got \(imported)")
     }
 }
