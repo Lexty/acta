@@ -96,6 +96,33 @@ final class TestSocketClient: @unchecked Sendable {
         }
     }
 
+    /// Wait until the server closes its end (`POLLHUP`), **without reading a byte**. Reading would drain
+    /// the socket buffer and unstick a writer the test deliberately left stalled — the write deadline
+    /// re-arms on every `EAGAIN`, so a draining client keeps a "stuck" writer alive forever and the reap
+    /// never happens. Returns true on hangup, false if `timeoutMilliseconds` elapses first.
+    ///
+    /// Darwin only surfaces `POLLHUP` when `POLLIN` is requested, and buffered-but-unread bytes make
+    /// `poll` return immediately with `POLLIN` set while the peer is merely stalled (not closed). So this
+    /// polls in a short spin, distinguishing "stalled" (`POLLIN`, no `POLLHUP`) from "reaped" (`POLLHUP`),
+    /// and naps between polls rather than busy-waiting.
+    func awaitHangup(timeoutMilliseconds: Int) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                let deadline = DispatchTime.now() + .milliseconds(timeoutMilliseconds)
+                while DispatchTime.now() < deadline {
+                    var pfd = pollfd(fd: self.fd, events: Int16(POLLIN), revents: 0)
+                    _ = poll(&pfd, 1, 50)
+                    if (pfd.revents & Int16(POLLHUP)) != 0 {
+                        continuation.resume(returning: true)
+                        return
+                    }
+                    usleep(10_000)
+                }
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
     func close() { Darwin.close(fd) }
 }
 

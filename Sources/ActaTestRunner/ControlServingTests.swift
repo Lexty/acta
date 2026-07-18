@@ -188,12 +188,13 @@ func aWriteDeadlineClosesAStuckWriter() async {
     // `EAGAIN`, the write deadline elapses, and the server gives up and closes — rather than pinning the
     // slot forever on a client that stopped reading.
     await client.send(enc(WireRequest(id: "l", command: .list)))
-    // Wait past the write deadline BEFORE reading — a premature drain would itself unstick the writer and
-    // hide the deadline.
-    try? await Task.sleep(nanoseconds: 400_000_000)
-    // The frame never completed (its terminating LF was never written), so the client drains the partial
-    // bytes and then sees EOF. A regression that never fired the write deadline would hang here instead.
-    #expect(await client.recvLine() == nil)
+    // Observe the server-side close as a `POLLHUP` WITHOUT reading. The write deadline re-arms on every
+    // `EAGAIN`, so any read here would drain the buffer, unstick the stalled writer, and let the whole
+    // frame through — the test would then race the reap against its own drain (and flake under parallel
+    // load). Not reading keeps the writer genuinely stuck, so only the deadline can end it. The window is
+    // generous: a regression that never fired the write deadline leaves the writer parked forever and
+    // this times out to `false`.
+    #expect(await client.awaitHangup(timeoutMilliseconds: 3000))
 }
 
 // MARK: - Decode-error mappings
