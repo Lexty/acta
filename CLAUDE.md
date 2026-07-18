@@ -97,7 +97,7 @@ Consequences to keep in mind:
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
   `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`, `ControlStringPolicy` (the shared
-  length/character bound the socket dispatcher enforces on every caller-supplied wire string).
+  length/character bound the socket dispatcher enforces on every caller-supplied command-payload string).
   Anything worth testing goes here —
   including **constants a test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`):
   `SelfCheck` is internal to `ActaRuntime`, and a threshold written once in the runtime and again in
@@ -272,8 +272,10 @@ reached the log while the other three reached the user.
   wiring — with a **synchronous, bounded `teardown()`** because `applicationWillTerminate` is not an async
   suspension point). ⚠️ **A socket dispatcher is `.socket`-confined, the in-process UI one `.trusted`**: a
   socket client **cannot relocate the archive** (`settingsSet` ignores the wire `archive_path` and
-  substitutes the current authoritative one) and every caller-supplied wire string is length-bounded and
-  rejected for control characters (`ControlStringPolicy`); a human relocating their own archive through the
+  substitutes the current authoritative one) and every caller-supplied command-payload string is
+  length-bounded and rejected for control characters (`ControlStringPolicy`) — the envelope's echo-only
+  correlation id and an unknown-tag discriminator are round-tripped verbatim and bounded only by the 64 KiB
+  frame limit, since neither reaches recorder state; a human relocating their own archive through the
   menu is fine. What stays parked in `docs/backlog/` is the `actactl` CLI (Plan 3).
   Assert only through the
   public surface: `isStopping` is

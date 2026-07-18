@@ -61,10 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Tear the control socket down on every **orderly** termination route. AppKit calls this after
-    /// `applicationShouldTerminate` has approved the quit — for **both** its `.terminateNow` and
-    /// `.terminateLater` replies (the latter after `stopAndWait()` finalises the recording) — so this one
-    /// hook covers both. It cannot cover `SIGKILL`/crash; stale-socket recovery handles those.
+    /// Backstop teardown of the control socket on every **orderly** termination route. The socket is
+    /// already torn down at quit *initiation* in `applicationShouldTerminate` (so no client can start work
+    /// during a `.terminateLater` finalisation); `teardown()` is idempotent, so this covers any orderly
+    /// route that somehow reached termination without passing through that hook. It cannot cover
+    /// `SIGKILL`/crash; stale-socket recovery handles those.
     func applicationWillTerminate(_ notification: Notification) {
         if #available(macOS 15.0, *) {
             (socketHost as? ControlSocketHost)?.teardown()
@@ -80,6 +81,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
+            // Quit is decided: tear the control socket down **now**, before finalising. Otherwise a socket
+            // client could `start` a fresh recording during the `stopAndWait()` window below — one that
+            // `applicationWillTerminate` (which only tears down, it does not finalise) would then let the
+            // process exit on without honouring it, defeating the whole point of this hook. `teardown()`
+            // is idempotent, so the `applicationWillTerminate` backstop stays a harmless no-op.
+            (socketHost as? ControlSocketHost)?.teardown()
+            socketHost = nil
             guard ControlAPI.shared.state.hasWorkInFlight else { return .terminateNow }
             Task {
                 await ControlAPI.shared.stopAndWait()

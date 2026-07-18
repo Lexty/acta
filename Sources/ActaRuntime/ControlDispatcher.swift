@@ -51,7 +51,10 @@ public protocol ControlRequestHandling: AnyObject {
 /// construction: a `.trusted` (in-process) dispatcher is unrestricted, while a `.socket` dispatcher
 /// **ignores the wire `archive_path` and substitutes the current authoritative one** on `settingsSet`
 /// (ignore-and-substitute, not a path compare — race-free and free of spelling ambiguity), and rejects
-/// any over-long or control-character-bearing wire string (`ControlStringPolicy`). Because the socket
+/// any over-long or control-character-bearing command-payload string (`ControlStringPolicy`) — the
+/// strings a command carries into recorder state, not the envelope's echo-only correlation id or an
+/// unknown-tag discriminator, both of which are round-tripped verbatim and already framing-bounded.
+/// Because the socket
 /// can never make the in-memory `archivePath` anything but the current one, `settingsSave` persisting
 /// the current settings can never persist a smuggled path — no separate guard is needed there.
 @available(macOS 15.0, *)
@@ -61,8 +64,8 @@ public final class ControlDispatcher: ControlRequestHandling {
     public enum Confinement: Sendable {
         /// The in-process UI. Unrestricted: a human relocating their own archive is fine.
         case trusted
-        /// A socket client. Cannot relocate the archive; every caller-supplied wire string is bounded
-        /// and validated.
+        /// A socket client. Cannot relocate the archive; every caller-supplied command-payload string is
+        /// bounded and validated.
         case socket
     }
 
@@ -113,6 +116,16 @@ public final class ControlDispatcher: ControlRequestHandling {
     // going quietly unanswered.
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     public func handle(_ command: Command) async -> ControlResponse {
+        // A torn-down connection must not still mutate the recorder. `teardown()` (an orderly quit)
+        // cancels every connection task, but cancellation is cooperative and `ControlConnection` does not
+        // re-check it between reading a frame and dispatching it — so a buffered command can reach here
+        // after teardown returned. This is the last gate, and it is reliable here: teardown cancels every
+        // task synchronously on the main actor before yielding, so this dispatch — running on that same
+        // now-cancelled task — observes `Task.isCancelled`. Without it a buffered `.start` could begin a
+        // recording during quit finalisation, the very window the quit-time teardown exists to close.
+        if Task.isCancelled {
+            return .error(.commandRejected(reason: Rejection.closing))
+        }
         // A `.socket` dispatcher validates every caller-supplied string before the command is acted on,
         // so an over-long or control-character title can never reach the recorder's state. `.trusted`
         // (the UI) skips this: it never drives an adversarial string.
@@ -208,6 +221,9 @@ public final class ControlDispatcher: ControlRequestHandling {
         public static let starting = "the recording is still starting"
         /// A `stop` while the assembly is already running.
         public static let saving = "a stop is already in flight"
+        /// A command whose delivering connection was torn down before it could be acted on — the app
+        /// quitting cancels every connection task (see `handle`).
+        public static let closing = "the control connection is closing"
     }
 
     /// Why a `stop` was refused — and specifically **when `not_recording` is a true statement**.
@@ -358,39 +374,5 @@ public final class ControlDispatcher: ControlRequestHandling {
             // let the upstream subscription terminate. Without this the pump would outlive every reader.
             continuation.onTermination = { _ in pump.cancel() }
         }
-    }
-}
-
-/// A continuation that is resumed exactly once, whichever of the two racers gets there first.
-///
-/// Resuming a `CheckedContinuation` twice traps, and both the completion and the cancellation paths of
-/// `awaitAbandonably` legitimately try. A lock rather than actor isolation: `onCancel` runs
-/// synchronously on whatever thread cancelled, with no isolation of its own to borrow.
-private final class SingleResume: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var fired = false
-
-    func arm(_ continuation: CheckedContinuation<Void, Never>) {
-        lock.lock()
-        // A cancellation that landed before the continuation existed still counts: resume immediately
-        // rather than waiting for a `fire()` that has already been and gone.
-        if fired {
-            lock.unlock()
-            continuation.resume()
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-    }
-
-    func fire() {
-        lock.lock()
-        guard !fired else { lock.unlock(); return }
-        fired = true
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume()
     }
 }
