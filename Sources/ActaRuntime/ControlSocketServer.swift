@@ -27,8 +27,12 @@ public final class ControlSocketServer: @unchecked Sendable {
     private let connectionCap: Int
     private let log: Logger
 
+    /// How long to stop accepting after a persistent accept error (e.g. `EMFILE`) before re-arming.
+    private static let acceptBackoff: DispatchTimeInterval = .seconds(1)
+
     private let acceptQueue = DispatchQueue(label: "dev.personal.acta.control.accept")
     private var acceptSource: (any DispatchSourceProtocol)?
+    private var acceptSuspended = false
     private var connections: [UUID: Task<Void, Never>] = [:]
     private var started = false
     private var shuttingDown = false
@@ -83,6 +87,13 @@ public final class ControlSocketServer: @unchecked Sendable {
             guard !shuttingDown else { return }
             shuttingDown = true
             if let source = acceptSource {
+                // A suspended source's cancellation handler does not run until it is resumed; resume it
+                // first so `cancel()` below actually removes the listener and signals `listenerRemoved`
+                // (otherwise the synchronous wait would deadlock). Balances the suspend in `suspendAccepting`.
+                if acceptSuspended {
+                    source.resume()
+                    acceptSuspended = false
+                }
                 // Its cancellation handler removes the listener — the one safe close point — and signals
                 // `listenerRemoved`. We wait on that below so teardown is synchronous.
                 source.cancel()
@@ -111,8 +122,12 @@ public final class ControlSocketServer: @unchecked Sendable {
                 if e == EINTR { continue }
                 if e == EAGAIN || e == EWOULDBLOCK { return }   // drained
                 if e == ECONNABORTED { continue }
-                // EMFILE/ENFILE and friends: stop for now; the next readiness fires when a slot frees.
+                // EMFILE/ENFILE and friends: the connection stays pending, and the listener source is
+                // level-triggered, so simply returning would have it re-fire immediately into the same
+                // error — a CPU/log-spam busy-loop until a descriptor frees. Suspend accepting and re-arm
+                // after a short backoff instead.
                 log.error("accept failed: errno \(e, privacy: .public)")
+                suspendAccepting()
                 return
             }
             guard connections.count < connectionCap else {
@@ -123,6 +138,24 @@ public final class ControlSocketServer: @unchecked Sendable {
             }
             serveAccepted(fd)
         }
+    }
+
+    /// Stop the level-triggered accept source from re-firing after a persistent accept error, and
+    /// schedule a re-arm. Runs on `acceptQueue`, as does every state touch, so no lock is needed; the
+    /// `acceptSuspended` flag keeps suspend/resume balanced against both `resumeAccepting` and `shutdown`.
+    private func suspendAccepting() {
+        guard let source = acceptSource, !acceptSuspended, !shuttingDown else { return }
+        source.suspend()
+        acceptSuspended = true
+        acceptQueue.asyncAfter(deadline: .now() + ControlSocketServer.acceptBackoff) { [weak self] in
+            self?.resumeAccepting()
+        }
+    }
+
+    private func resumeAccepting() {
+        guard acceptSuspended, let source = acceptSource else { return }
+        acceptSuspended = false
+        source.resume()
     }
 
     private func serveAccepted(_ fd: Int32) {

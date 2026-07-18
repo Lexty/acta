@@ -158,9 +158,9 @@ public final class ControlConnection: @unchecked Sendable {
                 return
             case .ready:
                 do {
-                    let data = try io.readAvailable(maxBytes: FramingLimits.maxReadChunkBytes)
-                    // EOF or any unsolicited byte: stop watching.
-                    if data.isEmpty { return }
+                    // EOF or any unsolicited byte: stop watching. The read result is discarded — a
+                    // watcher does not talk, so anything on the read side ends the stream.
+                    _ = try io.readAvailable(maxBytes: FramingLimits.maxReadChunkBytes)
                     return
                 } catch is ControlConnectionIO.WouldBlock {
                     continue

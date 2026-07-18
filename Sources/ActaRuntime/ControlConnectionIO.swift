@@ -84,12 +84,22 @@ public final class ControlConnectionIO: @unchecked Sendable {
                     }
                     source.setCancelHandler {
                         // The descriptor is safe to touch again only now; resume the awaiter here.
+                        box.timeout?.cancel()
+                        box.timeout = nil
                         box.resume?(box.outcome ?? .cancelled)
                         box.resume = nil
                         box.source = nil
                     }
-                    self.queue.asyncAfter(deadline: deadline) {
-                        box.settle(.timedOut)
+                    // Only arm a deadline timer for a finite deadline. A non-finite one
+                    // (`.distantFuture`, used by the `watch` peer-disconnect monitor) would never fire, and
+                    // `asyncAfter` retains its target queue and captured box until the block runs — leaking
+                    // one queue + box per watch connection for the process's lifetime. The work item is
+                    // cancelled in the cancel handler so a finite timer is released as soon as the wait
+                    // resolves rather than lingering until its deadline.
+                    if deadline != .distantFuture {
+                        let timeout = DispatchWorkItem { box.settle(.timedOut) }
+                        box.timeout = timeout
+                        self.queue.asyncAfter(deadline: deadline, execute: timeout)
                     }
                     source.resume()
                 }
@@ -111,6 +121,7 @@ public final class ControlConnectionIO: @unchecked Sendable {
         var source: (any DispatchSourceProtocol)?
         var outcome: Readiness?
         var resume: ((Readiness) -> Void)?
+        var timeout: DispatchWorkItem?
         var cancelledEarly = false
 
         /// Record the first outcome and start the source teardown; later settles are ignored.

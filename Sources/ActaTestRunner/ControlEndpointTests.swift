@@ -18,7 +18,7 @@ private func makeTempDir() -> String {
     #expect(result != nil)
     // Drop the trailing NUL (and the CChar array's own terminator) before decoding.
     let bytes = template.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
-    return String(decoding: bytes, as: UTF8.self)
+    return String(bytes: bytes, encoding: .utf8) ?? ""
 }
 
 private func cleanup(_ dir: String) {
@@ -140,7 +140,9 @@ func aRegularFileAtThePathIsNeverRemoved() throws {
     defer { cleanup(dir) }
     let path = dir + "/control.sock"
     #expect(FileManager.default.createFile(atPath: path, contents: Data("x".utf8)))
-    #expect(throws: (any Error).self) {
+    // A regular file is not a socket we own, so bind refuses with `addressInUse` — asserting the
+    // specific error, not just "some throw", proves the refusal path (not an unrelated failure) is taken.
+    #expect(throws: ControlEndpoint.BindError.addressInUse) {
         _ = try ControlEndpoint(socketPath: path).bind()
     }
     // The regular file survives untouched.
@@ -155,7 +157,9 @@ func aSymlinkAtThePathIsNeverRemoved() throws {
     let target = dir + "/real"
     #expect(FileManager.default.createFile(atPath: target, contents: Data()))
     #expect(symlink(target, path) == 0)
-    #expect(throws: (any Error).self) {
+    // A symlink is never a socket we own, so bind refuses with `addressInUse` (the exact-error assertion
+    // proves the "never remove a non-socket" refusal ran, not some unrelated failure).
+    #expect(throws: ControlEndpoint.BindError.addressInUse) {
         _ = try ControlEndpoint(socketPath: path).bind()
     }
     // The symlink itself survives (lstat sees the link, not its target).

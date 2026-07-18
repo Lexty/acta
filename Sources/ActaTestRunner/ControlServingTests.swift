@@ -163,6 +163,83 @@ func aReadIdleDeadlineClosesASilentConnection() async {
     #expect(await client.recvLine() == nil)
 }
 
+// MARK: - A write deadline fires
+
+@available(macOS 15.0, *)
+@MainActor
+@Test
+func aWriteDeadlineClosesAStuckWriter() async {
+    let fake = FakeControlServing()
+    fake.currentState = ControlState(recordings: (0..<300).map { fixtureRecording("rec\($0)") })
+    let dispatcher = ControlDispatcher(service: fake, confinement: .socket)
+
+    let (serverFD, client) = makePair()
+    setSendBuffer(serverFD, 1024)
+    client.setReceiveBuffer(1024)
+    ControlSocketOptions.configureConnection(serverFD)
+    let io = ControlConnectionIO(fd: serverFD, label: "test.writedeadline")
+    // A short write deadline, a generous read/idle one — so the connection dies on the write, not the read.
+    let timeouts = ControlServingTimeouts(readIdle: .seconds(5), write: .milliseconds(150))
+    let connection = ControlConnection(io: io, handler: dispatcher, timeouts: timeouts, log: servingTestLogger())
+    let task = Task { await connection.serve() }
+    defer { task.cancel(); client.close() }
+
+    // Ask for a response far larger than the 1 KiB buffers, then never drain it. The write stalls on
+    // `EAGAIN`, the write deadline elapses, and the server gives up and closes — rather than pinning the
+    // slot forever on a client that stopped reading.
+    await client.send(enc(WireRequest(id: "l", command: .list)))
+    // Wait past the write deadline BEFORE reading — a premature drain would itself unstick the writer and
+    // hide the deadline.
+    try? await Task.sleep(nanoseconds: 400_000_000)
+    // The frame never completed (its terminating LF was never written), so the client drains the partial
+    // bytes and then sees EOF. A regression that never fired the write deadline would hang here instead.
+    #expect(await client.recvLine() == nil)
+}
+
+// MARK: - Decode-error mappings
+
+@available(macOS 15.0, *)
+@MainActor
+@Test
+func aMalformedFrameClosesWithoutAReply() async throws {
+    let fake = FakeControlServing()
+    fake.currentState = ControlState(operation: .idle)
+    let (path, cleanup) = try makeServer(fake)
+    defer { cleanup() }
+
+    guard let client = TestSocketClient.connect(to: path) else { Issue.record("connect"); return }
+    defer { client.close() }
+
+    // A well-framed but non-JSON payload has no id to address a reply to, so the server closes silently.
+    await client.send(Data("this is not json".utf8))
+    #expect(await client.recvLine() == nil)
+}
+
+@available(macOS 15.0, *)
+@MainActor
+@Test
+func aVersionMismatchGetsAnUnsupportedVersionError() async throws {
+    let fake = FakeControlServing()
+    fake.currentState = ControlState(operation: .idle)
+    let (path, cleanup) = try makeServer(fake)
+    defer { cleanup() }
+
+    guard let client = TestSocketClient.connect(to: path) else { Issue.record("connect"); return }
+    defer { client.close() }
+
+    // A syntactically valid request carrying a future protocol version: the id survives, so it earns an
+    // addressed `unsupported_version` error rather than a silent close.
+    await client.send(enc(WireRequest(id: "v", command: .status, version: 999)))
+    let response = decodeResponse(await client.recvLine())
+    #expect(response?.id == "v")
+    guard case .error(let wireError) = response?.payload else {
+        Issue.record("expected an error, got \(String(describing: response?.payload))"); return
+    }
+    #expect(wireError.code == WireError.Code.unsupportedVersion)
+    // Nothing was dispatched to the service — the mismatch is rejected before reaching it.
+    #expect(fake.calls.isEmpty)
+}
+
 // MARK: - Cancelling a pending readiness wait closes the fd
 
 @available(macOS 15.0, *)

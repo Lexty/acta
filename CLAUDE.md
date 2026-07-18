@@ -96,7 +96,9 @@ Consequences to keep in mind:
   undecodable to an older client — that is a version bump, not an additive change.
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`. Anything worth testing goes here —
+  `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`, `ControlStringPolicy` (the shared
+  length/character bound the socket dispatcher enforces on every caller-supplied wire string).
+  Anything worth testing goes here —
   including **constants a test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`):
   `SelfCheck` is internal to `ActaRuntime`, and a threshold written once in the runtime and again in
   the test asserts only that the test agrees with itself. The same rule is what puts
