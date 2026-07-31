@@ -8,6 +8,11 @@
     <string>Acta</string>
     <key>CFBundleExecutable</key>
     <string>Acta</string>
+    <!-- Each flavor has its own artwork, but both are installed under this one
+         fixed name: bundle.sh copies AppIcon.icns or AppIcon-dev.icns into the
+         bundle as AppIcon.icns, so this key never has to vary per flavor. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.personal.acta</string>
     <key>CFBundlePackageType</key>
