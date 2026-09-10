@@ -200,6 +200,77 @@ struct MicrophoneReconcilerHardCaseTests {
         #expect(await reconciler.state.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
     }
 
+    // MARK: - 2c. The hold is a question about each candidate, not about the pass
+
+    /// ⚠️ **A refused higher-ranked write proves nothing about the devices below the held one.** The
+    /// pass is rightly allowed to *attempt* the USB microphone, which the user ranks above the
+    /// unaccounted-for headset. When that write is refused, the loop must not walk past the headset and
+    /// switch the system input to the built-in microphone — the headset's absence is still unproven, and
+    /// the built-in is exactly the lower-priority fallback the hold exists to block.
+    ///
+    /// Asking the question once, before the loop, answers it about a candidate the pass may never act
+    /// on. It is now asked about each candidate the loop actually reaches.
+    @Test("a refused higher-ranked write does not authorise a lower-ranked switch")
+    func aRefusedHigherRankedWriteDoesNotUnblockTheFallback() async {
+        let (directory, _, reconciler) = harness(
+            devices: [.airPods(), .builtInMic()],
+            defaultInput: "00-00-5E-00-53-01:input",
+            order: ["USBAudioDevice_UID", "00-00-5E-00-53-01:input", "BuiltInMicrophoneDevice"]
+        )
+        await reconciler.enable()
+        #expect(await reconciler.state.status == .enforcing(uid: "00-00-5E-00-53-01:input"))
+        #expect(directory.attemptedWrites.isEmpty)
+
+        // The USB microphone appears, the headset becomes unreadable, and the USB write is refused.
+        directory.setDevices([.usbMic(), .builtInMic()], uninspectable: ["00-00-5E-00-53-01:input"])
+        directory.scriptWrites([.failed(reason: "refused")], thereafter: .written)
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        // Attempting the higher-ranked device is allowed; falling past the held one is not.
+        #expect(directory.attemptedWrites == ["USBAudioDevice_UID"])
+        #expect(await reconciler.state.observedDefault == .device(uid: "00-00-5E-00-53-01:input"))
+        #expect(await reconciler.state.status == .uncertain(uid: "00-00-5E-00-53-01:input"))
+    }
+
+    /// The same hole reached through a verification timeout rather than a refused write.
+    @Test("a higher-ranked write that never converges does not authorise a lower-ranked switch")
+    func anUnconvergedHigherRankedWriteDoesNotUnblockTheFallback() async {
+        let (directory, _, reconciler) = harness(
+            devices: [.airPods(), .builtInMic()],
+            defaultInput: "00-00-5E-00-53-01:input",
+            order: ["USBAudioDevice_UID", "00-00-5E-00-53-01:input", "BuiltInMicrophoneDevice"]
+        )
+        await reconciler.enable()
+
+        directory.setDevices([.usbMic(), .builtInMic()], uninspectable: ["00-00-5E-00-53-01:input"])
+        directory.setWritesTakeEffect(false)
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        #expect(directory.attemptedWrites == ["USBAudioDevice_UID"])
+        #expect(await reconciler.state.status == .uncertain(uid: "00-00-5E-00-53-01:input"))
+    }
+
+    /// The converse that keeps the fix from being satisfied by refusing to write at all: a candidate the
+    /// user ranks **above** the held device is still written, and the attempt is not blocked.
+    @Test("a higher-ranked candidate is still written while a lower-ranked one is held")
+    func aHigherRankedCandidateIsStillWritten() async {
+        let (directory, _, reconciler) = harness(
+            devices: [.airPods(), .builtInMic()],
+            defaultInput: "00-00-5E-00-53-01:input",
+            order: ["USBAudioDevice_UID", "00-00-5E-00-53-01:input", "BuiltInMicrophoneDevice"]
+        )
+        await reconciler.enable()
+
+        directory.setDevices([.usbMic(), .builtInMic()], uninspectable: ["00-00-5E-00-53-01:input"])
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        #expect(directory.attemptedWrites == ["USBAudioDevice_UID"])
+        #expect(await reconciler.state.status == .enforcing(uid: "USBAudioDevice_UID"))
+    }
+
     // MARK: - 3b. A proved departure retires the hold, even with nothing to replace it
 
     /// ⚠️ **One complete snapshot showing the device gone must not be forgotten by the next incomplete

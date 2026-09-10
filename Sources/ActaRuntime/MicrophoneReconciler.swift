@@ -358,13 +358,10 @@ public actor MicrophoneReconciler {
         expireOverride(devices: devices, snapshotComplete: snapshotComplete, removals: removals)
         retireHoldOnProvedDeparture(devices: devices, snapshotComplete: snapshotComplete, removals: removals)
 
-        if let held = uncertainHold(devices: devices, snapshotComplete: snapshotComplete) {
-            publish(.uncertain(uid: held), preferred: held)
-            return
-        }
-
         let generationAtStart = generation
-        let (outcome, unsuccessful) = await reconcile(devices: devices, generationAtStart: generationAtStart)
+        let (outcome, unsuccessful) = await reconcile(devices: devices,
+                                                      snapshotComplete: snapshotComplete,
+                                                      generationAtStart: generationAtStart)
 
         // ⚠️ **The charge is on the attempt, not on how the pass happened to end**, and that is the
         // whole correction here. Charging only a pass that returned `.refused` left two ways out. A
@@ -399,33 +396,34 @@ public actor MicrophoneReconciler {
             publish(.suspended(cause), preferred: published.preferred)
         case .refused(let uids):
             publish(.writesRefused(uids: uids), preferred: uids.first)
+        case .uncertain(let uid):
+            publish(.uncertain(uid: uid), preferred: uid)
         }
     }
 
-    /// The device whose absence this snapshot could not rule out, when holding it is the right call.
+    /// The device this candidate must not displace, or `nil` if writing the candidate is legitimate.
     ///
     /// ⚠️ **Membership in the list is not the comparison that matters** — preference *order* is. A held
-    /// device that is merely unaccounted for must be held against a **lower-priority** fallback, because
-    /// switching to that fallback would be acting on an absence nobody proved. It must **not** be held
-    /// against a device the user ranks *above* it: selecting that one requires no inference about the
-    /// held device at all, and feature (B) promises a priority edit reconciles immediately. The case
-    /// this closes: confirm the USB microphone, have it go unreadable, then reorder the list to put the
-    /// built-in first — and watch nothing happen.
-    private func uncertainHold(devices: [AudioInputDevice], snapshotComplete: Bool) -> String? {
-        guard !snapshotComplete, let held = heldSelection() else { return nil }
+    /// device that is merely unaccounted for must be held against a **lower-priority** candidate,
+    /// because switching to that one would be acting on an absence nobody proved. It must **not** be
+    /// held against a device the user ranks *above* it: selecting that one requires no inference about
+    /// the held device at all, and feature (B) promises a priority edit reconciles immediately.
+    ///
+    /// ⚠️ **It is asked once per candidate, not once per pass, and that is the whole correction.**
+    /// Asking only about the pass's *first* candidate answers a question the pass may never act on: if
+    /// that higher-ranked candidate is then refused — or its write never converges — the loop walks
+    /// down past the still-unaccounted-for device and writes something *below* it. A refused write is
+    /// not a proof of departure, and it authorises nothing about the devices ranked under the one that
+    /// could not be seen.
+    private func holdBlocking(candidate: String,
+                              devices: [AudioInputDevice],
+                              snapshotComplete: Bool) -> String? {
+        guard !snapshotComplete, let held = heldSelection(), held != candidate else { return nil }
         guard MicrophonePolicy.presence(of: held, in: devices, snapshotComplete: snapshotComplete) == .unknown
         else { return nil }
         guard let heldRank = preferenceRank(of: held) else { return nil }
-        if case .selected(let candidate) = MicrophonePolicy.select(from: devices,
-                                                                   priority: priorityStorage,
-                                                                   purpose: .systemDefault),
-           let candidateRank = preferenceRank(of: candidate.uid),
-           candidateRank < heldRank {
-            // The user prefers what this snapshot *can* offer. No inference about the held device is
-            // needed to choose it.
-            return nil
-        }
-        return held
+        guard let candidateRank = preferenceRank(of: candidate) else { return held }
+        return candidateRank < heldRank ? nil : held
     }
 
     /// Where a uid sits in the user's preferences: the override outranks the whole list, and a uid the
@@ -462,12 +460,16 @@ public actor MicrophoneReconciler {
         case refused([String])
         case degraded(String)
         case abandoned
+        /// Nothing further may be written: the next candidate ranks below a device this snapshot could
+        /// not account for.
+        case uncertain(String)
         /// The budget tripped during this pass. ⚠️ Its own outcome rather than `.abandoned`: a
         /// suspension nobody publishes is a reconciler that silently stopped working.
         case suspended(SuspensionCause)
     }
 
     private func reconcile(devices: [AudioInputDevice],
+                           snapshotComplete: Bool,
                            generationAtStart: UInt64) async -> (PassOutcome, unsuccessful: Bool) {
         var unsuccessful = false
         // ⚠️ Refusals are per **pass**, never persisted. A device the OS rejected once must be tried
@@ -489,6 +491,11 @@ public actor MicrophoneReconciler {
             case .allPreferredCandidatesRefused(let uids):
                 return (.refused(uids), unsuccessful)
             case .selected(let device):
+                if let held = holdBlocking(candidate: device.uid,
+                                           devices: devices,
+                                           snapshotComplete: snapshotComplete) {
+                    return (.uncertain(held), unsuccessful)
+                }
                 switch await enforce(device.uid, generationAtStart: generationAtStart) {
                 case .settled:
                     return (.settled(uid: device.uid), unsuccessful)
