@@ -418,12 +418,28 @@ public actor MicrophoneReconciler {
     private func holdBlocking(candidate: String,
                               devices: [AudioInputDevice],
                               snapshotComplete: Bool) -> String? {
-        guard !snapshotComplete, let held = heldSelection(), held != candidate else { return nil }
-        guard MicrophonePolicy.presence(of: held, in: devices, snapshotComplete: snapshotComplete) == .unknown
-        else { return nil }
-        guard let heldRank = preferenceRank(of: held) else { return nil }
+        guard let held = unknownHeldSelection(devices: devices, snapshotComplete: snapshotComplete),
+              held != candidate,
+              let heldRank = preferenceRank(of: held) else { return nil }
         guard let candidateRank = preferenceRank(of: candidate) else { return held }
         return candidateRank < heldRank ? nil : held
+    }
+
+    /// The device Acta is holding whose absence this snapshot could not rule out.
+    ///
+    /// ⚠️ **Every terminal outcome has to consult this, not only the ones that were about to write.**
+    /// "There is no usable input on this Mac" and "nothing you prefer is here" are claims about the
+    /// hardware; a directory that could not describe the very device currently in use has established
+    /// neither. Reporting one of them anyway turns an observation failure into ordinary absence, which
+    /// is the distinction this whole feature is built on — and it is the regression that moving the
+    /// rank check into the candidate loop introduced, since the two no-candidate paths return before
+    /// any candidate exists to compare against.
+    private func unknownHeldSelection(devices: [AudioInputDevice], snapshotComplete: Bool) -> String? {
+        guard !snapshotComplete, let held = heldSelection(), preferenceRank(of: held) != nil else {
+            return nil
+        }
+        let presence = MicrophonePolicy.presence(of: held, in: devices, snapshotComplete: snapshotComplete)
+        return presence == .unknown ? held : nil
     }
 
     /// Where a uid sits in the user's preferences: the override outranks the whole list, and a uid the
@@ -485,8 +501,14 @@ public actor MicrophoneReconciler {
                                            purpose: .systemDefault,
                                            refused: refused) {
             case .noEligibleDevice:
+                if let held = unknownHeldSelection(devices: devices, snapshotComplete: snapshotComplete) {
+                    return (.uncertain(held), unsuccessful)
+                }
                 return (.noEligibleDevice, unsuccessful)
             case .noPreferredDeviceAvailable:
+                if let held = unknownHeldSelection(devices: devices, snapshotComplete: snapshotComplete) {
+                    return (.uncertain(held), unsuccessful)
+                }
                 return (.waiting, unsuccessful)
             case .allPreferredCandidatesRefused(let uids):
                 return (.refused(uids), unsuccessful)

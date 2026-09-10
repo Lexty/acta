@@ -271,6 +271,69 @@ struct MicrophoneReconcilerHardCaseTests {
         #expect(await reconciler.state.status == .enforcing(uid: "USBAudioDevice_UID"))
     }
 
+    /// ⚠️ **A failure to describe the held device is not a claim about the hardware.** When no candidate
+    /// can be selected at all, the reconciler still has to say *why* — and "this Mac has no usable
+    /// input" and "nothing you prefer is here" are both assertions the directory has not earned while
+    /// it cannot account for the microphone currently in use. Publishing either one presents an
+    /// observation failure as ordinary absence, which is the distinction the whole feature rests on.
+    ///
+    /// Both variants leave the actual default untouched and write nothing; the defect is entirely in
+    /// the published diagnosis, which is exactly the kind that survives a suite checking only writes.
+    @Test("an unaccounted-for held device is not reported as missing hardware", arguments: [
+        ([AudioInputDevice](), MicrophoneEnforcementStatus.noEligibleDevice),
+        ([AudioInputDevice.builtInMic()], MicrophoneEnforcementStatus.waitingForPreferredDevice),
+    ])
+    func anUnknownHeldDeviceOutranksEveryNoCandidateVerdict(
+        _ scenario: ([AudioInputDevice], MicrophoneEnforcementStatus)
+    ) async {
+        let (inspected, wrongVerdict) = scenario
+        let (directory, _, reconciler) = harness(
+            devices: [.airPods()],
+            defaultInput: "00-00-5E-00-53-01:input",
+            order: ["USBAudioDevice_UID", "00-00-5E-00-53-01:input"]
+        )
+        await reconciler.enable()
+        #expect(await reconciler.state.status == .enforcing(uid: "00-00-5E-00-53-01:input"))
+        #expect(directory.attemptedWrites.isEmpty)
+
+        // The headset is still the actual default; the directory simply cannot describe it.
+        directory.setDevices(inspected, uninspectable: ["00-00-5E-00-53-01:input"])
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        let status = await reconciler.state.status
+        #expect(status == .uncertain(uid: "00-00-5E-00-53-01:input"))
+        #expect(status != wrongVerdict)
+        #expect(directory.attemptedWrites.isEmpty)
+        #expect(await reconciler.state.observedDefault == .device(uid: "00-00-5E-00-53-01:input"))
+    }
+
+    /// The converse, and it was missing until a negative control walked straight through the suite: an
+    /// incomplete snapshot that **does** describe the held device has proved something about it, so a
+    /// verdict drawn from that description is earned and must be published.
+    ///
+    /// ⚠️ Here the headset is listed and reported not alive. "Present and unusable" is a fact; laundering
+    /// it into "I could not see it" would be the same error as the regression above, pointing the other
+    /// way — and it is the error a hold that never checks presence would make.
+    @Test("a held device that is described and unusable still yields a real verdict")
+    func aDescribedButUnusableHeldDeviceIsNotUncertainty() async {
+        let (directory, _, reconciler) = harness(devices: [.airPods()],
+                                                 defaultInput: "00-00-5E-00-53-01:input",
+                                                 order: ["00-00-5E-00-53-01:input"])
+        await reconciler.enable()
+        #expect(await reconciler.state.status == .enforcing(uid: "00-00-5E-00-53-01:input"))
+
+        // Still listed, still described — and no longer usable. An unrelated driver is unreadable, so
+        // the snapshot is incomplete and the hold is in play.
+        directory.setDevices([.airPods(alive: .no)], uninspectable: ["BlackHole2ch_UID"])
+        directory.setDefaultInput(DefaultInputRead.none)
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        #expect(await reconciler.state.status == .noEligibleDevice)
+        #expect(await reconciler.state.observedDefault == .noDefault)
+    }
+
     // MARK: - 3b. A proved departure retires the hold, even with nothing to replace it
 
     /// ⚠️ **One complete snapshot showing the device gone must not be forgotten by the next incomplete

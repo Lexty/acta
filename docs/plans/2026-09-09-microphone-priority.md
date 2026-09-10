@@ -245,7 +245,12 @@ be one that cannot loop.
       loop must not walk past the unaccounted-for device and write something ranked *below* it. A
       refused write proves nothing about a departure and authorises nothing about the fallbacks under
       it. Both converse behaviours stay: a higher-ranked candidate is still written, and a **proved**
-      departure still permits the fallback. The reversal is
+      departure still permits the fallback. ⚠️ And **every** terminal outcome consults the unknown held
+      device, not only the ones about to write: "this Mac has no usable input" and "nothing you prefer
+      is here" are claims about the hardware, and a directory that could not describe the microphone
+      currently in use has earned neither. The converse is pinned too — a held device the snapshot
+      *does* describe as unusable yields the real verdict, because "present and unusable" is a proved
+      fact and must not be laundered into "I could not see it". The reversal is
       also consumed when charged: one displacement is one setback, however many passes can still see
       its aftermath
 - [x] ⚠️ **Bounded verification must tell delayed convergence from repeated conflict.** A successful
