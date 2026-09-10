@@ -389,6 +389,9 @@ public final class MicrophoneManager {
             let observed: DeviceEnumeration? = change == .deviceListChanged
                 ? self?.directory.enumerateInputDevices()
                 : nil
+            // Tagged where the change was delivered, so the actor can order it against a *Use now*
+            // issued afterwards.
+            let seq = self?.reconciler.observationSequence.mint() ?? 0
             Task { @MainActor in
                 guard let self, self.lifetimeEpoch == epoch, self.started else { return }
                 // ⚠️ **`observationDegraded` is not just another reason to re-read.** It says the
@@ -397,7 +400,7 @@ public final class MicrophoneManager {
                 // Treating it as a plain refresh request republishes a clean inventory and the one
                 // failure that announces itself in no other way disappears.
                 if case .observationDegraded(let reason) = change { self.observationDegraded = reason }
-                await self.expireCaptureOverrideIfDeparted(observed: observed)
+                await self.expireCaptureOverrideIfDeparted(observed: observed, at: seq)
                 self.refreshInventory(observed: observed)
             }
         }) {
@@ -462,11 +465,15 @@ public final class MicrophoneManager {
     /// override from the reconciler that still held it — the override came back from the dead.
     ///
     /// Absence is proved, never inferred: an incomplete snapshot leaves the override alone.
-    private func expireCaptureOverrideIfDeparted(observed: DeviceEnumeration?) async {
+    private func expireCaptureOverrideIfDeparted(observed: DeviceEnumeration?, at seq: UInt64) async {
         guard let override = capturePreference.priority.override else { return }
         guard case .devices(let devices, let uninspectable) = observed, uninspectable.isEmpty else { return }
         guard !devices.contains(where: { $0.uid == override }) else { return }
-        await reconciler.resumeAutomaticSelection()
+        // ⚠️ **Ordered against *Use now*, not merely applied.** A removal delivered before the user
+        // picked a device describes a world that predates their choice; retiring the choice with it is
+        // the same bug the reconciler's inbox was built to prevent, and a second expiry path that
+        // ignored the ordering would reintroduce it here.
+        guard await reconciler.expireOverride(override, observedAt: seq) else { return }
         await syncCapturePreference()
     }
 

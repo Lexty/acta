@@ -388,8 +388,12 @@ global enforcer **per recording session**.
       wait under unrestricted test parallelism, and ordinary 48 kHz tests time out alongside it.
       Serializing the suite returns the whole gate to ~4.7 s with the test mandatory. The remaining gap
       is the **oracle**: it asserts byte growth rather than playable segments and real assembly over the
-      full rate/channel matrix, which is the open item in
-      `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`
+      full rate/channel matrix — **now done**: the test assembles for real through `SegmentAssembler`
+      and asserts **duration conservation** across the switch, over all four rate/channel cases, in
+      0.9 s. Its negative control — the post-switch audio never reaching the writer — fails every case.
+      The oracle it replaces compared file sizes and counted *received* buffers while claiming every
+      delivered buffer was written; received says nothing about written, and header-only files satisfy
+      a size comparison
 
 ### Task 6: Protocol v2 and the settings fields
 

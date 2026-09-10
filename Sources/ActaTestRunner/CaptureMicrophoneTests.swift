@@ -245,15 +245,17 @@ struct CaptureMicrophoneTests {
     /// alongside it. Serializing this suite fixes it, and these tests then cost 0.012 s. See
     /// `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`.
     @Test("a switch between source formats leaves every segment valid and assembles",
-          arguments: [(24_000.0, AVAudioChannelCount(2))])
+          arguments: [(48_000.0, AVAudioChannelCount(1)), (48_000.0, AVAudioChannelCount(2)),
+                      (24_000.0, AVAudioChannelCount(1)), (24_000.0, AVAudioChannelCount(2))])
     @available(macOS 15.0, *)
     func aFormatSwitchKeepsEverySegmentValid(_ format: (rate: Double, channels: AVAudioChannelCount)) async throws {
         try await withTemporaryDirectoryAsync { directory in
             let (source, resolver, recorder) = self.recorder(
                 .pinned(.builtInMic(), alternatives: []), in: directory
             )
-            // One buffer per side rather than the default batch of three: the property under test
-            // needs a buffer on each side of the switch, not three of them.
+            // One buffer per side: the property under test needs a buffer on each side of the switch.
+            // `FakeCaptureSource.framesPerBuffer` is one second at 48 kHz, so each side is one second
+            // of audio *as delivered* — a 24 kHz buffer of the same frame count is half a second.
             source.setEmitOnStart(false)
             try await recorder.start()
             source.enqueueBatch(count: 1)
@@ -266,37 +268,28 @@ struct CaptureMicrophoneTests {
             source.drain()
             await recorder.stop()
 
-            // ⚠️ **The oracle here is byte growth**, and its weakness is stated rather than dressed up:
-            // `AVAudioFile` refused these segments, and I wrote that off as "a fact about the reader".
-            // That was unsupported — a review read every finalised WAV through `AVAudioFile` in an
-            // unrestricted run, and a *timed-out* finalisation leaves a file needing repair, which
-            // explains the refusal far better. Restoring a playability-and-duration oracle over the
-            // full rate/channel matrix is the open item in the backlog entry above.
-            for track in ["system", "mic"] {
-                let folder = directory.appendingPathComponent(track)
-                let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
-                    .filter { $0.hasSuffix(".wav") }.sorted()
-                #expect(files.count == 2, "\(track): expected a segment on each side of the switch")
+            // ⚠️ **Assembled for real, and the oracle is the assembled audio.** The previous version of
+            // this test compared file sizes and counted *received* buffers while claiming "every
+            // delivered buffer was accepted" — received says nothing about written, and header-only
+            // files satisfy a size comparison. What actually has to hold is that the segments on both
+            // sides of the switch are readable by the assembler and that their audio survives into the
+            // final file.
+            let assembled = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
 
-                let sizes = files.map { file -> Int in
-                    let path = folder.appendingPathComponent(file).path
-                    return (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) as? Int ?? 0
-                }
-                #expect(sizes.allSatisfy { $0 > 0 }, "\(track): a segment is empty")
-                // ⚠️ **The property the review's failure actually violated**: the post-switch segment
-                // must hold at least as much audio as the pre-switch one. The same number of buffers is
-                // delivered on each side, so a new source format whose buffers cannot be written shows
-                // up here as a short second segment — which is silent loss, since `source.start()`
-                // returning is not evidence the new track can be written.
-                if let first = sizes.first, let second = sizes.last {
-                    #expect(second >= first,
-                            "\(track): the post-switch segment is shorter than the pre-switch one")
-                }
-            }
+            #expect(assembled.segmentCount == 2, "a segment on each side of the switch must assemble")
+            let mic = try #require(assembled.micWAV, "the microphone track did not assemble")
+            #expect(FileManager.default.fileExists(atPath: mic.path))
 
-            // Every delivered buffer was accepted on both sides of the switch.
-            #expect(recorder.receivedBufferCounts.mic == 2)
-            #expect(recorder.receivedBufferCounts.system == 2)
+            // ⚠️ **Duration conservation is the assertion that catches the real failure mode**: a new
+            // source format whose buffers cannot be written leaves a segment that opens and holds
+            // nothing, and `source.start()` returning is not evidence the new track can be written.
+            // The pre-switch second plus the post-switch buffer, which is `framesPerBuffer` at the new
+            // rate.
+            let postSwitch = Double(FakeCaptureSource.framesPerBuffer) / format.rate
+            let expected = 1.0 + postSwitch
+            let duration = try #require(assembled.durationSeconds, "the assembled file has no duration")
+            #expect(abs(duration - expected) < 0.05,
+                    "assembled \(duration)s, expected \(expected)s — audio was lost across the switch")
         }
     }
 

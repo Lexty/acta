@@ -217,6 +217,32 @@ struct MicrophoneManagerTests {
         #expect(manager.capturePreference.priority.override == nil, "the override outlived its device")
     }
 
+    /// A smoke test for the wiring: a *Use now* issued after an observed leave-and-return survives.
+    ///
+    /// ⚠️ **It does not prove the ordering guard** — the removal here is consumed before any override
+    /// exists, so the comparison is never reached, and its negative control passes. The guard itself is
+    /// pinned in `MicrophoneReconcilerHardCaseTests.expiryIsOrderedAgainstUseNow`, where the sequence
+    /// numbers are controllable. Recorded rather than left to read as coverage.
+    @Test("a departure observed before Use now does not retire it")
+    @MainActor
+    func aStaleDepartureDoesNotRetireANewerUseNow() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+                                                                   defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+
+        // The headset drops out and returns, both observed, with no override in force.
+        directory.setDevices([.builtInMic()])
+        directory.emit(.deviceListChanged)
+        _ = await awaitInventory(manager) { $0.devices.count == 1 }
+        directory.setDevices([.builtInMic(), .airPods()])
+        directory.emit(.deviceListChanged)
+        _ = await awaitInventory(manager) { $0.devices.count == 2 }
+
+        await manager.useNow(uid: "00-00-5E-00-53-01:input")
+
+        #expect(manager.capturePreference.priority.override == "00-00-5E-00-53-01:input")
+    }
+
     /// ⚠️ The other half: an **incomplete** snapshot proves nothing, and must leave the override alone.
     @Test("an incomplete snapshot does not expire a capture override")
     func anIncompleteSnapshotKeepsTheCaptureOverride() async {

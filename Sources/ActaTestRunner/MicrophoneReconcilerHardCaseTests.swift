@@ -437,6 +437,38 @@ struct MicrophoneReconcilerHardCaseTests {
         #expect(await reconciler.priority.override == "00-00-5E-00-53-01:input")
     }
 
+    /// ⚠️ **An expiry carries the sequence of the observation that saw the departure**, and only a
+    /// departure seen *after* the user's choice may retire it. The manager expires the capture override
+    /// from outside this actor's inbox, so without the comparison a removal delivered before the click
+    /// would cancel it — the exact ordering bug the inbox exists to prevent, reintroduced by a second
+    /// path.
+    ///
+    /// Driven here rather than through the manager because that is where the sequence numbers are
+    /// controllable: an integration test can only hope the stale delivery lands in the right window.
+    @Test("a departure observed before Use now cannot expire it, and one after can")
+    func expiryIsOrderedAgainstUseNow() async {
+        let (_, _, reconciler) = harness(devices: [.builtInMic(), .airPods()],
+                                         defaultInput: "BuiltInMicrophoneDevice",
+                                         order: ["BuiltInMicrophoneDevice"])
+        await reconciler.enable()
+
+        // Something was observed before the user chose.
+        let beforeChoice = reconciler.observationSequence.mint()
+        await reconciler.useNow(uid: "00-00-5E-00-53-01:input")
+
+        let retiredByStale = await reconciler.expireOverride("00-00-5E-00-53-01:input",
+                                                             observedAt: beforeChoice)
+        #expect(retiredByStale == false, "a departure predating the choice retired it")
+        #expect(await reconciler.priority.override == "00-00-5E-00-53-01:input")
+
+        // And a departure seen afterwards does retire it.
+        let afterChoice = reconciler.observationSequence.mint()
+        let retiredByFresh = await reconciler.expireOverride("00-00-5E-00-53-01:input",
+                                                             observedAt: afterChoice)
+        #expect(retiredByFresh)
+        #expect(await reconciler.priority.override == nil)
+    }
+
     // MARK: - 4. The forbidden failover
 
     /// ⚠️ **Keeping the stored preference is only half of not acting on an unproven absence.** The

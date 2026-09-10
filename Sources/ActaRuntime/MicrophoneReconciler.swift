@@ -59,7 +59,9 @@ public actor MicrophoneReconciler {
     // could not observe anything at the moment it was told to.
     private nonisolated let directory: any AudioDeviceDirectory
     private nonisolated let clock: any SelfCheckClock
-    private nonisolated let inbox = ObservationInbox()
+    private nonisolated let inbox: ObservationInbox
+    /// Shared with the manager, so both order against the same *Use now* — see `DeviceObservationSequence`.
+    public nonisolated let observationSequence: DeviceObservationSequence
 
     private var priorityStorage: MicrophonePriority
     private var enabled = false
@@ -115,9 +117,12 @@ public actor MicrophoneReconciler {
 
     public init(directory: any AudioDeviceDirectory,
                 clock: any SelfCheckClock = SystemClock(),
-                priority: MicrophonePriority = .empty) {
+                priority: MicrophonePriority = .empty,
+                observationSequence: DeviceObservationSequence = DeviceObservationSequence()) {
         self.directory = directory
         self.clock = clock
+        self.observationSequence = observationSequence
+        inbox = ObservationInbox(sequence: observationSequence)
         priorityStorage = priority
     }
 
@@ -258,6 +263,29 @@ public actor MicrophoneReconciler {
         overrideSetAtSeq = inbox.highWaterMark
         await schedule(.useNow)
     }
+
+    /// Retire the override **because its device was seen to leave**, at a known point in the event
+    /// order.
+    ///
+    /// ⚠️ **Not `resumeAutomaticSelection()`, and the difference is the whole point.** That one is the
+    /// user saying "go back to the list" and retires whatever is there. This one carries the sequence
+    /// number of the observation that saw the departure, and applies only to an override that was
+    /// already in force then — so a removal delivered before the user's newer *Use now* cannot retire
+    /// it. The reconciler's inbox exists to solve exactly that ordering problem, and a second expiry
+    /// path that bypassed it would reintroduce the bug the inbox was built for.
+    ///
+    /// - Returns: whether the override was actually retired.
+    @discardableResult
+    public func expireOverride(_ uid: String, observedAt seq: UInt64) async -> Bool {
+        guard priorityStorage.override == uid, seq > overrideSetAtSeq else { return false }
+        priorityStorage.override = nil
+        await schedule(.overrideCleared)
+        return true
+    }
+
+    /// The sequence number to tag an observation made outside this actor with, so it can be ordered
+    /// against a *Use now*.
+    public func currentObservationSequence() -> UInt64 { inbox.highWaterMark }
 
     /// Retire the temporary override and go back to the list.
     public func resumeAutomaticSelection() async {
@@ -754,6 +782,36 @@ public actor MicrophoneReconciler {
     }
 }
 
+
+/// A monotonic sequence for audio-device observations, shared by every observer of one directory.
+///
+/// ⚠️ **One space, deliberately.** The reconciler orders its own inbox against a *Use now*, and the
+/// manager has to order its capture-override expiry against the same *Use now* — with two counters
+/// those comparisons are between unrelated numbers, which is worse than no ordering because it looks
+/// like ordering. It is a class with a lock rather than actor state because it is minted inside
+/// synchronous directory callbacks, where nothing can be awaited.
+public final class DeviceObservationSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var next: UInt64 = 1
+
+    public init() {}
+
+    public func mint() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = next
+        next &+= 1
+        return value
+    }
+
+    /// The highest number issued so far: everything at or below it is already history.
+    public var highWaterMark: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return next &- 1
+    }
+}
+
 /// Observations as the directory delivered them: **in order, with the world as it looked at the time**.
 ///
 /// ⚠️ **This type exists because the hop from a synchronous handler to an actor is a real gap, not a
@@ -777,31 +835,22 @@ private final class ObservationInbox: @unchecked Sendable {
 
     private let lock = NSLock()
     private var items: [Observation] = []
-    private var nextSeq: UInt64 = 1
+    private let sequence: DeviceObservationSequence
+
+    init(sequence: DeviceObservationSequence) { self.sequence = sequence }
 
     func append(change: DeviceChange, snapshot: DeviceEnumeration?) {
+        let seq = sequence.mint()
         lock.lock()
         defer { lock.unlock() }
-        items.append(Observation(seq: nextSeq, change: change, snapshot: snapshot))
-        nextSeq &+= 1
+        items.append(Observation(seq: seq, change: change, snapshot: snapshot))
     }
 
     /// Mint a sequence number for an observation the actor makes itself, so a pass's own snapshot orders
     /// correctly against the delivered ones.
-    func mint() -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        let seq = nextSeq
-        nextSeq &+= 1
-        return seq
-    }
+    func mint() -> UInt64 { sequence.mint() }
 
-    /// The highest sequence number issued so far: everything at or below it is already history.
-    var highWaterMark: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return nextSeq &- 1
-    }
+    var highWaterMark: UInt64 { sequence.highWaterMark }
 
     func drain() -> [Observation] {
         lock.lock()
