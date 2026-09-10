@@ -28,25 +28,27 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     private var subscribers: [UInt64: Gate] = [:]
     private var nextToken: UInt64 = 1
 
-    /// Deliveries run here so cancellation can **drain** it, which is the half of the contract that a
-    /// registry removal cannot provide. Without it the fake would promise less than
-    /// `CoreAudioDeviceDirectory` does, and a reconciler bug that only the real adapter's guarantee
-    /// prevents would pass the whole suite.
-    private let deliveryQueue = DispatchQueue(label: "fake.audio.devices.delivery")
-    private static let deliveryKey = DispatchSpecificKey<Void>()
+    /// The subscriber registry and every delivery live on this one serial queue, mirroring
+    /// `CoreAudioDeviceDirectory`'s single execution domain. Being inside a block on it is the proof
+    /// that no handler is running concurrently, which is what makes cancellation's guarantee hold
+    /// without a separate drain step.
+    ///
+    /// ⚠️ **The key is per instance.** A shared static key answers "am I on my own queue?" with *yes*
+    /// while standing on a different directory's queue, quietly skipping this one's serialization.
+    private let coordinatorQueue = DispatchQueue(label: "fake.audio.devices.coordinator")
+    private let coordinatorKey = DispatchSpecificKey<ObjectIdentifier>()
 
     /// A handler behind a gate — the same shape `CoreAudioDeviceDirectory.Subscriber` has, because a
     /// guarantee the fake makes and the real source does not is a bug in the fake, and so is the
-    /// reverse.
+    /// reverse. No lock: the coordinator queue is the lock.
     private final class Gate {
-        private let lock = NSLock()
-        private var handler: (@Sendable (DeviceChange) -> Void)?
+        var handler: (@Sendable (DeviceChange) -> Void)?
         init(_ handler: @escaping @Sendable (DeviceChange) -> Void) { self.handler = handler }
-        func deliver(_ change: DeviceChange) {
-            lock.lock(); let handler = self.handler; lock.unlock()
-            handler?(change)
-        }
-        func close() { lock.lock(); handler = nil; lock.unlock() }
+    }
+
+    private func onCoordinator<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: coordinatorKey) == ObjectIdentifier(self) { return body() }
+        return coordinatorQueue.sync(execute: body)
     }
 
     /// ⚠️ The diagnostics below are written under `lock` and must be **read** under it too. A
@@ -68,8 +70,8 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
 
     init(devices: [AudioInputDevice] = [], defaultInput: String? = nil) {
         enumeration = .devices(devices, uninspectable: [])
-        deliveryQueue.setSpecific(key: Self.deliveryKey, value: ())
         defaultRead = defaultInput.map { .device(uid: $0) } ?? DefaultInputRead.none
+        coordinatorQueue.setSpecific(key: coordinatorKey, value: ObjectIdentifier(self))
     }
 
     // MARK: - Scripting
@@ -99,18 +101,11 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     /// Deliver a change to every current subscriber, exactly as the HAL listeners would.
     /// Call it twice with the same value to script a duplicate notification.
     func emit(_ change: DeviceChange) {
-        let deliver = { [self] in
-            lock.lock()
-            // Registration order, matching `CoreAudioDeviceDirectory.broadcast` — see the note there
-            // on why an arbitrary dictionary order makes the cancellation guarantee untestable.
+        onCoordinator {
+            // Registration order, matching `CoreAudioDeviceDirectory.broadcast` — see the note there on
+            // why an arbitrary dictionary order makes the cancellation guarantee untestable.
             let targets = subscribers.sorted { $0.key < $1.key }.map(\.value)
-            lock.unlock()
-            for target in targets { target.deliver(change) }
-        }
-        if DispatchQueue.getSpecific(key: Self.deliveryKey) != nil {
-            deliver()
-        } else {
-            deliveryQueue.sync(execute: deliver)
+            for target in targets { target.handler?(change) }
         }
     }
 
@@ -121,10 +116,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
         for change in changes { emit(change) }
     }
 
-    var subscriberCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return subscribers.count
-    }
+    var subscriberCount: Int { onCoordinator { subscribers.count } }
 
     // MARK: - AudioDeviceDirectory
 
@@ -151,51 +143,39 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     }
 
     func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome {
-        lock.lock()
-        if let observationFailure {
+        onCoordinator {
+            lock.lock()
+            let failure = observationFailure
             lock.unlock()
-            return .failed(reason: observationFailure)
+            if let failure { return .failed(reason: failure) }
+            let token = nextToken
+            nextToken += 1
+            subscribers[token] = Gate(handler)
+            return .observing(Subscription(token: token, owner: self))
         }
-        let token = nextToken
-        nextToken += 1
-        subscribers[token] = Gate(handler)
-        lock.unlock()
-        return .observing(Subscription(token: token, owner: self))
     }
 
-    /// Cancellation in the same two halves the contract names: close the gate, then drain the delivery
-    /// queue so a callback already running has finished before `cancel()` returns. Skipping the drain
-    /// when already on the queue is what makes cancelling from inside a handler legal.
+    /// Cancellation, entirely on the coordinator — the same shape as the real adapter, where being
+    /// inside this block is itself the proof that no handler is executing.
     fileprivate func remove(_ token: UInt64) {
-        lock.lock()
-        let gate = subscribers[token]
-        lock.unlock()
-        gate?.close()
-        if DispatchQueue.getSpecific(key: Self.deliveryKey) == nil {
-            deliveryQueue.sync {}
+        onCoordinator {
+            subscribers[token]?.handler = nil
+            subscribers.removeValue(forKey: token)
         }
-        lock.lock(); subscribers.removeValue(forKey: token); lock.unlock()
     }
 
     private final class Subscription: AudioDeviceObservation, @unchecked Sendable {
         private let token: UInt64
         private weak var owner: FakeAudioDeviceDirectory?
-        private let lock = NSLock()
-        private var cancelled = false
-
         init(token: UInt64, owner: FakeAudioDeviceDirectory) {
             self.token = token
             self.owner = owner
         }
 
-        func cancel() {
-            lock.lock()
-            let already = cancelled
-            cancelled = true
-            lock.unlock()
-            guard !already else { return }
-            owner?.remove(token)
-        }
+        /// ⚠️ **No "already cancelled" short-circuit**, matching the real adapter: an early return let a
+        /// second caller leave while the first had not yet closed the gate, so `cancel()` returned
+        /// without its guarantee holding.
+        func cancel() { owner?.remove(token) }
     }
 }
 

@@ -197,9 +197,12 @@ func cancellingFromInsideAHandlerDoesNotDeadlock() {
 
 @Test
 func aSubscriberArrivingAfterTheLastOneLeftStillReceivesEvents() {
-    // The listener lifecycle is torn down when the last subscriber goes and must be brought back for
-    // the next one. A directory that tore down *after* accepting the newcomer would report success and
-    // then deliver nothing — subscribed on paper, deaf in fact.
+    // ⚠️ This is now a *characterization* test, and saying so matters. It once guarded a real race:
+    // listeners were torn down when the registry emptied, and a subscriber arriving during that window
+    // was told it was observing and then silently unhooked. The teardown path has since been deleted
+    // rather than repaired — production holds one directory for the app's lifetime, so nothing needed
+    // it — which makes this assertion cheap to satisfy today. It stays because the day someone
+    // reintroduces teardown-on-empty is the day it earns its keep again.
     let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()])
     guard case .observing(let first) = directory.observe({ _ in }) else {
         Issue.record("expected a subscription"); return

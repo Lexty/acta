@@ -12,36 +12,51 @@ import os
 /// reconnecting one headset moved it from `140` to `181` while the UID stayed identical — so it is
 /// resolved from the UID on every call rather than cached anywhere above.
 ///
-/// ## The three concurrency domains, and why they are separate
+/// ## One execution domain, and why the previous two were wrong
 ///
-/// - **`stateLock`** guards the subscriber registry and the listener bookkeeping. It is held for
-///   pointer-shuffling only. ⚠️ **No HAL call ever runs under it**: `AudioObjectAddPropertyListenerBlock`
-///   can call into the HAL server, and holding a lock across it invites a lock-order inversion against
-///   a callback arriving on another thread.
-/// - **`mutationQueue`** serializes *complete* listener lifecycle operations — install, teardown,
-///   readiness refresh. Serializing the whole operation rather than each step is the point: two
-///   refreshes that interleave can both register a block for the same device and leave only one of them
-///   removable, and CoreAudio retains a registered block until a *matching* removal, so the other leaks
-///   and keeps firing. A `generation` counter closes the remaining window, where a refresh that began
-///   before a teardown would otherwise install listeners for a directory nobody is subscribed to.
-/// - **`deliveryQueue`** is where HAL callbacks arrive and where handlers run. Cancellation drains it.
+/// **Every piece of mutable state and every handler call lives on `coordinatorQueue`, a single serial
+/// queue.** The registry, the listener bookkeeping and delivery are one domain, so none of them can
+/// interleave with another.
+///
+/// This replaced a design with separate mutation and delivery queues plus a generation counter, and the
+/// replacement is not a tidy-up: that design produced a new race every time one was fixed. Delivery on
+/// one queue and lifecycle on another meant a handler could reach `observe`, which waited on mutation,
+/// while mutation reported degradation into a handler that cancelled, which waited on delivery — a
+/// cycle. `observe` read "listeners are installed", released the lock, and registered its subscriber
+/// afterwards, so a cancellation in between left an accepted subscriber with no listeners. A callback
+/// that read the generation *at delivery* rather than carrying its registration's generation could
+/// adopt a newer one and resurrect listeners after teardown. Each was real; each was a symptom of the
+/// same cause, so the cause went instead of the symptoms.
+///
+/// HAL callbacks still arrive on their own `halQueue` and immediately hop to the coordinator. That hop
+/// is deliberate: making HAL calls from the very queue the HAL delivers into is a self-wait waiting to
+/// happen, and the hop costs nothing.
+///
+/// ## No teardown when the last subscriber leaves, deliberately
+///
+/// Listeners are installed once, on the first `observe`, and removed only in `deinit`. Tearing them
+/// down when the registry empties is defensible policy and was implemented first — but nothing needs
+/// it. Production holds **one** directory for the app's lifetime with subscribers that live as long as
+/// it does, so the teardown path served a case that never happens while generating the resurrection,
+/// ordering and lifetime races above. A directory with no subscribers now broadcasts into an empty
+/// registry, which costs nothing measurable. Deleting the machinery removed three defects that fixing
+/// it would only have moved.
 public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable {
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "AudioDevices")
 
-    private let stateLock = NSLock()
+    /// The single serial domain. Everything below is touched only from here.
+    private let coordinatorQueue = DispatchQueue(label: "dev.personal.acta.audio.devices")
+    /// Where the HAL is told to deliver. Separate so a HAL call made from the coordinator can never
+    /// wait on the queue the HAL is delivering into.
+    private let halQueue = DispatchQueue(label: "dev.personal.acta.audio.devices.hal")
+    /// ⚠️ **Per instance, not static.** A shared static key makes "am I on my own queue?" true while
+    /// standing on a *different* directory's queue, which silently skips this one's serialization.
+    private let coordinatorKey = DispatchSpecificKey<ObjectIdentifier>()
+
     private var subscribers: [UInt64: Subscriber] = [:]
     private var nextToken: UInt64 = 1
-    private var systemListenersInstalled = false
     private var systemBlocks: SystemBlocks?
     private var readinessListeners: [AudioObjectID: ReadinessListener] = [:]
-    /// Bumped by every teardown. A lifecycle operation that began under an older generation must not
-    /// apply its result.
-    private var generation: UInt64 = 0
-
-    private let deliveryQueue = DispatchQueue(label: "dev.personal.acta.audio.devices.delivery")
-    private let mutationQueue = DispatchQueue(label: "dev.personal.acta.audio.devices.mutation")
-    private static let deliveryKey = DispatchSpecificKey<Void>()
-    private static let mutationKey = DispatchSpecificKey<Void>()
 
     private struct HALError: Error { let reason: String }
 
@@ -63,67 +78,234 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
     }
 
-    /// One subscription's handler behind its **gate**.
-    ///
-    /// The gate alone is only half of the cancellation guarantee — see `Observation.cancel()` for the
-    /// drain that is the other half.
+    /// One subscription's handler behind its gate. Only ever touched on `coordinatorQueue`, so the gate
+    /// needs no lock of its own — the queue *is* the lock.
     private final class Subscriber {
-        private let lock = NSLock()
-        private var handler: (@Sendable (DeviceChange) -> Void)?
-
+        var handler: (@Sendable (DeviceChange) -> Void)?
         init(handler: @escaping @Sendable (DeviceChange) -> Void) { self.handler = handler }
-
-        /// Read the gate and the handler in one acquisition, then run the handler **outside** the lock:
-        /// holding it across the call would serialize unrelated subscribers against each other and put
-        /// a caller-supplied closure inside our critical section.
-        func deliver(_ change: DeviceChange) {
-            lock.lock()
-            let handler = self.handler
-            lock.unlock()
-            handler?(change)
-        }
-
-        /// Close the gate. Every *later* delivery finds nothing; the one already in flight is handled
-        /// by the drain.
-        func close() {
-            lock.lock()
-            handler = nil
-            lock.unlock()
-        }
     }
 
     private final class Observation: AudioDeviceObservation, @unchecked Sendable {
         private let token: UInt64
         private weak var owner: CoreAudioDeviceDirectory?
-        private let lock = NSLock()
-        private var cancelled = false
 
         init(token: UInt64, owner: CoreAudioDeviceDirectory) {
             self.token = token
             self.owner = owner
         }
 
-        func cancel() {
-            lock.lock()
-            let already = cancelled
-            cancelled = true
-            lock.unlock()
-            guard !already else { return }
-            owner?.cancelSubscription(token)
-        }
+        /// ⚠️ **No "already cancelled" short-circuit.** An early return let a second caller leave while
+        /// the first had not yet closed the gate, so `cancel()` returned without its guarantee holding.
+        /// Every call now performs the same idempotent work on the coordinator; a redundant one costs a
+        /// queue hop, and that is the price of a guarantee that is true for *every* caller.
+        func cancel() { owner?.cancelSubscription(token) }
 
         deinit { cancel() }
     }
 
     public init() {
-        deliveryQueue.setSpecific(key: Self.deliveryKey, value: ())
-        mutationQueue.setSpecific(key: Self.mutationKey, value: ())
+        coordinatorQueue.setSpecific(key: coordinatorKey, value: ObjectIdentifier(self))
     }
 
     deinit {
-        // Best effort: a directory that outlived its subscribers must not leave HAL blocks pointing at
-        // freed state. Synchronous, because after `deinit` there is no `self` left to run anything.
-        performTeardown(removing: takeAllListeners())
+        // The only teardown there is. Runs synchronously and reads the state directly: after `deinit`
+        // there is no `self` to schedule anything onto, and a queued job capturing `self` weakly would
+        // find nothing and skip the removal, leaving registered blocks with no cleanup path at all.
+        if let systemBlocks { Self.removeSystemListeners(systemBlocks, on: halQueue) }
+        for (id, listener) in readinessListeners { Self.removeReadiness(listener, from: id, on: halQueue) }
+    }
+
+    /// Run `body` on the coordinator. Inline when already there, which is what makes cancelling from
+    /// inside a handler legal instead of a deadlock.
+    private func onCoordinator<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: coordinatorKey) == ObjectIdentifier(self) { return body() }
+        return coordinatorQueue.sync(execute: body)
+    }
+
+    // MARK: - Observation
+
+    public func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome {
+        onCoordinator {
+            if systemBlocks == nil {
+                switch installSystemListeners() {
+                case .failure(let error):
+                    // Reported to this caller rather than remembered: a directory that failed to
+                    // subscribe is indistinguishable from a quiet machine, and the caller has to be
+                    // able to tell.
+                    return .failed(reason: error.reason)
+                case .success(let blocks):
+                    systemBlocks = blocks
+                }
+            }
+            let token = nextToken
+            nextToken += 1
+            subscribers[token] = Subscriber(handler: handler)
+            refreshReadinessListeners()
+            return .observing(Observation(token: token, owner: self))
+        }
+    }
+
+    /// Cancellation, entirely on the coordinator. Because delivery runs there too, being inside this
+    /// block *is* the proof that no handler is executing concurrently — the separate "drain" step the
+    /// two-queue design needed is gone with the second queue.
+    private func cancelSubscription(_ token: UInt64) {
+        onCoordinator {
+            subscribers[token]?.handler = nil
+            subscribers.removeValue(forKey: token)
+        }
+    }
+
+    private func broadcast(_ change: DeviceChange) {
+        // Registration order, not dictionary order: an arbitrary order leaves "a handler cancelled by an
+        // earlier handler in the same broadcast" untestable, so its test degenerates into accepting
+        // either outcome and passes against the defect it was written for.
+        let targets = subscribers.sorted { $0.key < $1.key }.map(\.value)
+        for target in targets { target.handler?(change) }
+    }
+
+    /// Hop a HAL callback onto the coordinator. Always asynchronous: the HAL thread must never be made
+    /// to wait on our own work.
+    private func onHALCallback(_ body: @escaping (CoreAudioDeviceDirectory) -> Void) {
+        coordinatorQueue.async { [weak self] in
+            guard let self else { return }
+            body(self)
+        }
+    }
+
+    // MARK: - Listener lifecycle (coordinator only)
+
+    private func installSystemListeners() -> Result<SystemBlocks, HALError> {
+        var deviceListAddress = Self.address(kAudioHardwarePropertyDevices)
+        let deviceListBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onHALCallback { directory in
+                directory.refreshReadinessListeners()
+                directory.broadcast(.deviceListChanged)
+            }
+        }
+        let listStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                            &deviceListAddress, halQueue, deviceListBlock)
+        guard listStatus == noErr else {
+            return .failure(HALError(reason: "device-list listener: \(Self.describe(status: listStatus))"))
+        }
+
+        var defaultAddress = Self.address(kAudioHardwarePropertyDefaultInputDevice)
+        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onHALCallback { $0.broadcast(.defaultInputChanged) }
+        }
+        let defaultStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                               &defaultAddress, halQueue, defaultBlock)
+        guard defaultStatus == noErr else {
+            // Do not leave half a subscription installed: a directory reporting device-list changes but
+            // never default-input changes is exactly the "unchanged winner, moved default" blind spot.
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                   &deviceListAddress, halQueue, deviceListBlock)
+            return .failure(HALError(reason: "default-input listener: \(Self.describe(status: defaultStatus))"))
+        }
+        return .success(SystemBlocks(deviceList: deviceListBlock, defaultInput: defaultBlock))
+    }
+
+    /// Keep listeners on each present device for the transitions the device *list* cannot report.
+    ///
+    /// Two properties are watched. `DeviceIsAlive` covers a device that stops working without leaving
+    /// the list; `StreamConfiguration` covers its input channels changing, the other way a listed device
+    /// silently stops being a usable microphone.
+    ///
+    /// ⚠️ Default-device **eligibility** has no listener, deliberately: it is picked up by the
+    /// re-enumeration every other trigger already performs. That is the defined refresh fallback, and
+    /// naming it is the point — an unstated gap is the thing that bites.
+    private func refreshReadinessListeners() {
+        let ids: [AudioObjectID]
+        switch systemDeviceIDs() {
+        case .success(let value): ids = value
+        case .failure(let error):
+            // ⚠️ Not a silent return. Returning quietly leaves the caller believing readiness is
+            // watched; worse, an earlier version treated an unreadable list as "every device left" and
+            // removed live listeners on the strength of a failed query.
+            reportDegradation("device list unreadable, readiness listeners not refreshed: \(error.reason)")
+            return
+        }
+
+        var present: [AudioObjectID: String] = [:]
+        var unreadable: [AudioObjectID] = []
+        for id in ids {
+            switch stringProperty(id, kAudioDevicePropertyDeviceUID) {
+            case .success(let uid): present[id] = uid
+            case .failure: unreadable.append(id)
+            }
+        }
+
+        // ⚠️ A device whose UID would not read is **kept**, not removed. "I could not identify it" is
+        // not "it is gone", and dropping its listener on that basis is how a transient read failure
+        // becomes a permanently unwatched device.
+        let keep = Set(present.keys).union(unreadable)
+        for (id, listener) in readinessListeners where !keep.contains(id) {
+            readinessListeners.removeValue(forKey: id)
+            Self.removeReadiness(listener, from: id, on: halQueue)
+        }
+        if !unreadable.isEmpty {
+            reportDegradation("\(unreadable.count) device(s) could not be identified; their readiness state is uncertain")
+        }
+
+        for (id, uid) in present where readinessListeners[id] == nil {
+            guard let listener = installReadiness(for: id, uid: uid) else { continue }
+            readinessListeners[id] = listener
+        }
+    }
+
+    private func installReadiness(for id: AudioObjectID, uid: String) -> ReadinessListener? {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
+        }
+        var aliveAddress = Self.address(kAudioDevicePropertyDeviceIsAlive,
+                                        scope: kAudioObjectPropertyScopeInput)
+        let aliveStatus = AudioObjectAddPropertyListenerBlock(id, &aliveAddress, halQueue, block)
+        guard aliveStatus == noErr else {
+            reportDegradation("no liveness listener for \(uid): \(Self.describe(status: aliveStatus))")
+            return nil
+        }
+
+        let streamsBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
+        }
+        var streamsAddress = Self.address(kAudioDevicePropertyStreamConfiguration,
+                                          scope: kAudioObjectPropertyScopeInput)
+        let streamsStatus = AudioObjectAddPropertyListenerBlock(id, &streamsAddress, halQueue, streamsBlock)
+        guard streamsStatus == noErr else {
+            AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, halQueue, block)
+            reportDegradation("no stream-configuration listener for \(uid): \(Self.describe(status: streamsStatus))")
+            return nil
+        }
+        return ReadinessListener(uid: uid, alive: block, streams: streamsBlock)
+    }
+
+    private static func removeReadiness(_ listener: ReadinessListener,
+                                        from id: AudioObjectID,
+                                        on queue: DispatchQueue) {
+        var aliveAddress = address(kAudioDevicePropertyDeviceIsAlive, scope: kAudioObjectPropertyScopeInput)
+        AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, queue, listener.alive)
+        var streamsAddress = address(kAudioDevicePropertyStreamConfiguration,
+                                     scope: kAudioObjectPropertyScopeInput)
+        AudioObjectRemovePropertyListenerBlock(id, &streamsAddress, queue, listener.streams)
+    }
+
+    private static func removeSystemListeners(_ blocks: SystemBlocks, on queue: DispatchQueue) {
+        var deviceListAddress = address(kAudioHardwarePropertyDevices)
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                               &deviceListAddress, queue, blocks.deviceList)
+        var defaultAddress = address(kAudioHardwarePropertyDefaultInputDevice)
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                               &defaultAddress, queue, blocks.defaultInput)
+    }
+
+    /// ⚠️ A per-device listener that would not install used to be **logged and nothing else**, while
+    /// `observe` still reported success — so the subscription looked healthy and the only thing missing
+    /// was exactly the transition that listener existed to catch. Consumers are told instead.
+    ///
+    /// Called on the coordinator, so it delivers straight into `broadcast` with no hop: a hop would put
+    /// the degradation notice out of order with the change it explains.
+    private func reportDegradation(_ reason: String) {
+        log.info("Observation degraded: \(reason, privacy: .public)")
+        broadcast(.observationDegraded(reason: reason))
     }
 
     // MARK: - Enumeration
@@ -169,8 +351,8 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
 
         // ⚠️ A failed channel query is **not** zero channels. Zero means "this is an output-only
-        // device", which is a reason to leave it out of an input list; a failure means we do not know,
-        // and dropping it silently is the same disappearing act as an unreadable UID.
+        // device", a reason to leave it out of an input list; a failure means we do not know, and
+        // dropping it silently is the same disappearing act as an unreadable UID.
         guard let channels = inputChannelCount(id) else {
             return .uninspectable("\(uid) (stream configuration unreadable)")
         }
@@ -235,7 +417,7 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         // different device — or nothing.
         switch resolve(uid: uid) {
         case .failure(let error):
-            // ⚠️ Not `.unknownDevice`. "I could not enumerate" is not "that device is not here": the
+            // ⚠️ Not `.unknownDevice`. "I could not look it up" is not "that device is not here": the
             // caller would otherwise drop a perfectly present microphone from its priority list.
             return .failed(reason: error.reason)
         case .success(nil):
@@ -251,282 +433,28 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
     }
 
+    /// `nil` means "looked, and no device carries that uid". A failure means "could not look".
+    ///
+    /// ⚠️ **The distinction survives a per-device read failure too, and that was a bug once.** Reporting
+    /// "no such device" after failing to read some device's UID is a guess dressed as an answer: the
+    /// device we were asked about may be exactly the one that would not answer.
     private func resolve(uid: String) -> Result<AudioObjectID?, HALError> {
         switch systemDeviceIDs() {
         case .failure(let error): return .failure(error)
         case .success(let ids):
+            var unreadable = 0
             for id in ids {
-                if case .success(let candidate) = stringProperty(id, kAudioDevicePropertyDeviceUID),
-                   candidate == uid {
-                    return .success(id)
+                switch stringProperty(id, kAudioDevicePropertyDeviceUID) {
+                case .success(let candidate) where candidate == uid: return .success(id)
+                case .success: continue
+                case .failure: unreadable += 1
                 }
+            }
+            guard unreadable == 0 else {
+                return .failure(HALError(reason: "\(uid) not found, but \(unreadable) device(s) would not report a UID"))
             }
             return .success(nil)
         }
-    }
-
-    // MARK: - Observation
-
-    public func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome {
-        // The whole install runs on the mutation queue, so it cannot interleave with a teardown that a
-        // last cancellation just started.
-        let outcome: ObservationOutcome = onMutationQueue {
-            stateLock.lock()
-            let needsInstall = !systemListenersInstalled
-            stateLock.unlock()
-
-            if needsInstall {
-                switch installSystemListeners() {
-                case .failure(let error):
-                    // Reported to this caller rather than remembered: a directory that failed to
-                    // subscribe is indistinguishable from a quiet machine, and the caller has to be
-                    // able to tell.
-                    return .failed(reason: error.reason)
-                case .success(let blocks):
-                    stateLock.lock()
-                    systemBlocks = blocks
-                    systemListenersInstalled = true
-                    stateLock.unlock()
-                }
-            }
-
-            stateLock.lock()
-            let token = nextToken
-            nextToken += 1
-            subscribers[token] = Subscriber(handler: handler)
-            let currentGeneration = generation
-            stateLock.unlock()
-
-            refreshReadinessListeners(generation: currentGeneration)
-            return .observing(Observation(token: token, owner: self))
-        }
-        return outcome
-    }
-
-    /// Cancellation, in the two halves the contract requires.
-    private func cancelSubscription(_ token: UInt64) {
-        stateLock.lock()
-        let subscriber = subscribers[token]
-        stateLock.unlock()
-
-        // 1. Close the gate: every *later* delivery finds nothing.
-        subscriber?.close()
-
-        // 2. Drain: a callback that read the gate as open is running right now, and `sync` onto the
-        //    delivery queue returns only once it has finished. Skipped when we are *already* on that
-        //    queue — cancelling from inside a handler is legal, and there the in-flight delivery is the
-        //    caller's own, so there is nothing to wait for and `sync` would deadlock.
-        if DispatchQueue.getSpecific(key: Self.deliveryKey) == nil {
-            deliveryQueue.sync {}
-        }
-
-        // 3. Remove, and decide about teardown **in the same acquisition** as the removal. Splitting
-        //    them lets a new subscriber arrive between the "registry is empty" observation and the
-        //    teardown, see `systemListenersInstalled == true`, be told it is observing, and then have
-        //    its listeners removed out from under it.
-        stateLock.lock()
-        subscribers.removeValue(forKey: token)
-        var doomed: Listeners?
-        if subscribers.isEmpty {
-            doomed = takeAllListenersLocked()
-        }
-        stateLock.unlock()
-
-        if let doomed {
-            mutationQueue.async { [weak self] in self?.performTeardown(removing: doomed) }
-        }
-    }
-
-    /// ⚠️ **Delivery follows registration order, and that is deliberate rather than incidental.**
-    /// Iterating a dictionary's values hands out an arbitrary order that varies between runs, which
-    /// makes "a handler cancelled by an earlier handler in the same broadcast" untestable: the test
-    /// cannot know which ran first, so it degenerates into accepting either outcome — a tautology that
-    /// passes against the very defect it was written for. Sorting by token costs nothing at this size
-    /// and makes the gate's guarantee assertable.
-    private func broadcast(_ change: DeviceChange) {
-        stateLock.lock()
-        let targets = subscribers.sorted { $0.key < $1.key }.map(\.value)
-        stateLock.unlock()
-        for target in targets { target.deliver(change) }
-    }
-
-    // MARK: - Listener lifecycle (mutation queue only)
-
-    private struct Listeners {
-        var system: SystemBlocks?
-        var readiness: [AudioObjectID: ReadinessListener]
-    }
-
-    private func takeAllListeners() -> Listeners {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return takeAllListenersLocked()
-    }
-
-    /// Caller holds `stateLock`. Bumps the generation so any lifecycle operation already in flight
-    /// discards its result instead of reinstalling listeners nobody is subscribed to.
-    private func takeAllListenersLocked() -> Listeners {
-        let taken = Listeners(system: systemBlocks, readiness: readinessListeners)
-        systemBlocks = nil
-        readinessListeners.removeAll()
-        systemListenersInstalled = false
-        generation &+= 1
-        return taken
-    }
-
-    private func performTeardown(removing listeners: Listeners) {
-        if let system = listeners.system {
-            var deviceListAddress = Self.address(kAudioHardwarePropertyDevices)
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                   &deviceListAddress, deliveryQueue, system.deviceList)
-            var defaultAddress = Self.address(kAudioHardwarePropertyDefaultInputDevice)
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                   &defaultAddress, deliveryQueue, system.defaultInput)
-        }
-        for (id, listener) in listeners.readiness { removeReadiness(listener, from: id) }
-    }
-
-    private func installSystemListeners() -> Result<SystemBlocks, HALError> {
-        var deviceListAddress = Self.address(kAudioHardwarePropertyDevices)
-        let deviceListBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            // Hop off the delivery queue: the refresh makes HAL calls, and running them on the queue
-            // the HAL is delivering into is how a callback ends up waiting for itself.
-            let currentGeneration = self.currentGeneration()
-            self.mutationQueue.async { self.refreshReadinessListeners(generation: currentGeneration) }
-            self.broadcast(.deviceListChanged)
-        }
-        let listStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                            &deviceListAddress, deliveryQueue,
-                                                            deviceListBlock)
-        guard listStatus == noErr else {
-            return .failure(HALError(reason: "device-list listener: \(Self.describe(status: listStatus))"))
-        }
-
-        var defaultAddress = Self.address(kAudioHardwarePropertyDefaultInputDevice)
-        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.broadcast(.defaultInputChanged)
-        }
-        let defaultStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                               &defaultAddress, deliveryQueue,
-                                                               defaultBlock)
-        guard defaultStatus == noErr else {
-            // Do not leave half a subscription installed: a directory reporting device-list changes but
-            // never default-input changes is exactly the "unchanged winner, moved default" blind spot.
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                   &deviceListAddress, deliveryQueue, deviceListBlock)
-            return .failure(HALError(reason: "default-input listener: \(Self.describe(status: defaultStatus))"))
-        }
-        return .success(SystemBlocks(deviceList: deviceListBlock, defaultInput: defaultBlock))
-    }
-
-    /// Keep listeners on each present device for the transitions the device *list* cannot report.
-    ///
-    /// Two properties are watched, not one. `DeviceIsAlive` covers a device that stops working without
-    /// leaving the list; `StreamConfiguration` covers its input channels changing, which is the other
-    /// way a listed device silently stops being a usable microphone.
-    ///
-    /// ⚠️ Default-device **eligibility** has no listener here, deliberately: it is picked up by the
-    /// re-enumeration every other trigger already performs. That is the "defined refresh fallback", and
-    /// naming it is the point — an unstated gap is the thing that bites.
-    ///
-    /// Runs on `mutationQueue` only, so two refreshes cannot both register a block for the same device
-    /// and leave one of them unremovable.
-    private func refreshReadinessListeners(generation entryGeneration: UInt64) {
-        guard case .success(let ids) = systemDeviceIDs() else { return }
-        var present: [AudioObjectID: String] = [:]
-        for id in ids {
-            if case .success(let uid) = stringProperty(id, kAudioDevicePropertyDeviceUID) {
-                present[id] = uid
-            }
-        }
-
-        stateLock.lock()
-        guard generation == entryGeneration else {
-            // A teardown happened while we were reading the HAL. Installing now would resurrect
-            // listeners for a directory with no subscribers.
-            stateLock.unlock()
-            return
-        }
-        let known = Set(readinessListeners.keys)
-        var removals: [(AudioObjectID, ReadinessListener)] = []
-        for id in known.subtracting(Set(present.keys)) {
-            if let listener = readinessListeners.removeValue(forKey: id) { removals.append((id, listener)) }
-        }
-        let toAdd = Set(present.keys).subtracting(known)
-        stateLock.unlock()
-
-        for (id, listener) in removals { removeReadiness(listener, from: id) }
-
-        for id in toAdd {
-            guard let uid = present[id] else { continue }
-            guard let listener = installReadiness(for: id, uid: uid) else { continue }
-            stateLock.lock()
-            if generation == entryGeneration, readinessListeners[id] == nil {
-                readinessListeners[id] = listener
-                stateLock.unlock()
-            } else {
-                // Lost a race with a teardown, or the entry is already taken. Remove what we just
-                // installed rather than leaking a block CoreAudio will keep calling forever.
-                stateLock.unlock()
-                removeReadiness(listener, from: id)
-            }
-        }
-    }
-
-    private func installReadiness(for id: AudioObjectID, uid: String) -> ReadinessListener? {
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.broadcast(.readinessChanged(uid: uid))
-        }
-        var aliveAddress = Self.address(kAudioDevicePropertyDeviceIsAlive,
-                                        scope: kAudioObjectPropertyScopeInput)
-        let aliveStatus = AudioObjectAddPropertyListenerBlock(id, &aliveAddress, deliveryQueue, block)
-        guard aliveStatus == noErr else {
-            reportDegradation("no liveness listener for \(uid): \(Self.describe(status: aliveStatus))")
-            return nil
-        }
-
-        let streamsBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.broadcast(.readinessChanged(uid: uid))
-        }
-        var streamsAddress = Self.address(kAudioDevicePropertyStreamConfiguration,
-                                          scope: kAudioObjectPropertyScopeInput)
-        let streamsStatus = AudioObjectAddPropertyListenerBlock(id, &streamsAddress, deliveryQueue,
-                                                                streamsBlock)
-        guard streamsStatus == noErr else {
-            AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, deliveryQueue, block)
-            reportDegradation("no stream-configuration listener for \(uid): \(Self.describe(status: streamsStatus))")
-            return nil
-        }
-        return ReadinessListener(uid: uid, alive: block, streams: streamsBlock)
-    }
-
-    private func removeReadiness(_ listener: ReadinessListener, from id: AudioObjectID) {
-        var aliveAddress = Self.address(kAudioDevicePropertyDeviceIsAlive,
-                                        scope: kAudioObjectPropertyScopeInput)
-        AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, deliveryQueue, listener.alive)
-        var streamsAddress = Self.address(kAudioDevicePropertyStreamConfiguration,
-                                          scope: kAudioObjectPropertyScopeInput)
-        AudioObjectRemovePropertyListenerBlock(id, &streamsAddress, deliveryQueue, listener.streams)
-    }
-
-    /// ⚠️ A per-device listener that would not install used to be **logged and nothing else**, while
-    /// `observe` still reported success — so the subscription looked healthy and the only thing missing
-    /// was exactly the transition that listener existed to catch. Consumers are told instead.
-    private func reportDegradation(_ reason: String) {
-        log.info("Observation degraded: \(reason, privacy: .public)")
-        broadcast(.observationDegraded(reason: reason))
-    }
-
-    private func currentGeneration() -> UInt64 {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return generation
-    }
-
-    /// Run `body` on the mutation queue, without deadlocking if we are already on it.
-    private func onMutationQueue<T>(_ body: () -> T) -> T {
-        if DispatchQueue.getSpecific(key: Self.mutationKey) != nil { return body() }
-        return mutationQueue.sync(execute: body)
     }
 
     // MARK: - Property plumbing
