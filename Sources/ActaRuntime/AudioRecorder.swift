@@ -30,6 +30,7 @@ public final class AudioRecorder: @unchecked Sendable {
     private let lifecycle = CaptureLifecycle()
     private let lifecycleLock = NSLock()
     private var pinned: AudioInputDevice?
+    private var stopped = false
 
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
@@ -145,6 +146,19 @@ public final class AudioRecorder: @unchecked Sendable {
         try await serialized { try await self.performStart() }
     }
 
+    /// Whether this recorder has been stopped for good.
+    ///
+    /// ⚠️ **Stopping is terminal, and until Task 5 nothing said so.** `SegmentWriter.finish()` sets
+    /// `isFinished` permanently and `append` drops everything afterwards — so a `restart()` admitted
+    /// *after* a `stop()` brings the capture back up, holds the microphone, and writes nothing. That is
+    /// invisible capture after a finished recording: the indicator is lit, the files never grow. The
+    /// serialized queue alone does not prevent it — it orders operations, it does not refuse late ones.
+    public var isStopped: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return stopped
+    }
+
     /// The device this recording is currently pinned to, once a start has succeeded.
     ///
     /// ⚠️ Set only **after** capture actually comes up. The menu must never show a requested device as
@@ -156,18 +170,37 @@ public final class AudioRecorder: @unchecked Sendable {
     }
 
     private func performStart() async throws {
+        guard !isStopped else {
+            log.error("Refusing to start: this recording has already stopped")
+            throw StartupFailure.recordingAlreadyStopped
+        }
         try await requestPermissionsIfNeeded()
 
+        // ⚠️ **The previously active device is carried explicitly, not assumed to be on the list.** A
+        // healthy pin can have been removed by the very priority edit that triggered this restart, or
+        // have come from `.systemDefault` and never been on the list at all — and "restore what was
+        // working" cannot mean "hope it is still ranked".
+        let previous = pinnedMicrophone
         let candidates: [AudioInputDevice]
         switch microphone.resolve() {
         case .pinned(let device, let alternatives):
             // ⚠️ Bounded by construction: the resolver returns a finite ranked list and every candidate
             // is tried at most once, so "no candidate succeeded" terminates instead of retrying a dead
             // machine forever. The watchdog's own attempt budget sits above this.
-            candidates = [device] + alternatives
+            var ranked = [device] + alternatives
+            if let previous, !ranked.contains(where: { $0.uid == previous.uid }) {
+                ranked.append(previous)
+            }
+            candidates = ranked
         case .unavailable(let failure):
-            log.error("No microphone to record from: \(String(describing: failure), privacy: .public)")
-            throw StartupFailure.microphoneUnavailable
+            // ⚠️ Even with nothing resolvable, a device that *was* working is worth trying: the
+            // resolution failed, the hardware may not have.
+            if let previous {
+                candidates = [previous]
+            } else {
+                log.error("No microphone: \(String(describing: failure), privacy: .public)")
+                throw StartupFailure(failure)
+            }
         }
 
         var lastError: Error?
@@ -188,6 +221,8 @@ public final class AudioRecorder: @unchecked Sendable {
         // Raw capture errors are not let out: without `.streamNotStarted` the caller cannot tell
         // "the stream did not come up" (healed by a restart) from other failures, and the
         // self-healing (`SelfCheck`) would not spend its attempts (Task 4).
+        // ⚠️ Nothing is recording, so nothing may claim to be.
+        setPinned(nil)
         log.error("Stream did not come up: \(lastError?.localizedDescription ?? "no candidate", privacy: .public)")
         throw StartupFailure.streamNotStarted
     }
@@ -235,6 +270,12 @@ public final class AudioRecorder: @unchecked Sendable {
     }
 
     private func performRestart() async throws {
+        // ⚠️ Checked at **admission**, before the source is torn down, so a late switch cannot even
+        // interrupt a finished recording — never mind reopen one.
+        guard !isStopped else {
+            log.error("Refusing to restart: this recording has already stopped")
+            throw StartupFailure.recordingAlreadyStopped
+        }
         await source.stop()
         systemWriter.finishAndAdvance()
         micWriter.finishAndAdvance()
@@ -253,7 +294,7 @@ public final class AudioRecorder: @unchecked Sendable {
             await self.source.stop()
             self.systemWriter.finish()
             self.micWriter.finish()
-            self.setPinned(nil)
+            self.markStopped()
             self.log.info("Capture stopped")
         }
     }
@@ -280,6 +321,16 @@ public final class AudioRecorder: @unchecked Sendable {
     private func setPinned(_ device: AudioInputDevice?) {
         lifecycleLock.lock()
         pinned = device
+        lifecycleLock.unlock()
+    }
+
+    /// ⚠️ **Clears the pin as well as latching the stop.** Retaining the last uid after teardown is not
+    /// evidence of active capture, and a menu reading it would show a microphone as recording when
+    /// nothing is.
+    private func markStopped() {
+        lifecycleLock.lock()
+        pinned = nil
+        stopped = true
         lifecycleLock.unlock()
     }
 

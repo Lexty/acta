@@ -166,6 +166,10 @@ extension WireControlState.Message {
             case .diskWriteFailed: return WireMessageCode.startupDiskWriteFailed
             case .noData: return WireMessageCode.startupNoData
             case .microphoneUnavailable: return WireMessageCode.startupMicrophoneUnavailable
+            case .recordingAlreadyStopped: return WireMessageCode.startupRecordingAlreadyStopped
+            case .preferredMicrophoneAbsent: return WireMessageCode.startupPreferredMicrophoneAbsent
+            case .noMicrophoneOnThisMac: return WireMessageCode.startupNoMicrophoneOnThisMac
+            case .microphoneUnreadable: return WireMessageCode.startupMicrophoneUnreadable
             }
         case .startFailed:
             return WireMessageCode.startFailed

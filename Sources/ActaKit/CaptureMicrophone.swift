@@ -45,6 +45,13 @@ public enum CaptureMicrophoneFailure: Equatable, Sendable {
     /// `.systemDefault` was asked for and the OS would not say what the default is — which is not the
     /// same as there being none.
     case systemDefaultUnreadable(String)
+    /// The device list could not be fully described, and what *was* described held nothing usable.
+    ///
+    /// ⚠️ **Its own case because the alternative is a lie about the machine.** An enumeration that
+    /// could not read every driver and found nothing among the rest is not evidence that this Mac has
+    /// no microphone, nor that the user's preferred one left — and both of those would be shown to the
+    /// user as settled facts with an action attached.
+    case snapshotIncomplete
 }
 
 public extension MicrophonePolicy {

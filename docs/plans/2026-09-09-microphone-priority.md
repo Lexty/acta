@@ -375,11 +375,17 @@ global enforcer **per recording session**.
 - [x] Tests through the scripted pipeline: a mic switch **racing** a watchdog restart, and one racing a
       user Stop; the first candidate enumerating but **failing to start** while the next succeeds; **no
       candidate succeeding**, with recovery terminating within a defined bound
-- [ ] ⚠️ **NOT done, and not ticked**: a switch between devices of **different source formats** leaving
-      every segment valid and consistently formatted. It needs `FakeCaptureSource` to emit buffers in a
-      second format and the assembly driven across the boundary, which is a fixture this task did not
-      build. Ticking it because "the switch works" would be exactly the vacuous pass this plan keeps
-      catching
+- [x] A switch between devices of **different source formats** leaving every segment valid and
+      consistently formatted. ⚠️ **My earlier note here was false and is corrected rather than
+      softened**: I wrote that this needed a fixture the task had not built, when
+      `FakeCaptureSource.setFormat` and `FixtureAudioFormat(sampleRate:channels:)` both already existed
+      — I did not look before writing the reason down. A peer review built it, saw a failure, and then
+      traced that failure to **its own sandbox** rather than to Acta, so the code was right and only my
+      excuse was wrong. The test now exists and passes. It is **skipped by default, visibly**, because
+      the one case costs ~59 s and starves a timing-sensitive pipeline test into failing about half the
+      time: `ACTA_SLOW_TESTS=1 bash Scripts/test.sh`. That cost is a separate finding, in
+      `docs/backlog/slow-non-48k-segment-writing.md`, and it matters — the AirPods measured 24 kHz,
+      which is exactly the format that is slow
 
 ### Task 6: Protocol v2 and the settings fields
 

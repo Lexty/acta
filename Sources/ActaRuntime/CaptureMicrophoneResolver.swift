@@ -20,25 +20,43 @@ public protocol CaptureMicrophoneResolving: Sendable {
 /// edit made mid-recording **can** take effect at that restart. A stale snapshot would silently make
 /// that false.
 public final class CaptureMicrophonePreference: @unchecked Sendable {
+    /// The list and the choice as **one** value.
+    ///
+    /// ⚠️ **Read once per resolution, and replaced whole.** Two independent properties let a resolution
+    /// combine a list from one settings revision with a choice from another — a mixture no user ever
+    /// asked for, and one that appears only under load.
+    public struct Snapshot: Equatable, Sendable {
+        public var priority: MicrophonePriority
+        public var choice: CaptureMicrophoneChoice
+
+        public init(priority: MicrophonePriority = .empty,
+                    choice: CaptureMicrophoneChoice = .followPriority) {
+            self.priority = priority
+            self.choice = choice
+        }
+    }
+
     private let lock = NSLock()
-    private var storedPriority: MicrophonePriority
-    private var storedChoice: CaptureMicrophoneChoice
+    private var stored: Snapshot
 
     public init(priority: MicrophonePriority = .empty,
                 choice: CaptureMicrophoneChoice = .followPriority) {
-        storedPriority = priority
-        storedChoice = choice
+        stored = Snapshot(priority: priority, choice: choice)
     }
 
-    public var priority: MicrophonePriority {
-        get { lock.lock(); defer { lock.unlock() }; return storedPriority }
-        set { lock.lock(); storedPriority = newValue; lock.unlock() }
+    /// The whole preference, atomically.
+    public var snapshot: Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
     }
 
-    public var choice: CaptureMicrophoneChoice {
-        get { lock.lock(); defer { lock.unlock() }; return storedChoice }
-        set { lock.lock(); storedChoice = newValue; lock.unlock() }
-    }
+    /// Replace it. ⚠️ The only writer; there is deliberately no per-field setter, because a per-field
+    /// setter is how the two halves drift apart.
+    public func set(_ next: Snapshot) { lock.lock(); stored = next; lock.unlock() }
+
+    public var priority: MicrophonePriority { snapshot.priority }
+    public var choice: CaptureMicrophoneChoice { snapshot.choice }
 }
 
 /// The shipped resolver: the app's one device reader plus the user's preference.
@@ -55,10 +73,17 @@ public struct LiveCaptureMicrophoneResolver: CaptureMicrophoneResolving {
     }
 
     public func resolve() -> CaptureMicrophoneResolution {
+        // One read, so a resolution cannot mix a list from one settings revision with a choice from
+        // another.
+        let preference = preference.snapshot
         let devices: [AudioInputDevice]
+        var snapshotComplete = true
         switch reader.enumerateInputDevices() {
-        case .devices(let listed, _):
+        case .devices(let listed, let uninspectable):
             devices = listed
+            // ⚠️ Carried, not discarded. An incomplete snapshot is not proof that a device left, and it
+            // is certainly not proof the machine has no microphone.
+            snapshotComplete = uninspectable.isEmpty
         case .failed(let reason):
             // ⚠️ Not `.noEligibleDevice`: the machine was never described. Telling the user their Mac
             // has no microphone because one query failed is the failure mode this whole feature exists
@@ -75,9 +100,21 @@ public struct LiveCaptureMicrophoneResolver: CaptureMicrophoneResolving {
             }
         }
 
-        return MicrophonePolicy.resolveCapture(from: devices,
-                                               priority: preference.priority,
-                                               choice: preference.choice,
-                                               systemDefault: systemDefault)
+        let resolution = MicrophonePolicy.resolveCapture(from: devices,
+                                                         priority: preference.priority,
+                                                         choice: preference.choice,
+                                                         systemDefault: systemDefault)
+        // ⚠️ **"I could not see everything" must not be reported as "there is nothing here."** Only the
+        // two answers that are claims *about the hardware* are downgraded; a genuine "you have not
+        // chosen anything" is unaffected by how well the machine could be described.
+        if case .unavailable(let failure) = resolution, !snapshotComplete {
+            switch failure {
+            case .noEligibleDevice, .noPreferredDeviceAvailable:
+                return .unavailable(.snapshotIncomplete)
+            case .noneConfigured, .systemDefaultUnreadable, .snapshotIncomplete:
+                break
+            }
+        }
+        return resolution
     }
 }

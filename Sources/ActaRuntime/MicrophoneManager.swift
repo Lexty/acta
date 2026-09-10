@@ -150,7 +150,7 @@ public final class MicrophoneManager {
     /// not change what Acta records from: they are different promises and the plan forbids sharing a
     /// switch between them.
     public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
-        capturePreference.choice = choice
+        capturePreference.set(.init(priority: capturePreference.priority, choice: choice))
     }
 
     /// Apply the persisted settings: the priority list, the capture choice, and whether feature (B) is
@@ -161,16 +161,50 @@ public final class MicrophoneManager {
     /// pinned to their preferred microphone. Applying one without the other is how the two promises
     /// start sharing a switch, which the plan forbids.
     public func apply(_ settings: RecordingSettings) async {
-        capturePreference.choice = settings.captureMicrophoneChoice
-        await reconciler.setOrder(settings.microphonePriority)
-        if settings.managesSystemDefaultInput {
-            if await !reconciler.isEnabled { await enableEnforcement() }
-        } else {
-            if await reconciler.isEnabled { await disableEnforcement() }
+        settingsRevision &+= 1
+        let revision = settingsRevision
+        let epoch = lifetimeEpoch
+
+        // ⚠️ **One coherent operation, not "set the list, then flip the switch".** Applying a
+        // configuration in which feature (B) is *off* used to set the order while the reconciler was
+        // still enabled — so switching the feature off wrote the Mac's default input on its way out.
+        // It also gave a stale application a second step to run late and re-enable enforcement after a
+        // newer one had settled.
+        await reconciler.configure(order: settings.microphonePriority,
+                                   enabled: settings.managesSystemDefaultInput)
+
+        // ⚠️ **Checked after the await, not only before it.** A newer application may have settled while
+        // this one was suspended, and an older one must not have the last word.
+        guard revision == settingsRevision, epoch == lifetimeEpoch, started else {
+            // If this stale application turned enforcement on after its owner stopped, turn it back
+            // off. That issues no OS write — an already-issued write cannot be undone by pretending it
+            // did not happen — it only stops any *further* one.
+            if epoch != lifetimeEpoch || !started, await reconciler.isEnabled {
+                await reconciler.disable()
+            }
+            return
         }
-        // `setOrder` alone would leave `capturePreference` a mirror-hop behind, and a recording started
-        // in that window would resolve against the previous list.
-        capturePreference.priority = await reconciler.priority
+
+        // Read back, and as one value: the reconciler owns the priority (it expires a stale override),
+        // and a per-field write is how the list and the choice come from different revisions.
+        capturePreference.set(.init(priority: await reconciler.priority,
+                                    choice: settings.captureMicrophoneChoice))
+    }
+
+    /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every
+    /// continuation can tell whether it is still the current intent.
+    private var settingsRevision: UInt64 = 0
+
+    /// Copy the reconciler's authoritative priority into the capture preference.
+    ///
+    /// ⚠️ **Called by every command that changes it, and not left to the state mirror.** The mirror is
+    /// driven by a **deduplicated** enforcement-status stream: with feature (B) off, editing the list
+    /// republishes the same `.disabled` state, nothing is emitted, and the capture preference never
+    /// updates at all — so a user with (B) off could reorder their microphones and Acta would go on
+    /// recording from the old one, permanently. That is not a slow hop; it is a hole.
+    private func syncCapturePreference() async {
+        capturePreference.set(.init(priority: await reconciler.priority,
+                                    choice: capturePreference.choice))
     }
 
     public private(set) var inventory: MicrophoneInventory = .unknown
@@ -400,7 +434,10 @@ public final class MicrophoneManager {
                 guard let self, self.lifetimeEpoch == epoch else { return }
                 // The reconciler owns the priority — it expires a stale override — so capture reads it
                 // back from there rather than keeping a second copy that drifts.
-                capturePreference.priority = await reconciler.priority
+                // Keeps capture in step with an expiry the reconciler made on its own (an override's
+                // device disconnecting). ⚠️ Not the *only* path — see `syncCapturePreference`: this
+                // stream is deduplicated, so a change that leaves the status identical emits nothing.
+                await syncCapturePreference()
                 enforcement = state
                 for continuation in enforcementContinuations.values { continuation.yield(state) }
             }
@@ -430,8 +467,19 @@ public final class MicrophoneManager {
     public func pauseEnforcement() async { await reconciler.pause() }
     public func resumeEnforcement() async { await reconciler.resume() }
 
-    public func setPriorityOrder(_ order: [String]) async { await reconciler.setOrder(order) }
-    public func useNow(uid: String) async { await reconciler.useNow(uid: uid) }
-    public func resumeAutomaticSelection() async { await reconciler.resumeAutomaticSelection() }
+    public func setPriorityOrder(_ order: [String]) async {
+        await reconciler.setOrder(order)
+        await syncCapturePreference()
+    }
+
+    public func useNow(uid: String) async {
+        await reconciler.useNow(uid: uid)
+        await syncCapturePreference()
+    }
+
+    public func resumeAutomaticSelection() async {
+        await reconciler.resumeAutomaticSelection()
+        await syncCapturePreference()
+    }
     public func wake() async { await reconciler.wake() }
 }

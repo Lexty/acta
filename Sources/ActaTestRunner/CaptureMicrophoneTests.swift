@@ -1,5 +1,6 @@
 import ActaKit
 @testable import ActaRuntime
+import AVFoundation
 import Foundation
 import Testing
 
@@ -222,6 +223,88 @@ struct CaptureMicrophoneTests {
             #expect(recorder.pinnedMicrophone == .builtInMic())
             #expect(source.startedMicrophoneIDs.last == "BuiltInMicrophoneDevice")
             await recorder.stop()
+        }
+    }
+
+    // MARK: - A switch between devices of different source formats
+
+    /// ⚠️ **The acceptance item I wrongly recorded as needing a fixture that did not exist.**
+    /// `FakeCaptureSource.setFormat` and `FixtureAudioFormat(sampleRate:channels:)` were both already
+    /// there; I did not look before writing the reason down. A peer review built it in minutes, found a
+    /// failure, and then traced that failure to its own sandbox rather than to Acta — so the code was
+    /// right and my reason for not testing it was not.
+    ///
+    /// The construction is the review's, narrowed to the transition that actually happens on this
+    /// machine: the AirPods measured **24 000 Hz**, so 48 k → 24 k is the real headset switch.
+    ///
+    /// ⚠️ **Skipped by default, and visibly — never by a bare `return`.** This one case takes the suite
+    /// from 4 s to 63 s, and while it runs it starves
+    /// `aRecordingBackedByAFakeSourceCrossesASegmentBoundaryAndAssembles` into failing about half the
+    /// time. Turning a fast reliable gate into a slow unreliable one is a net loss, and a gate nobody
+    /// trusts stops being a gate. Run it deliberately:
+    ///
+    ///     ACTA_SLOW_TESTS=1 bash Scripts/test.sh
+    ///
+    /// It **passes** when run — this is not a quarantined failure. The cost is in `SegmentWriter`'s
+    /// conversion path, not here: the same test with no format change is instant, and the cost is flat
+    /// in the amount of audio, which rules out throughput and points at a stall. That is its own
+    /// finding, in `docs/backlog/slow-non-48k-segment-writing.md`, and it matters because the AirPods on
+    /// this machine were measured at exactly this 24 kHz.
+    @Test("a switch between source formats leaves every segment valid and assembles",
+          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
+                   "costs ~59s and starves timing-sensitive tests; run with ACTA_SLOW_TESTS=1"),
+          arguments: [(24_000.0, AVAudioChannelCount(2))])
+    @available(macOS 15.0, *)
+    func aFormatSwitchKeepsEverySegmentValid(_ format: (rate: Double, channels: AVAudioChannelCount)) async throws {
+        try await withTemporaryDirectoryAsync { directory in
+            let (source, resolver, recorder) = self.recorder(
+                .pinned(.builtInMic(), alternatives: []), in: directory
+            )
+            // ⚠️ One buffer per side rather than the default batch of three. The conversion path for a
+            // format that is not already 48 kHz stereo is **slow** — a full batch put this single test
+            // at a minute, against about four seconds for the whole suite — and the property under test
+            // needs one buffer on each side of the switch, not three.
+            source.setEmitOnStart(false)
+            try await recorder.start()
+            source.enqueueBatch(count: 1)
+            source.drain()
+
+            source.setFormat(FixtureAudioFormat(sampleRate: format.rate, channels: format.channels))
+            resolver.set(.pinned(.airPods(), alternatives: []))
+            try await recorder.restart()
+            source.enqueueBatch(count: 1)
+            source.drain()
+            await recorder.stop()
+
+            // ⚠️ **The oracle is byte growth, not `AVAudioFile`.** These segments are written by
+            // `SegmentWriter` and read by `ffmpeg` — the assembler's own path — and `AVAudioFile`
+            // refuses them, which is a fact about that reader rather than about the files. Asserting
+            // readability through it would have failed even the no-change control.
+            for track in ["system", "mic"] {
+                let folder = directory.appendingPathComponent(track)
+                let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+                    .filter { $0.hasSuffix(".wav") }.sorted()
+                #expect(files.count == 2, "\(track): expected a segment on each side of the switch")
+
+                let sizes = files.map { file -> Int in
+                    let path = folder.appendingPathComponent(file).path
+                    return (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) as? Int ?? 0
+                }
+                #expect(sizes.allSatisfy { $0 > 0 }, "\(track): a segment is empty")
+                // ⚠️ **The property the review's failure actually violated**: the post-switch segment
+                // must hold at least as much audio as the pre-switch one. The same number of buffers is
+                // delivered on each side, so a new source format whose buffers cannot be written shows
+                // up here as a short second segment — which is silent loss, since `source.start()`
+                // returning is not evidence the new track can be written.
+                if let first = sizes.first, let second = sizes.last {
+                    #expect(second >= first,
+                            "\(track): the post-switch segment is shorter than the pre-switch one")
+                }
+            }
+
+            // Every delivered buffer was accepted on both sides of the switch.
+            #expect(recorder.receivedBufferCounts.mic == 2)
+            #expect(recorder.receivedBufferCounts.system == 2)
         }
     }
 

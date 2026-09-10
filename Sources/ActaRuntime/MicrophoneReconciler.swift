@@ -150,11 +150,48 @@ public actor MicrophoneReconciler {
     /// Turn enforcement on: subscribe, reset the budget, and reconcile immediately.
     public func enable() async {
         generation &+= 1
+        applyEnabled()
+        await schedule(.enabled)
+    }
+
+    /// Set the order **and** the enable flag as **one** operation, then reconcile once.
+    ///
+    /// ⚠️ **Two calls cannot express this, and the gap between them is a real defect rather than a
+    /// tidiness point.** Applying a configuration in which feature (B) is *off* by first setting the
+    /// order and then disabling leaves a window in which the reconciler is still enabled under the new
+    /// list — and it reconciles there, so switching the feature off writes the Mac's default input on
+    /// its way out. Measured: applying `(priority: [USB], manages: false)` to an enabled reconciler
+    /// wrote USB and then disabled. The same window lets a *stale* application re-enable enforcement
+    /// after a newer one settled, because the enable step is a second thing that can run late.
+    public func configure(order: [String], enabled shouldEnforce: Bool) async {
+        generation &+= 1
+        priorityStorage.order = order
+        if shouldEnforce {
+            applyEnabled()
+            await schedule(.enabled)
+        } else {
+            applyDisabled()
+            publish(.disabled)
+        }
+    }
+
+    private func applyEnabled() {
         enabled = true
         paused = false
         budget.reset()
         subscribeIfNeeded()
-        await schedule(.enabled)
+    }
+
+    private func applyDisabled() {
+        enabled = false
+        paused = false
+        observation?.cancel()
+        observation = nil
+        observationDegraded = nil
+        enforcedAndUnchallenged = nil
+        confirmedSelection = nil
+        observedDefault = .unread
+        pendingTriggers.removeAll()
     }
 
     /// Turn enforcement off.
@@ -164,16 +201,8 @@ public actor MicrophoneReconciler {
     /// for, issued at the exact moment they said stop.
     public func disable() async {
         generation &+= 1
-        enabled = false
-        paused = false
-        observation?.cancel()
-        observation = nil
-        observationDegraded = nil
-        enforcedAndUnchallenged = nil
-        confirmedSelection = nil
         // Nothing is being read any more, so claiming to know the default would be a stale assertion.
-        observedDefault = .unread
-        pendingTriggers.removeAll()
+        applyDisabled()
         publish(.disabled)
     }
 

@@ -30,6 +30,14 @@ public enum WireMessageCode {
     /// code falls through its default rather than failing to decode the response. Adding a **case** to
     /// a response-direction enum would be a version bump; adding a code is not.
     public static let startupMicrophoneUnavailable = "startup_microphone_unavailable"
+    /// A start or restart was asked for after the recording had already stopped.
+    public static let startupRecordingAlreadyStopped = "startup_recording_already_stopped"
+    /// A list is configured and none of its devices is present.
+    public static let startupPreferredMicrophoneAbsent = "startup_preferred_microphone_absent"
+    /// This Mac has nothing that can be recorded from.
+    public static let startupNoMicrophoneOnThisMac = "startup_no_microphone_on_this_mac"
+    /// The audio devices could not be described well enough to choose one.
+    public static let startupMicrophoneUnreadable = "startup_microphone_unreadable"
     /// The recording's microphone changed mid-recording.
     public static let microphoneSwitched = "microphone_switched"
     /// An explicit microphone switch did not come up; the previous device is still recording.
