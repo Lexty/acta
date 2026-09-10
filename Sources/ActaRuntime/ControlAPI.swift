@@ -187,6 +187,75 @@ public final class ControlAPI {
         set { controller.settings = newValue }
     }
 
+    /// Everything the menu needs about microphones, in one value it can render without asking three
+    /// different objects three different questions.
+    ///
+    /// ⚠️ **The three states are carried apart, and the menu must not collapse them** (plan decision
+    /// 6). System Settings showing the right default does not prove Acta's capture followed, and Acta
+    /// recording from a device says nothing about what the Mac prefers. They disagree exactly when
+    /// someone is looking.
+    public struct MicrophoneStatus: Equatable, Sendable {
+        /// Every input the machine currently offers, for the chooser.
+        public var devices: [AudioInputDevice]
+        /// The user's order.
+        public var priority: [String]
+        /// The temporary *Use now*, if one is in force.
+        public var override: String?
+        /// What the policy would pick — feature (B)'s preference.
+        public var preferred: String?
+        /// What the Mac's default input actually is.
+        public var systemDefault: ObservedDefaultInput
+        /// What Acta is recording from **right now**, or `nil` when nothing is recording.
+        public var recordingFrom: AudioInputDevice?
+        /// Whether Acta is managing the Mac's default input.
+        public var managingSystemInput: Bool
+        /// Enforcement's own status — waiting, paused, suspended, refused, uncertain.
+        public var enforcement: MicrophoneEnforcementStatus
+        /// Set when the device list could not be fully read.
+        public var inventoryFailure: String?
+
+        public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,
+                    preferred: String? = nil, systemDefault: ObservedDefaultInput = .unread,
+                    recordingFrom: AudioInputDevice? = nil, managingSystemInput: Bool = false,
+                    enforcement: MicrophoneEnforcementStatus = .disabled,
+                    inventoryFailure: String? = nil) {
+            self.devices = devices
+            self.priority = priority
+            self.override = override
+            self.preferred = preferred
+            self.systemDefault = systemDefault
+            self.recordingFrom = recordingFrom
+            self.managingSystemInput = managingSystemInput
+            self.enforcement = enforcement
+            self.inventoryFailure = inventoryFailure
+        }
+    }
+
+    public var microphoneStatus: MicrophoneStatus {
+        let preference = microphone.capturePreference.snapshot
+        return MicrophoneStatus(
+            devices: microphone.inventory.devices,
+            priority: preference.priority.order,
+            override: preference.priority.override,
+            preferred: microphone.enforcement.preferred,
+            systemDefault: microphone.inventory.observedDefault,
+            recordingFrom: controller.recordingMicrophone,
+            managingSystemInput: microphone.enforcement.status != .disabled,
+            enforcement: microphone.enforcement.status,
+            inventoryFailure: microphone.inventory.failure ?? microphone.inventory.observationDegraded
+        )
+    }
+
+    /// Turn management of the Mac's default input on, seeding the list if it is empty.
+    public func enableMicrophoneManagement() async { _ = await microphone.enableManagement() }
+    public func disableMicrophoneManagement() async { await microphone.disableManagement() }
+    public func pauseMicrophoneManagement() async { await microphone.pauseEnforcement() }
+    public func resumeMicrophoneManagement() async { await microphone.resumeEnforcement() }
+    public func setMicrophonePriority(_ order: [String]) async { await microphone.setPriorityOrder(order) }
+    public func setCaptureMicrophoneChoice(_ choice: CaptureMicrophoneChoice) {
+        microphone.setCaptureChoice(choice)
+    }
+
     /// *Use now*: point Acta at this microphone.
     ///
     /// ⚠️ **One user action with two effects, and they are not the same promise.** It sets the

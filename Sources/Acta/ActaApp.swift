@@ -137,6 +137,9 @@ struct MenuContent: View {
             controls
 
             Divider()
+            microphoneSection
+
+            Divider()
             recordingsList
 
             Divider()
@@ -152,7 +155,7 @@ struct MenuContent: View {
         }
         .padding(12)
         .frame(width: 300)
-        .onAppear { model.refresh() }
+        .onAppear { model.refresh(); model.refreshMicrophone() }
         // Auto-cancelled when the menu closes, so repeated opens do not accumulate subscriptions.
         .task { await model.subscribe() }
     }
@@ -234,6 +237,191 @@ struct MenuContent: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
+    }
+
+    // MARK: - Microphone
+
+    /// The chooser, and the three states it must never collapse.
+    ///
+    /// ⚠️ **With feature (B) off this section reads as Acta's recording input and nothing else.** The
+    /// two promises are separate — one is which microphone Acta records from, the other is which
+    /// microphone the Mac prefers — and a user who never turns the second one on must not be shown a
+    /// control that implies Acta is touching their system settings.
+    @ViewBuilder
+    private var microphoneSection: some View {
+        let mic = model.microphone
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Microphone").font(.headline)
+
+            if let failure = mic.inventoryFailure {
+                // ⚠️ "I could not look" is never rendered as "there is nothing here".
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            microphoneStates(mic)
+
+            ForEach(mic.devices, id: \.uid) { device in
+                microphoneRow(device, in: mic)
+            }
+            if mic.devices.isEmpty {
+                Text("No microphones found.").font(.caption).foregroundStyle(.secondary)
+            }
+
+            if mic.override != nil {
+                Button("Resume automatic selection") { model.resumeAutomaticMicrophoneSelection() }
+                    .font(.caption)
+            }
+
+            Divider().padding(.vertical, 2)
+            managementControls(mic)
+        }
+    }
+
+    /// ⚠️ **Three lines, never one.** System Settings showing the right default does not prove Acta's
+    /// capture followed, and Acta recording from a device says nothing about what the Mac prefers.
+    /// Collapsing them hides the disagreement, which is the only time anyone reads this.
+    @ViewBuilder
+    private func microphoneStates(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let recording = mic.recordingFrom {
+                stateLine("Recording from", recording.name, systemImage: "record.circle")
+            } else {
+                stateLine("Recording from", "not recording", systemImage: "record.circle")
+            }
+            if mic.managingSystemInput {
+                stateLine("Preferred", name(of: mic.preferred, in: mic) ?? "none available",
+                          systemImage: "star")
+                stateLine("Mac's input", systemDefaultText(mic), systemImage: "desktopcomputer")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func stateLine(_ label: String, _ value: String, systemImage: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage).frame(width: 12)
+            Text("\(label): ").foregroundStyle(.secondary)
+            Text(value).foregroundStyle(.primary)
+        }
+    }
+
+    private func systemDefaultText(_ mic: ControlAPI.MicrophoneStatus) -> String {
+        switch mic.systemDefault {
+        case .unread: return "not read"
+        case .noDefault: return "none"
+        case .device(let uid): return name(of: uid, in: mic) ?? uid
+        }
+    }
+
+    private func name(of uid: String?, in mic: ControlAPI.MicrophoneStatus) -> String? {
+        guard let uid else { return nil }
+        return mic.devices.first { $0.uid == uid }?.name ?? uid
+    }
+
+    /// One device: whether it is on the list, where it sits, and *Use now*.
+    ///
+    /// ⚠️ **Two distinct actions, never one click that does both** (plan decision 2). Borrowing a
+    /// headset for one call is not a preference change, so *Use now* is temporary and the arrows edit
+    /// the persistent list.
+    @ViewBuilder
+    private func microphoneRow(_ device: AudioInputDevice,
+                               in mic: ControlAPI.MicrophoneStatus) -> some View {
+        let rank = mic.priority.firstIndex(of: device.uid)
+        HStack(spacing: 6) {
+            Button {
+                model.togglePreferred(device.uid)
+            } label: {
+                Image(systemName: rank != nil ? "checkmark.circle.fill" : "circle")
+            }
+            .buttonStyle(.plain)
+            .help(rank != nil ? "Remove from your priority list" : "Add to your priority list")
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(device.name).font(.callout)
+                if device.uid == mic.override {
+                    Text("using now").font(.caption2).foregroundStyle(.orange)
+                }
+                // ⚠️ **One click can legitimately land on only one of the two promises**, and the menu
+                // has to say which. Capture does not filter on `canBeSystemDefault` and the system
+                // default does, so a device Acta can record from may be one the OS refuses as the Mac's
+                // input: the recording follows, the Mac's input does not.
+                if mic.managingSystemInput, device.isCaptureCandidate, !device.isSystemDefaultCandidate {
+                    Text("recording only — the Mac's input will not follow")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if !device.isCaptureCandidate {
+                    Text("unavailable").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+
+            if rank != nil {
+                Button { model.moveMicrophone(device.uid, up: true) } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.plain).disabled(rank == 0)
+                Button { model.moveMicrophone(device.uid, up: false) } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.plain).disabled(rank == mic.priority.count - 1)
+            }
+            Button("Use now") { model.useMicrophoneNow(device.uid) }
+                .font(.caption)
+                .disabled(model.pendingSelection == device.uid)
+        }
+    }
+
+    /// Feature (B): opt-in, always says so, and Pause is always reachable.
+    @ViewBuilder
+    private func managementControls(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        Toggle("Keep the Mac's input on my list", isOn: Binding(
+            get: { mic.managingSystemInput },
+            set: { model.setManagingSystemInput($0) }
+        ))
+        .font(.callout)
+
+        if mic.managingSystemInput {
+            // ⚠️ Stated whenever it is on: the user must always be able to see that something is
+            // changing a system setting on their behalf, and reach the off switch for it.
+            Text("Acta is managing the Mac's input.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text(enforcementText(mic.enforcement)).font(.caption)
+                Spacer()
+                // ⚠️ Pause suspends **global enforcement only**. Acta's own recording selection keeps
+                // working while paused — different promises, and they must not share a switch.
+                if case .paused = mic.enforcement {
+                    Button("Resume") { model.resumeMicrophoneManagement() }.font(.caption)
+                } else {
+                    Button("Pause") { model.pauseMicrophoneManagement() }.font(.caption)
+                }
+            }
+        } else {
+            Text("Acta is not changing your Mac's input.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// ⚠️ **Waiting, paused, suspended and refused are four sentences, not one.** Collapsing any pair
+    /// is the failure this whole feature exists to avoid: a status that reads as ordinary waiting while
+    /// something is actually wrong.
+    private func enforcementText(_ status: MicrophoneEnforcementStatus) -> String {
+        switch status {
+        case .disabled: return ""
+        case .enforcing: return "Holding your preferred microphone."
+        case .waitingForPreferredDevice: return "Waiting for a preferred microphone."
+        case .noEligibleDevice: return "No microphone this Mac can use as its input."
+        case .writesRefused: return "The system refused to switch to your microphone."
+        case .uncertain: return "Holding — the audio devices could not all be read."
+        case .paused: return "Paused. Your recordings still use your list."
+        case .suspended(let cause):
+            switch cause {
+            case .repeatedReversals(let n): return "Stopped after something changed the input back \(n) times."
+            case .repeatedConvergenceFailures(let n): return "Stopped after \(n) failed attempts."
+            }
+        case .degraded: return "Could not read the audio devices."
+        }
     }
 
     private var recordingsList: some View {

@@ -251,6 +251,9 @@ public final class RecordingSession: @unchecked Sendable {
         }
     }
 
+    /// What this recording is capturing from right now.
+    public var recordingMicrophone: AudioInputDevice? { recorder.pinnedMicrophone }
+
     /// Re-resolve the microphone and bring the capture back up on it — a *Use now* landing on a
     /// recording that is already running, or a priority edit the user wants applied now.
     ///

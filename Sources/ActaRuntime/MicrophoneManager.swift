@@ -144,6 +144,24 @@ public final class MicrophoneManager {
         LiveCaptureMicrophoneResolver(reader: directory, preference: capturePreference)
     }
 
+    /// Switch on management of the Mac's default input, **seeding the list if it is empty**.
+    ///
+    /// ⚠️ Seeding goes through `MicrophoneSeeding.seeded`, which refuses to overwrite an existing list,
+    /// so a disable/re-enable cycle cannot cost a user their hand-made order.
+    public func enableManagement() async -> [String] {
+        let seeded = MicrophoneSeeding.seeded(capturePreference.priority.order,
+                                              devices: inventory.devices,
+                                              systemDefault: inventory.observedDefault.uid)
+        await reconciler.configure(order: seeded, enabled: enforcementAdmitted)
+        await syncCapturePreference()
+        return seeded
+    }
+
+    public func disableManagement() async {
+        await reconciler.configure(order: capturePreference.priority.order, enabled: false)
+        await syncCapturePreference()
+    }
+
     /// Whether recordings follow the priority list or start from the system default.
     ///
     /// ⚠️ **Independent of feature (B).** Pausing or disabling enforcement of the *system* default must

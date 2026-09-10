@@ -41,6 +41,13 @@ public final class RecordingController: ObservableObject {
     // Active session state.
     private var session: RecordingSession?
 
+    /// The microphone the running recording is actually capturing from, or `nil` when nothing is.
+    ///
+    /// ⚠️ Read from the recorder's pin, which is set only after capture came up — never from what was
+    /// requested. A menu that shows a device before it is recording is lying at the one moment it
+    /// matters.
+    public var recordingMicrophone: AudioInputDevice? { session?.recordingMicrophone }
+
     /// Switch the running recording's microphone, and report what actually happened.
     ///
     /// ⚠️ **The production caller Task 5 was missing.** The switch itself has always gone through

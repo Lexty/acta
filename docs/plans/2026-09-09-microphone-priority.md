@@ -442,37 +442,46 @@ honest — not compatibility adapters.
 
 ### Task 7: The menu chooser and the states it must not blur
 
-- [ ] The input chooser in Acta's menu, with **Use now** and **Change priority** as distinct actions
+- [x] The input chooser in Acta's menu, with **Use now** and **Change priority** as distinct actions
       (decision 2)
-- [ ] Display the three states separately (decision 6): preferred, actual system default, Acta's
+- [x] Display the three states separately (decision 6): preferred, actual system default, Acta's
       recording device. Never collapse them when they differ
-- [ ] ⚠️ **The recording-only user must have a defined startup flow.** The list defaults empty, seeding
+- [x] ⚠️ **The recording-only user must have a defined startup flow.** The list defaults empty, seeding
       happens only when feature (B) is enabled, and capture refuses an unresolved microphone — so
       someone who never enables (B) otherwise falls into an unspecified state. Add acceptance for a
       **fresh install** and for **migrated settings**, both with (B) disabled: the user can select or
       accept a recording microphone without enabling system management
-- [ ] **Seed, do not invent.** On enabling (B), propose the current suitable physical microphone, with
+- [x] **Seed, do not invent.** On enabling (B), propose the current suitable physical microphone, with
       the built-in as fallback; if the current input is Bluetooth, propose the built-in
-- [ ] ⚠️ **Define "suitable physical microphone" in this task**, in terms of the Task 1 fields
+- [x] ⚠️ **Define "suitable physical microphone" in this task**, in terms of the Task 1 fields
       (transport, alive, input channels, default-eligibility) — not as prose. And define what happens
       when **no built-in microphone exists**
-- [ ] ⚠️ **Seeding must never overwrite an existing list**, and an existing list must survive a
+- [x] ⚠️ **Seeding must never overwrite an existing list**, and an existing list must survive a
       disable/re-enable cycle
-- [ ] **"Managing Mac input"** stated in the menu whenever (B) is on, with **Pause** always reachable
-- [ ] ⚠️ **Pause suspends global enforcement only.** Acta's own capture selection stays fully
+- [x] **"Managing Mac input"** stated in the menu whenever (B) is on, with **Pause** always reachable
+- [x] ⚠️ **Pause suspends global enforcement only.** Acta's own capture selection stays fully
       operational while paused — they are different promises and must not share a switch
-- [ ] ⚠️ **A *Use now* selection that is capture-eligible but not default-eligible needs an explicit
+- [x] ⚠️ **A *Use now* selection that is capture-eligible but not default-eligible needs an explicit
       result while (B) is on.** Decide it here: Acta's capture follows, the system default does not,
       and the menu says so. ⚠️ **Name no examples without measuring them first** — an earlier draft
       cited BlackHole and the aggregate here, which the measured-facts section of this very file
       refutes: both returned `1` for input-scope `canBeDefaultDevice`. The one device measured at `0`
       was the Teams loopback driver, and whether ScreenCaptureKit will capture *that* is unverified,
       so it is not an example either
-- [ ] **"Waiting for a preferred microphone"** shown distinctly from **Paused** and from an error
-- [ ] With (B) disabled, the chooser must read unambiguously as **Acta's recording input only**
-- [ ] (B) is **opt-in, off by default** — it changes state other applications depend on
-- [ ] `ControlViewModel` keeps the existing optimistic-write-plus-reconcile shape; assert only through
-      the public surface
+- [x] **"Waiting for a preferred microphone"** shown distinctly from **Paused** and from an error
+- [x] With (B) disabled, the chooser must read unambiguously as **Acta's recording input only**
+- [x] (B) is **opt-in, off by default** — it changes state other applications depend on
+- [x] `ControlViewModel` keeps the existing optimistic-write-plus-reconcile shape — `pendingSelection`
+      holds the **request** until the status reflects it, exactly as `pendingTitle` does. ⚠️ **With one
+      difference stated in the code**: a title is true the moment it is typed and a microphone is not
+      true until capture succeeds, so the pending value drives the selection tick and never the
+      "recording from" line, which reads `recordingFrom` — the recorder's pin, set only after capture
+      came up
+- [ ] ⚠️ **NOT covered by a test, and not ticked as if it were**: `ControlViewModel` and the menu views
+      live in the `Acta` executable target, which SwiftPM cannot import, so nothing in `ActaTestRunner`
+      can reach them. Everything below the view model — the seeding policy, the three states, the
+      startup flows, Pause's scope — is tested through `MicrophoneManager` and `ControlAPI`; the
+      rendering itself is manual, like the rest of the UI
 
 ### Task 8: The CoreAudio confinement, as a real test
 
@@ -560,5 +569,11 @@ The seams end below all of this; the suite proves the decision logic and none of
   not.
 - **That the fight-back policy is livable.** Whether enforcement feels correct or hostile when the user
   reaches for System Settings anyway — and whether the conflict budget suspends at the right point.
+- **The menu itself.** Task 7's chooser lives in the `Acta` executable target, which SwiftPM cannot
+  import, so no test in `ActaTestRunner` can render it. What is tested is everything the views read and
+  call: the seeding policy from literals, the three states as separate values, both startup flows with
+  feature (B) off, and that Pause suspends only the system-default half. That the **rendering** is
+  right — that the three lines never collapse on screen, that "recording only" appears on the device it
+  should, that Pause is reachable — needs a human with the app open.
 - **Microphone release on stop, again.** Task 5 changes the stream configuration; Gotcha 4 in the
   `screencapturekit-audio` skill applies unchanged, and a regression there is silent.
