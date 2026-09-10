@@ -20,9 +20,15 @@ final class FakeAudioHAL: AudioHALListening, @unchecked Sendable {
 
     private let lock = NSLock()
     private var live: [ObjectIdentifier: Registration] = [:]
+    /// Every registration ever made, **including removed ones**. A real HAL callback can already be in
+    /// flight when its registration is removed, so a test has to be able to invoke one afterwards; a
+    /// fake that forgot removed registrations could only ever fire into a live directory, which makes
+    /// the "callback outlives its owner" case unreachable and its test a tautology.
+    private var everRegistered: [Registration] = []
     private var refusals: [HALWatch: String] = [:]
     private var devices: [(id: UInt32, uid: String?)] = []
     private var listFailure: String?
+    private var removalRefusals: [HALWatch: String] = [:]
 
     private var addedWatches: [HALWatch] = []
     private var removedWatches: [HALWatch] = []
@@ -46,6 +52,13 @@ final class FakeAudioHAL: AudioHALListening, @unchecked Sendable {
     var removed: [HALWatch] { lock.lock(); defer { lock.unlock() }; return removedWatches }
     var liveWatches: [HALWatch] { lock.lock(); defer { lock.unlock() }; return live.values.map(\.watch) }
 
+    /// A delivery closure and the queue it belongs on, retained past removal — see `everRegistered`.
+    func savedDelivery(for watch: HALWatch) -> (queue: DispatchQueue, fire: @Sendable () -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let registration = everRegistered.last(where: { $0.watch == watch }) else { return nil }
+        return (queue: registration.queue, fire: registration.fire)
+    }
+
     /// Deliver a callback exactly as the HAL would: on the queue the coordinator asked for.
     func fire(_ watch: HALWatch) {
         lock.lock()
@@ -67,16 +80,29 @@ final class FakeAudioHAL: AudioHALListening, @unchecked Sendable {
         }
         let registration = Registration(watch: watch, queue: queue, fire: fire)
         live[ObjectIdentifier(registration)] = registration
+        everRegistered.append(registration)
         lock.unlock()
         return .success(registration)
     }
 
-    func remove(_ registration: any HALRegistration) {
-        guard let registration = registration as? Registration else { return }
+    /// Scripted removal refusals, so the "the HAL declined to unregister" branch is reachable at all.
+    /// A fake whose removals always succeed cannot exercise that boundary.
+    func refuseRemoval(of watch: HALWatch, reason: String = "scripted removal refusal") {
+        lock.lock(); removalRefusals[watch] = reason; lock.unlock()
+    }
+
+    @discardableResult
+    func remove(_ registration: any HALRegistration) -> Result<Void, HALRegistrationFailure> {
+        guard let registration = registration as? Registration else { return .success(()) }
         lock.lock()
+        if let reason = removalRefusals[registration.watch] {
+            lock.unlock()
+            return .failure(HALRegistrationFailure(reason: reason))
+        }
         live.removeValue(forKey: ObjectIdentifier(registration))
         removedWatches.append(registration.watch)
         lock.unlock()
+        return .success(())
     }
 
     func listDevices() -> Result<[(id: UInt32, uid: String?)], HALRegistrationFailure> {

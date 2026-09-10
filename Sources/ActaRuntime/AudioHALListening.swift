@@ -38,9 +38,20 @@ protocol AudioHALListening: AnyObject, Sendable {
              on queue: DispatchQueue,
              fire: @escaping @Sendable () -> Void) -> Result<any HALRegistration, HALRegistrationFailure>
 
-    /// Remove a registration. Idempotent, and never fails: there is nothing a caller could do about it,
-    /// and a teardown that can refuse is a teardown that leaks.
-    func remove(_ registration: any HALRegistration)
+    /// Remove a registration.
+    ///
+    /// ⚠️ **Removal can fail, and this signature says so.** An earlier version of this contract promised
+    /// "idempotent, and never fails", reasoning that a caller could do nothing about a refusal. That was
+    /// a guarantee the implementation could not keep: `AudioHardware.h` documents
+    /// `AudioObjectRemovePropertyListenerBlock` as returning success *or* failure, and a `Void` return
+    /// cannot make a rejected teardown succeed — it can only hide one. A listener the HAL declined to
+    /// unregister is still installed and still firing, which is the precise leak this bookkeeping
+    /// exists to prevent. The caller cannot retry it, but it can report it, and "refused" must stay
+    /// distinguishable from "cleanly removed".
+    ///
+    /// Removing an already-removed registration is not an error.
+    @discardableResult
+    func remove(_ registration: any HALRegistration) -> Result<Void, HALRegistrationFailure>
 
     /// The devices the OS currently lists, with their UIDs where readable.
     ///

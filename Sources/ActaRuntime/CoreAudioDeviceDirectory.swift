@@ -117,9 +117,13 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         // object. There is therefore no concurrent reader left to race. Scheduling the removal instead
         // would be worse, not better: a queued job capturing `self` weakly would find nothing and skip
         // it, leaving registered blocks with no cleanup path at all.
-        for registration in systemRegistrations { hal.remove(registration) }
+        // ⚠️ Best effort, and it has to be: a removal the HAL refuses cannot be retried from here —
+        // there is no `self` left to retry with — and `deinit` may not throw. Failures are logged, not
+        // swallowed silently, because a listener that outlives its owner keeps firing against freed
+        // state and the log is the only trace that will exist.
+        for registration in systemRegistrations { report(hal.remove(registration)) }
         for listener in readinessListeners.values {
-            for registration in listener.registrations { hal.remove(registration) }
+            for registration in listener.registrations { report(hal.remove(registration)) }
         }
     }
 
@@ -214,7 +218,7 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
             // changes but never default-input changes is exactly the "unchanged winner, moved default"
             // blind spot the reconciler cannot see past — and it would look like a working
             // subscription. Removing the half that succeeded is the only honest outcome.
-            hal.remove(listRegistration)
+            removeRegistration(listRegistration)
             if case .failure(let error) = defaultInput {
                 return .failure(HALRegistrationFailure(reason: "default-input listener: \(error.reason)"))
             }
@@ -253,10 +257,19 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         // ⚠️ A device whose UID would not read is **kept**, not removed. "I could not identify it" is
         // not "it is gone", and dropping its listener on that basis is how a transient read failure
         // becomes a permanently unwatched device.
-        let keep = Set(present.keys).union(unidentified)
-        for (id, listener) in readinessListeners where !keep.contains(id) {
+        //
+        // ⚠️ **But the same numeric id is not the same device.** `AudioObjectID` is ephemeral and the
+        // HAL is free to hand a recycled one to a different device; identity is the UID and nothing
+        // else. A refresh that compared ids alone kept the old listener because "42 is still present"
+        // and went on labelling every readiness change with the *previous* device's UID — a listener
+        // pointed at the wrong device, reporting confidently, forever. The stored uid exists to be
+        // compared, so compare it.
+        let unidentifiedIDs = Set(unidentified)
+        for (id, listener) in readinessListeners {
+            if unidentifiedIDs.contains(id) { continue }          // unreadable: keep, per the rule above
+            if let current = present[id], current == listener.uid { continue }   // same device, still watched
             readinessListeners.removeValue(forKey: id)
-            for registration in listener.registrations { hal.remove(registration) }
+            for registration in listener.registrations { removeRegistration(registration) }
         }
         if !unidentified.isEmpty {
             reportDegradation("\(unidentified.count) device(s) could not be identified; their readiness state is uncertain")
@@ -269,8 +282,16 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     }
 
     private func installReadiness(for id: AudioObjectID, uid: String) -> ReadinessListener? {
+        // ⚠️ The callback re-checks, on the coordinator, that this id still belongs to this uid before
+        // announcing anything. Removal is not instantaneous: a delivery can already be in flight when a
+        // device is replaced under a recycled id, and a callback that trusted the uid it captured at
+        // install time would announce the departed device's identity as if it were the new one.
+        let announce: @Sendable (CoreAudioDeviceDirectory) -> Void = { directory in
+            guard directory.readinessListeners[id]?.uid == uid else { return }
+            directory.broadcast(.readinessChanged(uid: uid))
+        }
         let alive = hal.add(.deviceAlive(id), on: halQueue) { [weak self] in
-            self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
+            self?.onHALCallback(announce)
         }
         guard case .success(let aliveRegistration) = alive else {
             if case .failure(let error) = alive {
@@ -280,18 +301,36 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
 
         let streams = hal.add(.deviceStreams(id), on: halQueue) { [weak self] in
-            self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
+            self?.onHALCallback(announce)
         }
         guard case .success(let streamsRegistration) = streams else {
             // Roll back the half that took: a device watched for liveness but not for its stream
             // configuration is watched for the wrong half of "still a usable microphone".
-            hal.remove(aliveRegistration)
+            removeRegistration(aliveRegistration)
             if case .failure(let error) = streams {
                 reportDegradation("no stream-configuration listener for \(uid): \(error.reason)")
             }
             return nil
         }
         return ReadinessListener(uid: uid, registrations: [aliveRegistration, streamsRegistration])
+    }
+
+    /// Remove a registration and surface a refusal.
+    ///
+    /// ⚠️ **A removal can fail, and the seam no longer pretends otherwise.** `AudioHardware.h` documents
+    /// `AudioObjectRemovePropertyListenerBlock` as returning success *or* failure, and an earlier
+    /// contract here claimed removal "never fails" on the grounds that a caller could do nothing about
+    /// it. A caller can do the one thing that matters: say so. A listener the HAL declined to
+    /// unregister is still installed and still firing — the exact leak this bookkeeping exists to
+    /// prevent — and it must not be indistinguishable from a clean teardown.
+    private func removeRegistration(_ registration: any HALRegistration) {
+        report(hal.remove(registration))
+    }
+
+    private func report(_ outcome: Result<Void, HALRegistrationFailure>) {
+        if case .failure(let error) = outcome {
+            log.error("Listener removal refused: \(error.reason, privacy: .public)")
+        }
     }
 
     /// ⚠️ A per-device listener that would not install used to be **logged and nothing else**, while
@@ -628,10 +667,18 @@ final class CoreAudioHAL: AudioHALListening, @unchecked Sendable {
         return .success(Registration(object: object, address: address, queue: queue, block: block))
     }
 
-    func remove(_ registration: any HALRegistration) {
-        guard let registration = registration as? Registration else { return }
-        AudioObjectRemovePropertyListenerBlock(registration.object, &registration.address,
-                                               registration.queue, registration.block)
+    @discardableResult
+    func remove(_ registration: any HALRegistration) -> Result<Void, HALRegistrationFailure> {
+        guard let registration = registration as? Registration else { return .success(()) }
+        let status = AudioObjectRemovePropertyListenerBlock(registration.object, &registration.address,
+                                                            registration.queue, registration.block)
+        // ⚠️ This status used to be discarded. `AudioHardware.h` documents the call as returning success
+        // *or* failure, and a refused removal leaves the block installed and firing — the exact leak
+        // this type's bookkeeping exists to prevent.
+        guard status == noErr else {
+            return .failure(HALRegistrationFailure(reason: CoreAudioDeviceDirectory.describe(status: status)))
+        }
+        return .success(())
     }
 
     func listDevices() -> Result<[(id: UInt32, uid: String?)], HALRegistrationFailure> {
