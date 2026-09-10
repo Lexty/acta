@@ -204,6 +204,9 @@ public final class RecordingSession: @unchecked Sendable {
         await lossWatch.observe(snapshots)
     }
 
+    func holdLossDriverForTesting() async { await lossWatch.holdDriver() }
+    func releaseLossDriverForTesting() async { await lossWatch.releaseDriver() }
+
     /// Watch for the pinned microphone becoming unusable.
     ///
     /// ⚠️ **The watchdog is not a substitute, and assuming it was is what left this missing.**
@@ -390,14 +393,20 @@ actor MicrophoneLossWatch {
     private var report: (@Sendable (ControllerMessage) -> Void)?
     private var fatal: (@Sendable (StartupFailure) -> Void)?
     private var stopped = false
-    /// A loss **proved by some observation**, whether or not the newest one still shows it.
+    /// A loss **proved by some observation**, tagged with the capture attempt it was about.
     ///
-    /// ⚠️ **The fact is kept, not the snapshot, and my previous comment here overstated what keeping
-    /// the newest snapshot achieved.** Deliver "built-in only" and then "AirPods back" before the
-    /// driver runs, and the healthy snapshot replaces the other: the proved departure is gone, no
-    /// restart is issued, and the capture goes on pointing at a device that left. A device returning is
-    /// not evidence that the *existing* capture recovered — the stream was torn down when it left.
-    private var lossProved = false
+    /// ⚠️ **The fact is kept, not the snapshot.** Deliver "built-in only" and then "AirPods back"
+    /// before the driver runs, and keeping only the newest snapshot throws the proved departure away.
+    /// A device returning is not evidence that the existing capture recovered: that capture may no
+    /// longer be delivering, and the directory notification says nothing either way.
+    ///
+    /// ⚠️ **And a bare flag is not enough either**, which took a second review to see. A pending loss
+    /// with no owner is applied to whatever capture happens to exist when the driver runs — so a loss
+    /// of the AirPods, queued behind an explicit switch to a USB microphone, tore down the healthy USB
+    /// capture. That breaks "a healthy capture is never preempted except by *Use now*", and comparing
+    /// uids cannot fix it: a device that disconnects and reconnects has the same uid and a different
+    /// capture. The generation is what makes the fact scoped.
+    private var lossProved: AudioRecorder.CaptureIdentity?
     private var driver: Task<Void, Never>?
 
     init(recorder: AudioRecorder) { self.recorder = recorder }
@@ -419,12 +428,18 @@ actor MicrophoneLossWatch {
 
     func observe(_ snapshot: DeviceEnumeration) {
         guard !stopped else { return }
-        // ⚠️ Evaluated **here**, against the snapshot that was delivered, rather than later against
-        // whichever one happens to be newest.
-        if let pinned = recorder.pinnedMicrophone, Self.isProvedUnusable(pinned, in: snapshot) {
-            lossProved = true
+        // ⚠️ Evaluated **here**, against the snapshot that was delivered and the capture that was
+        // current — not later, against whichever snapshot and whichever capture happen to exist then.
+        //
+        // ⚠️ `captureIdentity.device` is the device being **opened** as well as the one pinned, which is
+        // the other half of the fix: a loss delivered while the new source is up but `start()` has not
+        // returned would otherwise find no device to test against and vanish, and that is precisely the
+        // window a recording most needs covered.
+        let identity = recorder.captureIdentity
+        if let device = identity.device, Self.isProvedUnusable(device, in: snapshot) {
+            lossProved = identity
         }
-        guard lossProved, driver == nil else { return }
+        guard lossProved != nil, driver == nil, !driverGate else { return }
         driver = Task { await self.drain() }
     }
 
@@ -442,22 +457,43 @@ actor MicrophoneLossWatch {
     /// Latch, then **join**. A recording that has stopped owns nothing still running.
     func stop() async {
         stopped = true
-        lossProved = false
+        lossProved = nil
         let running = driver
         await running?.value
         driver = nil
     }
 
+    /// Hold the driver before it can act, so a test can queue a loss and then let something else
+    /// happen first.
+    ///
+    /// ⚠️ Test-facing, and it exists because the property under test **is** the ordering: deliver a
+    /// loss without holding anything and the driver acts on it immediately, so the test never reaches
+    /// the state it is about and passes against the bug.
+    func holdDriver() { driverGate = true }
+
+    func releaseDriver() {
+        driverGate = false
+        guard lossProved != nil, driver == nil else { return }
+        driver = Task { await self.drain() }
+    }
+
+    private var driverGate = false
+
     private func drain() async {
-        while !stopped, lossProved {
-            lossProved = false
-            await handle()
+        while !stopped, !driverGate, let loss = lossProved {
+            lossProved = nil
+            await handle(loss)
         }
         driver = nil
     }
 
-    private func handle() async {
-        guard let pinned = recorder.pinnedMicrophone else { return }
+    private func handle(_ loss: AudioRecorder.CaptureIdentity) async {
+        // ⚠️ **Validated at the point the restart is admitted**, not only when the fact was recorded.
+        // Between the two, an explicit switch may have replaced the capture this loss was about — and
+        // restarting then preempts a healthy one for a device that is no longer in use.
+        let current = recorder.captureIdentity
+        guard current.generation == loss.generation, let device = current.device else { return }
+        let pinned = device
 
         do {
             try await recorder.restart(reason: .deviceLoss)

@@ -30,6 +30,8 @@ public final class AudioRecorder: @unchecked Sendable {
     private let lifecycle = CaptureLifecycle()
     private let lifecycleLock = NSLock()
     private var pinned: AudioInputDevice?
+    private var attempting: AudioInputDevice?
+    private var generation: UInt64 = 0
     private var stopped = false
 
     private let systemWriter: SegmentWriter
@@ -159,6 +161,34 @@ public final class AudioRecorder: @unchecked Sendable {
         return stopped
     }
 
+    /// Which capture attempt is current, and what it is pointing at.
+    ///
+    /// ⚠️ **A fact about a *capture*, not about hardware, and that distinction is a defect I had to be
+    /// shown twice.** A pending "this device is gone" carries no meaning on its own: by the time it is
+    /// acted on, the capture it was about may have been replaced by an explicit switch, and restarting
+    /// then tears down a perfectly healthy replacement — breaking "a healthy capture is never preempted
+    /// except by *Use now*". Comparing the **uid** does not fix it either: a device that disconnects and
+    /// reconnects has the same uid and a different capture. Only a generation does.
+    ///
+    /// ⚠️ `device` is populated **when a candidate is chosen, before the source is opened**, not when
+    /// the start returns. A loss delivered while the new source is up but `start()` has not yet returned
+    /// would otherwise find no device to test against and vanish — which is the one window a recording
+    /// most needs covered.
+    public struct CaptureIdentity: Equatable, Sendable {
+        public var generation: UInt64
+        /// The device this attempt is opening, or has opened.
+        public var device: AudioInputDevice?
+        /// Whether the source actually came up.
+        public var isEstablished: Bool
+    }
+
+    public var captureIdentity: CaptureIdentity {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return CaptureIdentity(generation: generation, device: attempting ?? pinned,
+                               isEstablished: pinned != nil)
+    }
+
     /// The device this recording is currently pinned to, once a start has succeeded.
     ///
     /// ⚠️ Set only **after** capture actually comes up. The menu must never show a requested device as
@@ -207,6 +237,7 @@ public final class AudioRecorder: @unchecked Sendable {
         var lastError: Error?
         for candidate in candidates {
             do {
+                beginAttempt(on: candidate)
                 try await source.start(microphoneDeviceID: candidate.uid)
                 setPinned(candidate)
                 log.info("Recording from \(candidate.name, privacy: .public)")
@@ -223,7 +254,7 @@ public final class AudioRecorder: @unchecked Sendable {
         // "the stream did not come up" (healed by a restart) from other failures, and the
         // self-healing (`SelfCheck`) would not spend its attempts (Task 4).
         // ⚠️ Nothing is recording, so nothing may claim to be.
-        setPinned(nil)
+        clearAttempt()
         log.error("Stream did not come up: \(lastError?.localizedDescription ?? "no candidate", privacy: .public)")
         throw StartupFailure.streamNotStarted
     }
@@ -354,6 +385,25 @@ public final class AudioRecorder: @unchecked Sendable {
     private func setPinned(_ device: AudioInputDevice?) {
         lifecycleLock.lock()
         pinned = device
+        if device != nil { attempting = nil }
+        lifecycleLock.unlock()
+    }
+
+    /// Nothing is being opened and nothing is pinned. Non-async so the lock is never held across an
+    /// `await`.
+    private func clearAttempt() {
+        lifecycleLock.lock()
+        pinned = nil
+        attempting = nil
+        lifecycleLock.unlock()
+    }
+
+    /// A new capture attempt begins: a fresh generation, and the device it is opening published before
+    /// the source is touched.
+    private func beginAttempt(on device: AudioInputDevice) {
+        lifecycleLock.lock()
+        generation &+= 1
+        attempting = device
         lifecycleLock.unlock()
     }
 
@@ -363,6 +413,8 @@ public final class AudioRecorder: @unchecked Sendable {
     private func markStopped() {
         lifecycleLock.lock()
         pinned = nil
+        attempting = nil
+        generation &+= 1
         stopped = true
         lifecycleLock.unlock()
     }

@@ -49,6 +49,37 @@ of them is optional any more.
    checking.
 3. Sampling did not yield usable thread states, so no exact executor/AVFoundation cycle is proven.
 
+## A third instance, and this one is not parallelism
+
+Two later tests — `aPendingLossDoesNotPreemptItsReplacement` and its same-uid variant — cost about
+**thirty seconds each, serialized, on an otherwise idle machine**. Serializing cannot help: they are
+already in a serialized suite.
+
+What is known:
+
+- The only 30-second constant in this code is `SegmentWriter.finishTimeoutSeconds`, the cap `finish()`
+  waits for pending finalisations on stop. So `stop()` is timing out in both.
+- What these two do that the other loss tests do not is an explicit `switchMicrophone`, which rotates a
+  segment mid-recording through `finishAndAdvance()`.
+- Freezing the clock before the switch (stopping emission) changed nothing. Giving the post-switch
+  segment audio changed nothing.
+
+⚠️ **This matters beyond the tests.** `finish()` runs inside `stop()`, so if a mid-recording rotation
+can leave `pendingWrites` unbalanced, a real recording that was switched mid-way sits in "saving" for
+thirty seconds per track before its file appears — a user-visible stall on the same wait that has now
+interfered three separate times.
+
+⚠️ It is **not** established that this reproduces outside the test fixtures, and after a review already
+misattributed a sandbox artifact to this code, it is not being called a shipping defect until it is.
+
+## Chase it, do not route around it
+
+Three tests now sit behind `ACTA_SLOW_TESTS` because of this wait. I argued three commits earlier that
+a flag is the edge of the honour system this project avoids rather than a place to settle — and then
+added two more. The instrumentation that would answer it is a log line in `finalizeCurrent` and in
+`finishWriting`'s completion: minutes of work. Every time I have chosen to route around it instead, it
+has come back.
+
 ## The lesson worth keeping
 
 A stall whose cost is flat in the amount of work is evidence of *a* stall. It is not evidence of *which*
