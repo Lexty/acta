@@ -17,7 +17,7 @@ import Testing
 /// any string. Only a TCC-authorised build recording from a deliberately non-default microphone, and
 /// the audio being listened to, proves the pin took effect — which is in the plan's manual section for
 /// exactly this reason.
-@Suite("Capture microphone")
+@Suite("Capture microphone", .serialized)
 struct CaptureMicrophoneTests {
     // MARK: - The resolution, from literals
 
@@ -237,22 +237,14 @@ struct CaptureMicrophoneTests {
     /// The construction is the review's, narrowed to the transition that actually happens on this
     /// machine: the AirPods measured **24 000 Hz**, so 48 k → 24 k is the real headset switch.
     ///
-    /// ⚠️ **Skipped by default, and visibly — never by a bare `return`.** This one case takes the suite
-    /// from 4 s to 63 s, and while it runs it starves
-    /// `aRecordingBackedByAFakeSourceCrossesASegmentBoundaryAndAssembles` into failing about half the
-    /// time. Turning a fast reliable gate into a slow unreliable one is a net loss, and a gate nobody
-    /// trusts stops being a gate. Run it deliberately:
-    ///
-    ///     ACTA_SLOW_TESTS=1 bash Scripts/test.sh
-    ///
-    /// It **passes** when run — this is not a quarantined failure. The cost is in `SegmentWriter`'s
-    /// conversion path, not here: the same test with no format change is instant, and the cost is flat
-    /// in the amount of audio, which rules out throughput and points at a stall. That is its own
-    /// finding, in `docs/backlog/slow-non-48k-segment-writing.md`, and it matters because the AirPods on
-    /// this machine were measured at exactly this 24 kHz.
+    /// ⚠️ **This test was quarantined on a wrong diagnosis, and is back in the mandatory gate.** I
+    /// measured that it took the suite from 4 s to 63 s, saw the cost was flat in the amount of audio,
+    /// and concluded a stall in the conversion path for non-48-kHz sources — which was a correlation,
+    /// not a measurement. The real cause is `SegmentWriter.finish` exhausting its 30-second
+    /// `pendingWrites` wait when many writers run concurrently; ordinary 48 kHz tests time out
+    /// alongside it. Serializing this suite fixes it, and these tests then cost 0.012 s. See
+    /// `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`.
     @Test("a switch between source formats leaves every segment valid and assembles",
-          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
-                   "costs ~59s and starves timing-sensitive tests; run with ACTA_SLOW_TESTS=1"),
           arguments: [(24_000.0, AVAudioChannelCount(2))])
     @available(macOS 15.0, *)
     func aFormatSwitchKeepsEverySegmentValid(_ format: (rate: Double, channels: AVAudioChannelCount)) async throws {
@@ -260,10 +252,8 @@ struct CaptureMicrophoneTests {
             let (source, resolver, recorder) = self.recorder(
                 .pinned(.builtInMic(), alternatives: []), in: directory
             )
-            // ⚠️ One buffer per side rather than the default batch of three. The conversion path for a
-            // format that is not already 48 kHz stereo is **slow** — a full batch put this single test
-            // at a minute, against about four seconds for the whole suite — and the property under test
-            // needs one buffer on each side of the switch, not three.
+            // One buffer per side rather than the default batch of three: the property under test
+            // needs a buffer on each side of the switch, not three of them.
             source.setEmitOnStart(false)
             try await recorder.start()
             source.enqueueBatch(count: 1)
@@ -276,10 +266,12 @@ struct CaptureMicrophoneTests {
             source.drain()
             await recorder.stop()
 
-            // ⚠️ **The oracle is byte growth, not `AVAudioFile`.** These segments are written by
-            // `SegmentWriter` and read by `ffmpeg` — the assembler's own path — and `AVAudioFile`
-            // refuses them, which is a fact about that reader rather than about the files. Asserting
-            // readability through it would have failed even the no-change control.
+            // ⚠️ **The oracle here is byte growth**, and its weakness is stated rather than dressed up:
+            // `AVAudioFile` refused these segments, and I wrote that off as "a fact about the reader".
+            // That was unsupported — a review read every finalised WAV through `AVAudioFile` in an
+            // unrestricted run, and a *timed-out* finalisation leaves a file needing repair, which
+            // explains the refusal far better. Restoring a playability-and-duration oracle over the
+            // full rate/channel matrix is the open item in the backlog entry above.
             for track in ["system", "mic"] {
                 let folder = directory.appendingPathComponent(track)
                 let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
@@ -388,17 +380,14 @@ struct CaptureMicrophoneTests {
 /// nobody trusts stops being a gate. The cost itself is not understood: it is flat in the amount of
 /// audio and survives freezing the clock before the assembly, which is the same signature as the
 /// format switch, and it is recorded in `docs/backlog/slow-non-48k-segment-writing.md`.
-@Suite("Recording-owned microphone loss")
+@Suite("Recording-owned microphone loss", .serialized)
 struct RecordingMicrophoneLossTests {
     /// ⚠️ **The watchdog is not a substitute, and believing it was is why this was missing.**
     /// `TrackWatchdog` reads a track's count not increasing as ordinary source silence, and the system
     /// track keeps advancing when only the microphone goes — so a lost headset produced no stall at
     /// all. Even for whole-stream loss the watchdog answers after its window; the requirement is
     /// immediate.
-    @Test("losing the pinned microphone fails over at once, and says so",
-          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
-                   "drives a whole session; costs ~30s and starves timing-sensitive tests"),
-    )
+    @Test("losing the pinned microphone fails over at once, and says so")
     @available(macOS 15.0, *)
     func aLostMicrophoneFailsOverImmediately() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -459,10 +448,7 @@ struct RecordingMicrophoneLossTests {
 
     /// ⚠️ Absence is **proved**, never inferred: a snapshot that could not describe every driver is not
     /// evidence the pinned microphone left, and failing a recording over on it acts on an unknown.
-    @Test("an incomplete snapshot does not fail the recording over",
-          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
-                   "drives a whole session; costs ~30s and starves timing-sensitive tests"),
-    )
+    @Test("an incomplete snapshot does not fail the recording over")
     @available(macOS 15.0, *)
     func anIncompleteSnapshotDoesNotFailOver() async throws {
         let directory = FileManager.default.temporaryDirectory

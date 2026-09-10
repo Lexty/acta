@@ -379,16 +379,17 @@ global enforcer **per recording session**.
       user Stop; the first candidate enumerating but **failing to start** while the next succeeds; **no
       candidate succeeding**, with recovery terminating within a defined bound
 - [x] A switch between devices of **different source formats** leaving every segment valid and
-      consistently formatted. ⚠️ **My earlier note here was false and is corrected rather than
-      softened**: I wrote that this needed a fixture the task had not built, when
+      consistently formatted. ⚠️ **Two of my notes here were false and are corrected rather than
+      softened.** First I wrote that this needed a fixture the task had not built, when
       `FakeCaptureSource.setFormat` and `FixtureAudioFormat(sampleRate:channels:)` both already existed
-      — I did not look before writing the reason down. A peer review built it, saw a failure, and then
-      traced that failure to **its own sandbox** rather than to Acta, so the code was right and only my
-      excuse was wrong. The test now exists and passes. It is **skipped by default, visibly**, because
-      the one case costs ~59 s and starves a timing-sensitive pipeline test into failing about half the
-      time: `ACTA_SLOW_TESTS=1 bash Scripts/test.sh`. That cost is a separate finding, in
-      `docs/backlog/slow-non-48k-segment-writing.md`, and it matters — the AirPods measured 24 kHz,
-      which is exactly the format that is slow
+      — I did not look. Then, having built it, I quarantined it behind an opt-in flag on the theory that
+      writing a non-48-kHz source stalls, and told the user their 24 kHz AirPods were implicated. That
+      was a correlation reasoned into a cause: it is `SegmentWriter.finish` exhausting its 30-second
+      wait under unrestricted test parallelism, and ordinary 48 kHz tests time out alongside it.
+      Serializing the suite returns the whole gate to ~4.7 s with the test mandatory. The remaining gap
+      is the **oracle**: it asserts byte growth rather than playable segments and real assembly over the
+      full rate/channel matrix, which is the open item in
+      `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`
 
 ### Task 6: Protocol v2 and the settings fields
 
