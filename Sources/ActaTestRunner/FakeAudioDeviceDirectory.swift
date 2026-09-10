@@ -176,6 +176,12 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
         /// second caller leave while the first had not yet closed the gate, so `cancel()` returned
         /// without its guarantee holding.
         func cancel() { owner?.remove(token) }
+
+        /// ⚠️ **The real `Observation` has this, so the fake must too.** Without it, dropping the last
+        /// reference to a token left the fake happily delivering while production had already stopped
+        /// observing — a fake *weaker* than the thing it stands in for, which is the direction that
+        /// lets an ownership bug pass the suite and fail on the machine.
+        deinit { cancel() }
     }
 }
 

@@ -108,9 +108,17 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     }
 
     deinit {
-        // The only teardown there is. Runs synchronously and reads the state directly: after `deinit`
-        // there is no `self` to schedule anything onto, and a queued job capturing `self` weakly would
-        // find nothing and skip the removal, leaving registered blocks with no cleanup path at all.
+        // The only teardown there is. It reads the state directly, without hopping to the coordinator,
+        // and the argument is **ownership rather than queue affinity** — `deinit` is *not* guaranteed to
+        // run on the coordinator, since a HAL callback's temporary strong reference can be the last
+        // owner and release it on the HAL queue.
+        //
+        // What makes the direct reads sound: coordinator work holds a strong `self` for its duration,
+        // so no deinitialization can begin while any of it is executing; and every queued callback
+        // captures `self` weakly, so once deinitialization has begun none of them can acquire the
+        // object. There is therefore no concurrent reader left to race. Scheduling the removal instead
+        // would be worse, not better: a queued job capturing `self` weakly would find nothing and skip
+        // it, leaving registered blocks with no cleanup path at all.
         if let systemBlocks { Self.removeSystemListeners(systemBlocks, on: halQueue) }
         for (id, listener) in readinessListeners { Self.removeReadiness(listener, from: id, on: halQueue) }
     }

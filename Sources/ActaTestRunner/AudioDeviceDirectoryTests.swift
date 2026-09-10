@@ -309,3 +309,29 @@ func theEligibilityQueryUsesTheScopeThatActuallyAnswers() {
     #expect(devices.contains { $0.canBeSystemDefault != .unknown },
             "every device reported unknown eligibility — the query is being asked in the wrong scope")
 }
+
+@Test
+func droppingTheLastReferenceToATokenCancelsTheSubscription() {
+    // ⚠️ Production's `Observation` cancels in `deinit`, so a consumer that simply stops holding its
+    // token stops observing. A fake without that deinitializer keeps delivering — weaker than the thing
+    // it stands in for, and that direction is the dangerous one: an ownership bug would pass the suite
+    // and only misbehave on the machine.
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()])
+    let recorder = Recorder()
+    do {
+        guard case .observing(let token) = directory.observe({ recorder.append($0) }) else {
+            Issue.record("expected a subscription"); return
+        }
+        // ⚠️ `withExtendedLifetime` rather than a bare binding: the token is not used after this
+        // point, and both the optimizer and a plain `guard case .observing` (which binds nothing) are
+        // free to release it immediately — which cancels, and makes the assertion below fail for the
+        // right reason at the wrong time. The first draft of this test did exactly that.
+        withExtendedLifetime(token) {
+            #expect(directory.subscriberCount == 1)
+        }
+    }
+    #expect(directory.subscriberCount == 0, "dropping the token must cancel, as it does in production")
+
+    directory.emit(.defaultInputChanged)
+    #expect(recorder.changes.isEmpty, "the fake kept delivering to a token nobody holds")
+}
