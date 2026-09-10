@@ -141,6 +141,50 @@ struct MicrophoneSettingsTests {
         #expect(directory.attemptedWrites == ["BuiltInMicrophoneDevice"])
     }
 
+    /// ⚠️ **A settings save is not a Resume.** Enabling used to clear Pause and the conflict budget
+    /// unconditionally, so saving an unrelated archive path silently put Acta back to writing the
+    /// system default — and wiped the suspension latch the reconciler contract requires to survive.
+    @Test("applying settings while paused does not resume enforcement")
+    @MainActor
+    func applyingSettingsDoesNotResume() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic(), .airPods()], defaultInput: "BuiltInMicrophoneDevice"
+        )
+        manager.start()
+        await manager.apply(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                              managesSystemDefaultInput: true))
+        await manager.pauseEnforcement()
+        let writesAtPause = directory.attemptedWrites
+
+        // The default moves, and the user saves something unrelated.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        await manager.apply(RecordingSettings(archivePath: "~/Elsewhere",
+                                              microphonePriority: ["BuiltInMicrophoneDevice"],
+                                              managesSystemDefaultInput: true))
+
+        #expect(await manager.reconciler.isPaused, "a settings save resumed enforcement")
+        #expect(directory.attemptedWrites == writesAtPause, "a settings save wrote the system default")
+    }
+
+    /// ⚠️ **Admission is checked before any side effect.** A queued application landing after shutdown
+    /// used to reach the OS and only then disable — and disabling afterwards does not make that write
+    /// acceptable.
+    @Test("an application landing after shutdown writes nothing")
+    @MainActor
+    func anApplicationAfterShutdownWritesNothing() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic(), .airPods()], defaultInput: "00-00-5E-00-53-01:input"
+        )
+        manager.start()
+        await manager.shutdown()
+
+        await manager.apply(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                              managesSystemDefaultInput: true))
+
+        #expect(directory.attemptedWrites.isEmpty)
+        #expect(await manager.reconciler.isEnabled == false)
+    }
+
     /// ⚠️ **Feature (B) off must not disable Acta's own capture selection**: different promises, and the
     /// plan forbids them sharing a switch.
     @Test("feature (B) off still leaves the capture list applied")

@@ -322,6 +322,57 @@ struct CaptureMicrophoneTests {
         #expect(device == .usbMic())
     }
 
+    /// ⚠️ **The pin means "this is recording", and between a teardown and a successful start nothing
+    /// is.** `performStart` can throw before ever reaching its own clear — a revoked screen permission
+    /// does exactly that — which left a torn-down capture still naming a microphone for the menu to
+    /// show as active.
+    @Test("a restart that fails before starting leaves no microphone claiming to record")
+    @available(macOS 15.0, *)
+    func aFailedRestartClearsThePin() async throws {
+        try await withTemporaryDirectoryAsync { directory in
+            let source = FakeCaptureSource()
+            let permissions = FakePermissions()
+            let recorder = AudioRecorder(directory: directory, segmentSeconds: 60,
+                                         source: source, permissions: permissions,
+                                         microphone: FakeCaptureMicrophoneResolver(
+                                             .pinned(.builtInMic(), alternatives: [])))
+            try await recorder.start()
+            #expect(recorder.pinnedMicrophone == .builtInMic())
+
+            // Revoked between the start and the restart: `performStart` throws before it reaches the
+            // device loop at all.
+            permissions.revokeScreenRecording()
+            await #expect(throws: (any Error).self) { try await recorder.restart() }
+
+            #expect(source.isStreaming == false)
+            #expect(recorder.pinnedMicrophone == nil, "a stopped capture still named a microphone")
+        }
+    }
+
+    /// ⚠️ **A watchdog recovery that lands on a different device must say so.** The plan's requirement
+    /// is that "next recording" is not strictly true — a restart re-resolves, so a priority edit can
+    /// take effect mid-recording — and that this is **reported** rather than silent, or the user cannot
+    /// tell why the audio changed source.
+    @Test("a restart that adopts a different device announces it")
+    @available(macOS 15.0, *)
+    func anAdoptedDeviceIsAnnounced() async throws {
+        try await withTemporaryDirectoryAsync { directory in
+            let (_, resolver, recorder) = self.recorder(.pinned(.builtInMic(), alternatives: []),
+                                                        in: directory)
+            let adopted = ReportedDevices()
+            recorder.onDeviceAdopted = { previous, now in adopted.record(previous, now) }
+            try await recorder.start()
+
+            // The user edits the list mid-recording; the watchdog's restart re-resolves onto it.
+            resolver.set(.pinned(.usbMic(), alternatives: []))
+            try await recorder.restart()
+
+            #expect(adopted.pairs.count == 1)
+            #expect(adopted.pairs.first?.1 == .usbMic())
+            await recorder.stop()
+        }
+    }
+
     // MARK: - One serialized capture lifecycle
 
     /// ⚠️ **Task 5 is what forced the serialization, and this is the test that says why.** Until now
@@ -502,4 +553,15 @@ final class ReportedMessages: @unchecked Sendable {
     private var stored: [ControllerMessage] = []
     func record(_ message: ControllerMessage) { lock.lock(); stored.append(message); lock.unlock() }
     var messages: [ControllerMessage] { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+
+/// A `@Sendable` sink for the device adoptions a recorder announces.
+final class ReportedDevices: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [(AudioInputDevice, AudioInputDevice)] = []
+    func record(_ previous: AudioInputDevice, _ now: AudioInputDevice) {
+        lock.lock(); stored.append((previous, now)); lock.unlock()
+    }
+    var pairs: [(AudioInputDevice, AudioInputDevice)] { lock.lock(); defer { lock.unlock() }; return stored }
 }

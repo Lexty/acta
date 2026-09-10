@@ -62,7 +62,9 @@ public final class RecordingController: ObservableObject {
                                                        reason: "the one you chose did not start"))
             return false
         case .failed:
-            reportMicrophoneChange(.microphoneSwitchFailed(device: uid))
+            // ⚠️ No notice here: the session has already routed a total failure through the fatal path,
+            // and adding "the previous microphone is still recording" on top of a stopped recording is
+            // exactly the lie that path exists to avoid.
             return false
         }
     }

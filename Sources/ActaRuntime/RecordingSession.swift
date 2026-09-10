@@ -50,6 +50,14 @@ public final class RecordingSession: @unchecked Sendable {
     /// Called when the pinned microphone is **proved** to have gone and the capture was re-resolved.
     /// Not called on the main actor.
     public var onMicrophoneChanged: (@Sendable (ControllerMessage) -> Void)?
+
+    /// The watchdog's give-up route, kept so the loss path can reach it too.
+    ///
+    /// ⚠️ **A notice is the wrong channel when nothing is recording.** Reporting a failed failover as
+    /// `microphoneSwitchFailed` — whose text says "The previous microphone is still recording" — while
+    /// the capture is down leaves `phase` at `recording` and tells the user the opposite of the truth.
+    /// Notices are for a failover that *succeeded*; a total failure is the failure policy's.
+    private var fatalStall: (@Sendable (StartupFailure) -> Void)?
     /// Held for exactly the span of a recording: the display going idle takes ScreenCaptureKit's
     /// display away and kills the capture (Task 10). Taken in `start`, released on every exit path —
     /// a failed start, a clean stop, and the watchdog's give-up, which reaches `stop()` too.
@@ -113,6 +121,7 @@ public final class RecordingSession: @unchecked Sendable {
     ///   the recording — a "mute" recording status is unacceptable. Not called on the main actor.
     public func start(startedAt: Date = Date(),
                       onStall: @escaping @Sendable (StartupFailure) -> Void = { _ in }) async throws {
+        fatalStall = onStall
         // Every `throw` below is a start that never became a recording, and the assertion must not
         // outlive it: a recorder that keeps the display awake after it stopped recording is the worst
         // kind of bug — the machine never sleeps and nobody knows why. `confirmed` flips only once
@@ -150,6 +159,12 @@ public final class RecordingSession: @unchecked Sendable {
 
         confirmed = true
         didStart = true
+        // A watchdog recovery that lands on a different microphone is a device change the user must be
+        // able to explain — the plan's "reported, not silent".
+        recorder.onDeviceAdopted = { [weak self] previous, adopted in
+            self?.onMicrophoneChanged?(.microphoneSwitched(device: adopted.name,
+                                                            reason: "\(previous.name) stopped working"))
+        }
         observeDeviceLoss()
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
@@ -207,9 +222,10 @@ public final class RecordingSession: @unchecked Sendable {
                                                          reason: "\(pinned.name) disconnected"))
             }
         } catch {
-            // The failure policy above owns what happens next; this only reports that the configured
-            // alternatives did not come up.
-            onMicrophoneChanged?(.microphoneSwitchFailed(device: pinned.name))
+            // ⚠️ Nothing is recording. Routed through the fatal path immediately, with its reason
+            // preserved, rather than published as a notice that says the old microphone is still going.
+            let failure = (error as? StartupFailure) ?? .streamNotStarted
+            fatalStall?(failure)
         }
     }
 
@@ -229,9 +245,16 @@ public final class RecordingSession: @unchecked Sendable {
             try await recorder.restart()
         } catch {
             log.error("Microphone switch failed: \(error.localizedDescription, privacy: .public)")
+            // ⚠️ Same rule as a lost device: an explicit switch that leaves **nothing** recording is a
+            // recording failure, not a note about a switch.
+            let failure = (error as? StartupFailure) ?? .streamNotStarted
+            fatalStall?(failure)
             return .failed(requested: requested)
         }
-        guard let pinned = recorder.pinnedMicrophone else { return .failed(requested: requested) }
+        guard let pinned = recorder.pinnedMicrophone else {
+            fatalStall?(.streamNotStarted)
+            return .failed(requested: requested)
+        }
         return pinned.uid == requested ? .switched(to: pinned) : .fellBack(to: pinned)
     }
 

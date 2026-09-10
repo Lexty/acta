@@ -150,7 +150,7 @@ public actor MicrophoneReconciler {
     /// Turn enforcement on: subscribe, reset the budget, and reconcile immediately.
     public func enable() async {
         generation &+= 1
-        applyEnabled()
+        applyEnabled(resettingSuspension: true)
         await schedule(.enabled)
     }
 
@@ -167,7 +167,11 @@ public actor MicrophoneReconciler {
         generation &+= 1
         priorityStorage.order = order
         if shouldEnforce {
-            applyEnabled()
+            // ⚠️ **Only a real off → on transition is a fresh start.** Resetting unconditionally made
+            // every settings application a Resume: pause enforcement, save an unrelated archive path,
+            // and Acta silently went back to writing the system default. It also wiped the conflict
+            // latch and its history, which the reconciler contract requires to survive exactly this.
+            applyEnabled(resettingSuspension: !enabled)
             await schedule(.enabled)
         } else {
             applyDisabled()
@@ -175,10 +179,15 @@ public actor MicrophoneReconciler {
         }
     }
 
-    private func applyEnabled() {
+    /// - Parameter resettingSuspension: whether to clear Pause and the conflict budget. True for an
+    ///   explicit enable or resume — the user asking for a fresh start — and for an off → on
+    ///   transition. **False** when enforcement was already on: a settings application is not a Resume.
+    private func applyEnabled(resettingSuspension: Bool) {
         enabled = true
-        paused = false
-        budget.reset()
+        if resettingSuspension {
+            paused = false
+            budget.reset()
+        }
         subscribeIfNeeded()
     }
 

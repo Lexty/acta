@@ -49,8 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ControlAPI.shared.microphone.start()
             // The persisted list and the enable flag, applied once at launch. Without this the settings
             // are stored and inert until someone happens to open the menu and save.
-            let settings = ControlAPI.shared.settings
-            Task { await ControlAPI.shared.microphone.apply(settings) }
+            ControlAPI.shared.microphone.applySettings(ControlAPI.shared.settings)
         }
     }
 

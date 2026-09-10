@@ -169,18 +169,19 @@ public final class AudioRecorder: @unchecked Sendable {
         return pinned
     }
 
-    private func performStart() async throws {
+    private func performStart(restoring restorable: AudioInputDevice? = nil) async throws {
         guard !isStopped else {
             log.error("Refusing to start: this recording has already stopped")
             throw StartupFailure.recordingAlreadyStopped
         }
         try await requestPermissionsIfNeeded()
 
-        // ⚠️ **The previously active device is carried explicitly, not assumed to be on the list.** A
-        // healthy pin can have been removed by the very priority edit that triggered this restart, or
-        // have come from `.systemDefault` and never been on the list at all — and "restore what was
-        // working" cannot mean "hope it is still ranked".
-        let previous = pinnedMicrophone
+        // ⚠️ **The restoration candidate is a parameter, not the live pin.** The pin is cleared the
+        // moment the source goes down — it means "this is recording" — so the device worth going back to
+        // has to be carried separately. It is not assumed to be on the list either: a healthy pin can
+        // have been removed by the very edit that triggered this restart, or have come from
+        // `.systemDefault` and never been ranked at all.
+        let previous = restorable
         let candidates: [AudioInputDevice]
         switch microphone.resolve() {
         case .pinned(let device, let alternatives):
@@ -269,6 +270,11 @@ public final class AudioRecorder: @unchecked Sendable {
         try await serialized { try await self.performRestart() }
     }
 
+    /// Called after a restart changed the device without anyone asking — a watchdog recovery that
+    /// re-resolved onto a different microphone. ⚠️ **Reported, never silent**: the audio changes source
+    /// mid-meeting and a user who cannot tell why has been handed a mystery.
+    public var onDeviceAdopted: (@Sendable (AudioInputDevice, AudioInputDevice) -> Void)?
+
     private func performRestart() async throws {
         // ⚠️ Checked at **admission**, before the source is torn down, so a late switch cannot even
         // interrupt a finished recording — never mind reopen one.
@@ -276,14 +282,23 @@ public final class AudioRecorder: @unchecked Sendable {
             log.error("Refusing to restart: this recording has already stopped")
             throw StartupFailure.recordingAlreadyStopped
         }
+        let before = pinnedMicrophone
         await source.stop()
+        // ⚠️ **Cleared the moment the source is down, not on the way out of a failed start.** The pin
+        // means "this is recording"; between the teardown and a successful start nothing is, and
+        // `performStart` can throw before ever reaching its own clear — a revoked permission does
+        // exactly that, leaving a torn-down capture still naming a microphone.
+        setPinned(nil)
         systemWriter.finishAndAdvance()
         micWriter.finishAndAdvance()
         log.info("Restarting stream")
         // ⚠️ `performStart()`, not `start()`: the serialization is already held. It also re-resolves the
         // microphone, which is why a *Use now* and a priority edit both take effect here and why every
         // device switch is a restart rather than a second lifecycle owner.
-        try await performStart()
+        try await performStart(restoring: before)
+        if let before, let after = pinnedMicrophone, before.uid != after.uid {
+            onDeviceAdopted?(before, after)
+        }
     }
 
     /// Stop the capture and finalize the current segments of both tracks. Safe by the same argument

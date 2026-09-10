@@ -209,9 +209,8 @@ public final class ControlAPI {
     /// separately.
     public func saveSettings() {
         controller.saveSettings()
-        let settings = controller.settings
-        let microphone = microphone
-        Task { await microphone.apply(settings) }
+        // Owned and ordered by the manager rather than an unowned Task here — see `applySettings`.
+        microphone.applySettings(controller.settings)
     }
 
     /// The saved recordings, newest first.

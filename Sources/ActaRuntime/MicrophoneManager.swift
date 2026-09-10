@@ -165,6 +165,12 @@ public final class MicrophoneManager {
         let revision = settingsRevision
         let epoch = lifetimeEpoch
 
+        // ⚠️ **Admission, before any side effect.** Checking only *after* `configure` meant a queued
+        // application could still reach the OS: shut the manager down, let a queued `saveSettings` land,
+        // and it wrote the system default and only then disabled. Disabling afterwards does not make
+        // that write acceptable — the point of shutting down is that nothing further is written.
+        guard started else { return }
+
         // ⚠️ **One coherent operation, not "set the list, then flip the switch".** Applying a
         // configuration in which feature (B) is *off* used to set the order while the reconciler was
         // still enabled — so switching the feature off wrote the Mac's default input on its way out.
@@ -187,9 +193,29 @@ public final class MicrophoneManager {
 
         // Read back, and as one value: the reconciler owns the priority (it expires a stale override),
         // and a per-field write is how the list and the choice come from different revisions.
-        capturePreference.set(.init(priority: await reconciler.priority,
-                                    choice: settings.captureMicrophoneChoice))
+        //
+        // ⚠️ **This read is a second suspension**, and the check above does not cover it: a newer
+        // application can settle while it is in flight, and this one would then publish its older
+        // `choice` on top. Rechecked below, after the value is in hand and before anything is published.
+        let priority = await reconciler.priority
+        guard revision == settingsRevision, epoch == lifetimeEpoch, started else { return }
+        capturePreference.set(.init(priority: priority, choice: settings.captureMicrophoneChoice))
     }
+
+    /// Apply settings as **owned, ordered work**.
+    ///
+    /// ⚠️ **The callers used to fire unowned `Task`s**, so nothing sequenced two saves against each
+    /// other and nothing could wait for one at shutdown. Chaining them here gives both: applications run
+    /// in the order they were requested, and `shutdown()` can join the last one instead of racing it.
+    public func applySettings(_ settings: RecordingSettings) {
+        let previous = applyTask
+        applyTask = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.apply(settings)
+        }
+    }
+
+    private var applyTask: Task<Void, Never>?
 
     /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every
     /// continuation can tell whether it is still the current intent.
@@ -288,6 +314,8 @@ public final class MicrophoneManager {
     /// monitoring is still wanted while a recording finishes: what must stop first is the half that
     /// changes state other applications depend on.
     public func stopEnforcement() async {
+        // ⚠️ Invalidates any application still in flight: after this, none of them may enable anything.
+        settingsRevision &+= 1
         await reconciler.disable()
     }
 
@@ -314,6 +342,10 @@ public final class MicrophoneManager {
         // Fence first: everything below may be racing a value already in flight.
         lifetimeEpoch &+= 1
         started = false
+        // Join the owned application work before stopping, so a queued save cannot run afterwards.
+        let pending = applyTask
+        applyTask = nil
+        await pending?.value
         await stopEnforcement()
         // ⚠️ **Not redundant with `verify()`'s per-iteration guard — they stop different things.** The
         // guard prevents the next property *read* when verification resumes; this waits for the owned
