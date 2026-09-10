@@ -353,20 +353,37 @@ public actor MicrophoneReconciler {
         if case .failed(let reason) = read { publish(.degraded(reason: reason)); return }
         let snapshotComplete = uninspectable.isEmpty
 
-        expireOverride(devices: devices, snapshotComplete: snapshotComplete)
+        let removals = observedRemovals
+        observedRemovals.removeAll()
+        expireOverride(devices: devices, snapshotComplete: snapshotComplete, removals: removals)
+        retireHoldOnProvedDeparture(devices: devices, snapshotComplete: snapshotComplete, removals: removals)
 
-        // ⚠️ **The forbidden failover.** If the device Acta is currently holding could not be described
-        // by this snapshot, choosing a different one and writing it switches the user's microphone on
-        // the strength of an absence nobody proved. Retaining the stored preference while doing that is
-        // not restraint — the write is the destructive part.
-        if !snapshotComplete, let held = heldSelection(),
-           MicrophonePolicy.presence(of: held, in: devices, snapshotComplete: snapshotComplete) == .unknown {
+        if let held = uncertainHold(devices: devices, snapshotComplete: snapshotComplete) {
             publish(.uncertain(uid: held), preferred: held)
             return
         }
 
         let generationAtStart = generation
-        switch await reconcile(devices: devices, generationAtStart: generationAtStart) {
+        let (outcome, unsuccessful) = await reconcile(devices: devices, generationAtStart: generationAtStart)
+
+        // ⚠️ **The charge is on the attempt, not on how the pass happened to end**, and that is the
+        // whole correction here. Charging only a pass that returned `.refused` left two ways out. A
+        // preferred device whose write never converges, with a working fallback below it, ends the pass
+        // `.settled` on the fallback — and the competitor's notification starts the next pass, forever.
+        // A verification *read* that fails ends it `.degraded` — an observation error, correctly, but
+        // one that must not erase the fact that the write was unsuccessful. Neither may bypass the
+        // bound. `.abandoned` is the one exception: the user paused, disabled or edited, and their own
+        // action must not be charged against them.
+        var charged = false
+        if unsuccessful, case .abandoned = outcome {} else if unsuccessful {
+            charged = budget.record(.convergenceFailure, at: clock.now)
+        }
+        if charged, let cause = budget.suspension {
+            publish(.suspended(cause), preferred: published.preferred)
+            return
+        }
+
+        switch outcome {
         case .settled(let uid):
             publish(.enforcing(uid: uid), preferred: uid)
         case .waiting:
@@ -381,15 +398,61 @@ public actor MicrophoneReconciler {
         case .suspended(let cause):
             publish(.suspended(cause), preferred: published.preferred)
         case .refused(let uids):
-            // ⚠️ **Charged once per pass, not once per candidate.** The pass spent writes and the
-            // default is still somewhere else — that is the fact, and it is the only bound that survives
-            // a competitor Acta's verification read can never catch in the act.
-            if budget.record(.convergenceFailure, at: clock.now), let cause = budget.suspension {
-                publish(.suspended(cause), preferred: uids.first)
-            } else {
-                publish(.writesRefused(uids: uids), preferred: uids.first)
-            }
+            publish(.writesRefused(uids: uids), preferred: uids.first)
         }
+    }
+
+    /// The device whose absence this snapshot could not rule out, when holding it is the right call.
+    ///
+    /// ⚠️ **Membership in the list is not the comparison that matters** — preference *order* is. A held
+    /// device that is merely unaccounted for must be held against a **lower-priority** fallback, because
+    /// switching to that fallback would be acting on an absence nobody proved. It must **not** be held
+    /// against a device the user ranks *above* it: selecting that one requires no inference about the
+    /// held device at all, and feature (B) promises a priority edit reconciles immediately. The case
+    /// this closes: confirm the USB microphone, have it go unreadable, then reorder the list to put the
+    /// built-in first — and watch nothing happen.
+    private func uncertainHold(devices: [AudioInputDevice], snapshotComplete: Bool) -> String? {
+        guard !snapshotComplete, let held = heldSelection() else { return nil }
+        guard MicrophonePolicy.presence(of: held, in: devices, snapshotComplete: snapshotComplete) == .unknown
+        else { return nil }
+        guard let heldRank = preferenceRank(of: held) else { return nil }
+        if case .selected(let candidate) = MicrophonePolicy.select(from: devices,
+                                                                   priority: priorityStorage,
+                                                                   purpose: .systemDefault),
+           let candidateRank = preferenceRank(of: candidate.uid),
+           candidateRank < heldRank {
+            // The user prefers what this snapshot *can* offer. No inference about the held device is
+            // needed to choose it.
+            return nil
+        }
+        return held
+    }
+
+    /// Where a uid sits in the user's preferences: the override outranks the whole list, and a uid the
+    /// list does not name has no rank at all.
+    private func preferenceRank(of uid: String) -> Int? {
+        if priorityStorage.override == uid { return -1 }
+        return priorityStorage.order.firstIndex(of: uid)
+    }
+
+    /// A **proved** departure retires the held selection, even when nothing can replace it in this pass.
+    ///
+    /// ⚠️ Without this, one complete snapshot that showed the device gone is forgotten the moment a
+    /// later *incomplete* snapshot arrives: `confirmedSelection` still names the departed device, so the
+    /// uncertainty hold resurrects it and Acta protects a microphone it has already watched leave. The
+    /// *preferences* are untouched — this retires the evidence, not the user's choice.
+    private func retireHoldOnProvedDeparture(devices: [AudioInputDevice],
+                                             snapshotComplete: Bool,
+                                             removals: [(seq: UInt64, uid: String)]) {
+        guard let confirmed = confirmedSelection else { return }
+        let departed = removals.contains { $0.uid == confirmed }
+            || MicrophonePolicy.presence(of: confirmed,
+                                         in: devices,
+                                         snapshotComplete: snapshotComplete) == .absent
+        guard departed else { return }
+        confirmedSelection = nil
+        // A device that is gone cannot be reversed off the default, either.
+        enforcedAndUnchallenged = nil
     }
 
     private enum PassOutcome {
@@ -404,7 +467,9 @@ public actor MicrophoneReconciler {
         case suspended(SuspensionCause)
     }
 
-    private func reconcile(devices: [AudioInputDevice], generationAtStart: UInt64) async -> PassOutcome {
+    private func reconcile(devices: [AudioInputDevice],
+                           generationAtStart: UInt64) async -> (PassOutcome, unsuccessful: Bool) {
+        var unsuccessful = false
         // ⚠️ Refusals are per **pass**, never persisted. A device the OS rejected once must be tried
         // again the next time something changes: the rejection may have been about the state the machine
         // was in, and a permanent blacklist would quietly retire a working microphone forever. The
@@ -418,25 +483,40 @@ public actor MicrophoneReconciler {
                                            purpose: .systemDefault,
                                            refused: refused) {
             case .noEligibleDevice:
-                return .noEligibleDevice
+                return (.noEligibleDevice, unsuccessful)
             case .noPreferredDeviceAvailable:
-                return .waiting
+                return (.waiting, unsuccessful)
             case .allPreferredCandidatesRefused(let uids):
-                return .refused(uids)
+                return (.refused(uids), unsuccessful)
             case .selected(let device):
                 switch await enforce(device.uid, generationAtStart: generationAtStart) {
-                case .settled: return .settled(uid: device.uid)
-                case .abandoned: return .abandoned
-                case .suspended(let cause): return .suspended(cause)
-                case .degraded(let reason): return .degraded(reason)
-                case .tryNext: refused.insert(device.uid)
+                case .settled:
+                    return (.settled(uid: device.uid), unsuccessful)
+                case .abandoned:
+                    return (.abandoned, unsuccessful)
+                case .suspended(let cause):
+                    return (.suspended(cause), unsuccessful)
+                case .degraded(let reason, let afterWrite):
+                    // A read that failed *before* any write is an observation error and nothing more.
+                    return (.degraded(reason), unsuccessful || afterWrite)
+                case .tryNext:
+                    unsuccessful = true
+                    refused.insert(device.uid)
                 }
             }
         }
-        return .refused(Array(refused))
+        return (.refused(Array(refused)), unsuccessful)
     }
 
-    private enum Attempt { case settled, tryNext, abandoned, degraded(String), suspended(SuspensionCause) }
+    private enum Attempt {
+        case settled
+        case tryNext
+        case abandoned
+        case suspended(SuspensionCause)
+        /// ⚠️ `afterWrite` is what keeps a failed *verification* read from laundering an unsuccessful
+        /// write into a pure observation error. It is both: report the read failure, charge the write.
+        case degraded(String, afterWrite: Bool)
+    }
 
     /// Re-read, write only on a mismatch, verify, and decide what the outcome means.
     private func enforce(_ uid: String, generationAtStart: UInt64) async -> Attempt {
@@ -445,7 +525,7 @@ public actor MicrophoneReconciler {
         record(current)
         switch current {
         case .failed(let reason):
-            return .degraded(reason)
+            return .degraded(reason, afterWrite: false)
         case .device(let actual) where actual == uid:
             // Already there — including when this pass was triggered by the notification from Acta's own
             // successful write. That is what keeps a write from being the first step of a loop.
@@ -482,7 +562,7 @@ public actor MicrophoneReconciler {
             settle(uid)
             return .settled
         case .readFailed(let reason):
-            return .degraded(reason)
+            return .degraded(reason, afterWrite: true)
         case .diverged:
             // Not charged here: the charge is one per pass, in `runPass`. Falling through to the next
             // candidate is what lets a known-good device below an uncertain one still be reached.
@@ -561,9 +641,9 @@ public actor MicrophoneReconciler {
 
     /// The override expires on its device's **disconnect** — never on a timer, and never by being
     /// promoted into the persistent list.
-    private func expireOverride(devices: [AudioInputDevice], snapshotComplete: Bool) {
-        let removals = observedRemovals
-        observedRemovals.removeAll()
+    private func expireOverride(devices: [AudioInputDevice],
+                                snapshotComplete: Bool,
+                                removals: [(seq: UInt64, uid: String)]) {
         guard let override = priorityStorage.override else { return }
 
         // A departure seen *after* the user chose this device. Removals from before their click describe

@@ -32,6 +32,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     private var writesTakeEffect = true
     /// When set, `observe` reports this instead of subscribing — the third outcome that otherwise hides.
     private var observationFailure: String?
+    private var defaultReadHook: (@Sendable (Int) -> Void)?
 
     private var subscribers: [UInt64: Gate] = [:]
     private var nextToken: UInt64 = 1
@@ -120,6 +121,18 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
         lock.lock(); writeOutcomes = outcomes; writeFallback = fallback; lock.unlock()
     }
 
+    /// Run `body` inside `currentDefaultInput()`, with the read's 1-based ordinal.
+    ///
+    /// ⚠️ **This is the only place a test can hold a consumer's actor still.** `TestClock.onSleep` looks
+    /// like it does and does not: `sleep` is `nonisolated` and the `await` before it has already
+    /// released the actor, so another actor turn can and does interleave inside that handler — a peer
+    /// review demonstrated it. A directory call is different: the consumer invokes it **synchronously
+    /// from inside its own isolation**, so nothing else on that actor can run until it returns. A test
+    /// that needs "both notifications were delivered before the actor could look" must use this.
+    func onDefaultRead(_ body: @escaping @Sendable (Int) -> Void) {
+        lock.lock(); defaultReadHook = body; lock.unlock()
+    }
+
     func failObservation(reason: String) {
         lock.lock(); observationFailure = reason; lock.unlock()
     }
@@ -159,10 +172,17 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     }
 
     func currentDefaultInput() -> DefaultInputRead {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         defaultReadCountStorage += 1
-        if !readOutcomes.isEmpty { return readOutcomes.removeFirst() }
-        return defaultRead
+        let ordinal = defaultReadCountStorage
+        let result = readOutcomes.isEmpty ? defaultRead : readOutcomes.removeFirst()
+        let hook = defaultReadHook
+        // ⚠️ **Released before the hook runs.** The hook typically emits, and a delivery re-enters this
+        // fake through `enumerateInputDevices()`; calling it under the lock would deadlock the test
+        // rather than fail it.
+        lock.unlock()
+        hook?(ordinal)
+        return result
     }
 
     func setDefaultInput(uid: String) -> DefaultInputWrite {

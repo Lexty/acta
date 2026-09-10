@@ -94,17 +94,20 @@ struct MicrophoneReconcilerHardCaseTests {
     ///
     /// The actor is held busy by a write that never converges, so both deliveries land before it can
     /// process either.
+    /// ⚠️ **The barrier is a directory call, not a clock sleep** — a peer review demonstrated that
+    /// `TestClock.onSleep` does not hold the actor at all (`sleep` is `nonisolated`, and the `await`
+    /// before it has already yielded), so an `onSleep` handler proves nothing about ordering and a
+    /// negative control run inside one is a sample rather than a proof. `currentDefaultInput()` is
+    /// invoked **synchronously from the reconciler's own isolation**: while it runs, no other turn on
+    /// that actor can. Both deliveries therefore provably land before the actor can look at anything.
     @Test("a departure delivered while the actor was busy still expires the override")
     func aDepartureDeliveredDuringABusyActorIsNotLost() async {
-        let (directory, clock, reconciler) = harness(devices: [.builtInMic(), .airPods()],
-                                                     defaultInput: "BuiltInMicrophoneDevice",
-                                                     order: ["BuiltInMicrophoneDevice"],
-                                                     override: "00-00-5E-00-53-01:input")
-        directory.setWritesTakeEffect(false)
+        let (directory, _, reconciler) = harness(devices: [.builtInMic(), .airPods()],
+                                                 defaultInput: "BuiltInMicrophoneDevice",
+                                                 order: ["BuiltInMicrophoneDevice"],
+                                                 override: "00-00-5E-00-53-01:input")
         let steps = Steps()
-        clock.onSleep { _ in
-            // Both deliveries happen inside one sleep, so no actor turn separates them: the departure
-            // exists only in the notification that reported it.
+        directory.onDefaultRead { _ in
             guard steps.next() == 1 else { return }
             directory.setDevices([.builtInMic()])
             directory.emit(.deviceListChanged)
@@ -115,6 +118,117 @@ struct MicrophoneReconcilerHardCaseTests {
         await reconciler.waitForQuiescence()
 
         #expect(await reconciler.priority.override == nil)
+    }
+
+    // MARK: - 1c. The escape routes out of the cross-pass bound
+
+    /// ⚠️ **A working fallback is not a reason to stop counting.** The preferred device's write never
+    /// converges, the fallback below it is already the default, so the pass ends `.settled` — and the
+    /// competitor's notification starts the next one. Charging only a pass that ended `.refused` leaves
+    /// this running forever; a seeded priority list normally *has* a fallback, so this is the ordinary
+    /// shape, not a corner.
+    @Test("a converging fallback does not launder an unsuccessful preferred write")
+    func aSettledFallbackStillChargesTheFailedAttempt() async {
+        let fighting = FightingAudioDeviceDirectory(
+            devices: [.usbMic(), .builtInMic()],
+            restoringTo: "BuiltInMicrophoneDevice",
+            reversalCap: 12
+        )
+        let clock = TestClock()
+        let reconciler = MicrophoneReconciler(
+            directory: fighting,
+            clock: clock,
+            priority: MicrophonePriority(order: ["USBAudioDevice_UID", "BuiltInMicrophoneDevice"])
+        )
+        await reconciler.enable()
+        await reconciler.waitForQuiescence()
+
+        #expect(fighting.reversalCapReached == false)
+        #expect(await reconciler.state.status ==
+            .suspended(.repeatedConvergenceFailures(MicrophoneEnforcementTuning.conflictsBeforeSuspension)))
+    }
+
+    /// ⚠️ **A failed verification read is an observation error *and* an unsuccessful write.** Reporting
+    /// the first must not erase the second, or `.degraded` becomes the second way out of the bound.
+    @Test("a failed verification read does not bypass the bound")
+    func aFailedVerificationReadStillChargesTheWrite() async {
+        let (directory, _, reconciler) = harness(devices: [.builtInMic(), .airPods()],
+                                                 defaultInput: "BuiltInMicrophoneDevice",
+                                                 order: ["BuiltInMicrophoneDevice"])
+        await reconciler.enable()
+        // Enforcing before the first failure, so the assertion at the end is about what the loop did.
+        #expect(await reconciler.state.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
+        directory.setWritesTakeEffect(false)
+
+        for _ in 0 ..< MicrophoneEnforcementTuning.conflictsBeforeSuspension {
+            // The pass's observing read succeeds, the pre-write read succeeds, the verification read
+            // fails — so every pass reports a read error while its write went nowhere.
+            directory.scriptDefaultReads([.device(uid: "00-00-5E-00-53-01:input"),
+                                          .device(uid: "00-00-5E-00-53-01:input"),
+                                          .failed(reason: "read refused")])
+            directory.emit(.defaultInputChanged)
+            await reconciler.waitForQuiescence()
+        }
+
+        #expect(await reconciler.state.status ==
+            .suspended(.repeatedConvergenceFailures(MicrophoneEnforcementTuning.conflictsBeforeSuspension)))
+    }
+
+    // MARK: - 2b. The hold must respect priority order, not membership
+
+    /// ⚠️ **Membership in the list is not the comparison.** The USB microphone is unaccounted for, but
+    /// the user has just moved the built-in above it — and selecting the built-in requires no inference
+    /// about the USB device at all. Holding here means a priority edit visibly does nothing, which is
+    /// the one thing feature (B) promises will always take effect immediately.
+    @Test("an explicit reorder is honoured over an uncertain lower-priority hold")
+    func aReorderIsHonouredOverAnUncertainHold() async {
+        let (directory, _, reconciler) = harness(devices: [.usbMic(), .builtInMic()],
+                                                 defaultInput: "USBAudioDevice_UID",
+                                                 order: ["USBAudioDevice_UID", "BuiltInMicrophoneDevice"])
+        await reconciler.enable()
+        #expect(await reconciler.state.status == .enforcing(uid: "USBAudioDevice_UID"))
+
+        directory.setDevices([.builtInMic()], uninspectable: ["USBAudioDevice_UID"])
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+        // Still held while the user's order is unchanged — that half stays right.
+        #expect(await reconciler.state.status == .uncertain(uid: "USBAudioDevice_UID"))
+
+        await reconciler.setOrder(["BuiltInMicrophoneDevice", "USBAudioDevice_UID"])
+
+        #expect(directory.attemptedWrites == ["BuiltInMicrophoneDevice"])
+        #expect(await reconciler.state.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
+    }
+
+    // MARK: - 3b. A proved departure retires the hold, even with nothing to replace it
+
+    /// ⚠️ **One complete snapshot showing the device gone must not be forgotten by the next incomplete
+    /// one.** Between them there is a moment where nothing can settle — and if the departure is only
+    /// ever retired *by* a settlement, that moment preserves the stale hold and a later partial snapshot
+    /// resurrects it. Acta then protects a microphone it has already watched leave.
+    @Test("a proved departure retires the hold even when nothing can replace it")
+    func aProvedDepartureRetiresTheHoldWithNoReplacement() async {
+        let (directory, _, reconciler) = harness(devices: [.usbMic(), .builtInMic()],
+                                                 defaultInput: "USBAudioDevice_UID",
+                                                 order: ["USBAudioDevice_UID", "BuiltInMicrophoneDevice"])
+        await reconciler.enable()
+        #expect(await reconciler.state.status == .enforcing(uid: "USBAudioDevice_UID"))
+
+        // Everything goes away: the departure is proved, and nothing can be selected in its place.
+        directory.setDevices([])
+        directory.setDefaultInput(DefaultInputRead.none)
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+        #expect(await reconciler.state.status == .noEligibleDevice)
+
+        // A later, incomplete snapshot — with an unrelated driver unreadable — must not revive the hold.
+        directory.setDevices([.builtInMic(), .airPods()], uninspectable: ["BlackHole2ch_UID"])
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.emit(.deviceListChanged)
+        await reconciler.waitForQuiescence()
+
+        #expect(directory.attemptedWrites.last == "BuiltInMicrophoneDevice")
+        #expect(await reconciler.state.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
     }
 
     /// The other side of the sequence number: a departure observed **before** the user clicked *Use

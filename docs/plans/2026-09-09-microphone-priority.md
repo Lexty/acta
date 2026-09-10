@@ -229,9 +229,16 @@ be one that cannot loop.
       verification read means Acta's write never visibly wins, so no reversal is ever provable, while
       each write provokes the notification that starts the next pass. A peer review reproduced nine
       writes and no suspension. A **second** setback kind was therefore added —
-      `EnforcementSetback.convergenceFailure`, charged once per pass that issued writes and ended with
-      the default elsewhere — against the same threshold and window, and the status names which of the
-      two suspended it, because sampling can prove a reversal and cannot prove intent. The reversal is
+      `EnforcementSetback.convergenceFailure`, charged once per pass in which **any** write failed to
+      verify — against the same threshold and window, and the status names which of the two suspended
+      it, because sampling can prove a reversal and cannot prove intent. ⚠️ **"Any write that failed to
+      verify", not "the pass ended in refusal"**: a second review found two escapes from the narrower
+      rule. A preferred device whose write never converges, with a working fallback below it, ends the
+      pass *settled* on the fallback; and a failed verification *read* ends it *degraded*. Both are
+      correct presentations and neither may erase the fact that the write was unsuccessful — a seeded
+      list normally has a fallback, so the first is the ordinary shape rather than a corner. A stale
+      completion (Pause, disable, a preference edit) is the one attempt that is **not** charged: the
+      user's own action must not count against them. The reversal is
       also consumed when charged: one displacement is one setback, however many passes can still see
       its aftermath
 - [x] ⚠️ **Bounded verification must tell delayed convergence from repeated conflict.** A successful

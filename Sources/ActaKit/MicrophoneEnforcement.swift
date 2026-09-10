@@ -9,7 +9,9 @@ import Foundation
 /// A menu that renders them identically tells the user their microphone vanished every time a query
 /// failed — the same class of error as `DeviceEnumeration.failed` versus an empty list.
 public enum ObservedDefaultInput: Equatable, Sendable {
-    /// Never successfully read. The starting state, and the honest answer after a failed read.
+    /// Never successfully read: the starting state, and what a failed read leaves behind **only when no
+    /// read has ever succeeded**. ⚠️ A failed read after a successful one keeps the last device actually
+    /// seen — the newer fact is "I could not look again", not "everything I knew is void".
     case unread
     /// The OS answered, and there is no default input device.
     case noDefault
@@ -31,7 +33,10 @@ public enum ObservedDefaultInput: Equatable, Sendable {
 public enum SuspensionCause: Equatable, Sendable {
     /// Acta's verified selection was displaced this many times inside the window.
     case repeatedReversals(Int)
-    /// This many reconciliation passes in a row issued writes and ended with the default somewhere else.
+    /// This many reconciliation passes **within the counting window** issued a write that did not end
+    /// with the default on it. ⚠️ Not "in a row": the history is deliberately retained across a
+    /// successful settlement, because a reset on settlement is exactly what a fast competitor could
+    /// drive by letting one write through.
     case repeatedConvergenceFailures(Int)
 }
 
