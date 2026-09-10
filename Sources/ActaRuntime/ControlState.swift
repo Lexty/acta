@@ -116,6 +116,8 @@ public struct Notice: Equatable, Sendable {
         /// An explicit *Use now* did not come up; the previous microphone is still recording. Also a
         /// notice: the switch failed, the recording did not.
         case microphoneSwitchFailed
+        /// The recording could not watch its own audio devices, or only some of them.
+        case microphoneObservationDegraded
     }
 
     public var category: Category

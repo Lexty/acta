@@ -186,6 +186,7 @@ func everyProductionMessageIsClassified(_ message: ControllerMessage) {
         case .archiveOpenFailed: return [.archiveOpenFailed]
         case .microphoneSwitched: return [.microphoneSwitched]
         case .microphoneSwitchFailed: return [.microphoneSwitchFailed]
+        case .microphoneObservationDegraded: return [.microphoneObservationDegraded]
         default: return []
         }
     }()

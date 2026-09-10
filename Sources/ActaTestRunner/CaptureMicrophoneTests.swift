@@ -547,6 +547,76 @@ struct RecordingMicrophoneLossTests {
     }
 }
 
+    /// ⚠️ **Unusable is not only absent.** A device can stay listed and stop being alive, or lose its
+    /// input channels — an observer that only asks "is it in the list" never learns, and the recording
+    /// keeps a microphone that produces nothing.
+    @Test("a pinned device that stays listed but stops being usable fails over")
+    @available(macOS 15.0, *)
+    func aListedButUnusableDeviceFailsOver() async throws {
+        try await withLossHarness { devices, source, resolver, session, reported in
+            resolver.set(.pinned(.builtInMic(), alternatives: []))
+            // Still listed, and no longer alive.
+            devices.setDevices([.airPods(alive: .no), .builtInMic()])
+            devices.emit(.readinessChanged(uid: "00-00-5E-00-53-01:input"))
+
+            let switched = await awaitCondition { reported.messages.isEmpty == false }
+            #expect(switched, "a listed-but-unusable device was ignored")
+            #expect(source.startedMicrophoneIDs.last == "BuiltInMicrophoneDevice")
+            _ = session
+        }
+    }
+
+    /// ⚠️ **A recording that cannot watch its devices looks exactly like one whose microphone never
+    /// goes away.** A swallowed registration failure is the single fault that announces itself in no
+    /// other way.
+    @Test("a failed device subscription is reported rather than swallowed")
+    @available(macOS 15.0, *)
+    func aFailedDeviceSubscriptionIsReported() async throws {
+        try await withLossHarness(failObservation: "registration refused") { _, _, _, session, reported in
+            #expect(reported.messages.contains { if case .microphoneObservationDegraded = $0 { return true }
+                                                 else { return false } },
+                    "the recording never said it was not watching")
+            _ = session
+        }
+    }
+
+    /// ⚠️ **What this proves, and what it does not.** It proves a recording stopped with a loss handler
+    /// in flight ends cleanly and reports nothing afterwards. It does **not** isolate
+    /// `lossWatch.stop()`'s join: three different oracles were tried and the negative control passed all
+    /// three, because `AudioRecorder`'s serialized lifecycle already makes `stop()` wait behind the
+    /// in-flight restart, and its terminal gate plus the cleared pin already prevent a later
+    /// observation from doing anything. The join is kept as the ownership guarantee it is, and is
+    /// recorded here as undistinguished by the suite rather than implied to be covered.
+    @Test("stopping with a loss handler in flight ends cleanly")
+    @available(macOS 15.0, *)
+    func stoppingJoinsTheLossHandler() async throws {
+        try await withLossHarness { devices, source, resolver, session, reported in
+            resolver.set(.pinned(.builtInMic(), alternatives: []))
+            // Hold the replacement capture so the loss handler is genuinely in flight when stop runs.
+            source.holdNextStart()
+            devices.setDevices([.builtInMic()])
+            devices.emit(.deviceListChanged)
+            _ = await awaitCondition { source.startedMicrophoneIDs.count >= 2 }
+
+            let stopping = Task { await session.stop() }
+            await MainActor.run { holdMainActor(milliseconds: 20) }
+            source.releaseHeldStart()
+            _ = await stopping.value
+
+            // ⚠️ **The oracle is that nothing is *reported* afterwards, not that nothing restarts.**
+            // The recorder's terminal gate already refuses a late restart, so a start count cannot tell
+            // a joined handler from an unjoined one — my first version of this test asserted exactly
+            // that and its negative control passed. What only the join gives is that no notice and no
+            // fatal failure reaches a recording that has already finished.
+            let messagesAtStop = reported.messages.count
+            await MainActor.run { holdMainActor() }
+            for _ in 0 ..< 30 { await Task.yield() }
+            #expect(reported.messages.count == messagesAtStop,
+                    "a message arrived after the recording had stopped")
+            #expect(source.isStreaming == false)
+        }
+    }
+
 /// A `@Sendable` sink for the messages a session reports.
 final class ReportedMessages: @unchecked Sendable {
     private let lock = NSLock()
@@ -564,4 +634,40 @@ final class ReportedDevices: @unchecked Sendable {
         lock.lock(); stored.append((previous, now)); lock.unlock()
     }
     var pairs: [(AudioInputDevice, AudioInputDevice)] { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+
+/// The shared shape of a loss test: a scripted directory, a fake capture source, a session, and a sink.
+@available(macOS 15.0, *)
+private func withLossHarness(
+    failObservation: String? = nil,
+    _ body: (FakeAudioDeviceDirectory, FakeCaptureSource, FakeCaptureMicrophoneResolver,
+             RecordingSession, ReportedMessages) async throws -> Void
+) async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("acta-loss-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let devices = FakeAudioDeviceDirectory(devices: [.airPods(), .builtInMic()], defaultInput: nil)
+    if let failObservation { devices.failObservation(reason: failObservation) }
+    let source = FakeCaptureSource()
+    let clock = TestClock()
+    clock.onSleep { _ in source.emitBatch() }
+    let resolver = FakeCaptureMicrophoneResolver(.pinned(.airPods(), alternatives: [.builtInMic()]))
+    let activity = CountingWakeLock()
+    let session = RecordingSession(directory: directory,
+                                   settings: .default,
+                                   wakeLock: activity.makeWakeLock(),
+                                   microphone: resolver,
+                                   deviceReader: devices,
+                                   dependencies: makeDependencies(source: source,
+                                                                  permissions: FakePermissions(),
+                                                                  clock: clock))
+    let reported = ReportedMessages()
+    session.onMicrophoneChanged = { reported.record($0) }
+    try await session.start()
+    try await body(devices, source, resolver, session, reported)
+    clock.freeze()
+    _ = await session.stop()
 }

@@ -65,6 +65,9 @@ extension ControlState {
         if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneSwitched) {
             return (nil, Notice(category: .microphoneSwitched, displayMessage: errorMessage))
         }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneObservationDegraded) {
+            return (nil, Notice(category: .microphoneObservationDegraded, displayMessage: errorMessage))
+        }
         if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneSwitchFailed) {
             return (nil, Notice(category: .microphoneSwitchFailed, displayMessage: errorMessage))
         }

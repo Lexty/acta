@@ -30,6 +30,8 @@ public enum WireMessageCode {
     /// code falls through its default rather than failing to decode the response. Adding a **case** to
     /// a response-direction enum would be a version bump; adding a code is not.
     public static let startupMicrophoneUnavailable = "startup_microphone_unavailable"
+    /// The recording could not watch its own audio devices, or only some of them.
+    public static let microphoneObservationDegraded = "microphone_observation_degraded"
     /// A start or restart was asked for after the recording had already stopped.
     public static let startupRecordingAlreadyStopped = "startup_recording_already_stopped"
     /// A list is configured and none of its devices is present.

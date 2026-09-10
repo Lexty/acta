@@ -147,6 +147,8 @@ extension WireControlState.Message {
             self.init(code: WireMessageCode.microphoneSwitched, message: notice.displayMessage)
         case .microphoneSwitchFailed:
             self.init(code: WireMessageCode.microphoneSwitchFailed, message: notice.displayMessage)
+        case .microphoneObservationDegraded:
+            self.init(code: WireMessageCode.microphoneObservationDegraded, message: notice.displayMessage)
         }
     }
 

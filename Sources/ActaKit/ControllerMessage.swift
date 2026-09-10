@@ -37,6 +37,12 @@ public enum ControllerMessage: Equatable, Sendable {
     /// ⚠️ The requested device must **never** have been shown as active in between: the switch is
     /// reported when capture succeeds, not when it is asked for.
     case microphoneSwitchFailed(device: String)
+    /// The recording could not watch its own audio devices, or could only watch some of them.
+    ///
+    /// ⚠️ **Said out loud, because a recording watching nothing looks exactly like a recording whose
+    /// microphone never goes away.** A swallowed registration failure is the one fault that announces
+    /// itself in no other way.
+    case microphoneObservationDegraded(reason: String)
 
     /// The stable leading text — the **only** part a reverse lookup can match on, since the tails of
     /// `.archiveOpenFailed` and `.startFailed` interpolate an `error.localizedDescription` no lookup
@@ -48,6 +54,7 @@ public enum ControllerMessage: Equatable, Sendable {
         public static let ffmpegMissing = "Recording stopped, but there is nothing to build the final file with:"
         public static let assemblyFailed = "Recording stopped, but the assembly failed."
         public static let microphoneSwitched = "Now recording from "
+        public static let microphoneObservationDegraded = "Not watching for microphone changes: "
         public static let microphoneSwitchFailed = "Could not switch the microphone to "
     }
 
@@ -60,6 +67,7 @@ public enum ControllerMessage: Equatable, Sendable {
         case .assemblyFailed: return Prefix.assemblyFailed
         case .microphoneSwitched: return Prefix.microphoneSwitched
         case .microphoneSwitchFailed: return Prefix.microphoneSwitchFailed
+        case .microphoneObservationDegraded: return Prefix.microphoneObservationDegraded
         }
     }
 
@@ -75,6 +83,8 @@ public enum ControllerMessage: Equatable, Sendable {
             return "\(device) (\(reason))."
         case .microphoneSwitchFailed(let device):
             return "\(device). The previous microphone is still recording."
+        case .microphoneObservationDegraded(let reason):
+            return reason
         case .assemblyFailed:
             // Not "will assemble on the next launch": `RecoveryManager` bounds its attempts, and these causes are
             // the ones it treats as non-transient — promising a fix we may never deliver is the same over-claim.
@@ -99,6 +109,7 @@ public enum ControllerMessage: Equatable, Sendable {
         .ffmpegMissing,
         .assemblyFailed,
         .microphoneSwitched(device: "device", reason: "reason"),
-        .microphoneSwitchFailed(device: "device")
+        .microphoneSwitchFailed(device: "device"),
+        .microphoneObservationDegraded(reason: "reason")
     ]
 }

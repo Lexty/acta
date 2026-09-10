@@ -210,7 +210,36 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     }
     private func leaveLifecycle() { lock.lock(); inFlight -= 1; lock.unlock() }
 
+    /// Hold the **next** `start` until released.
+    ///
+    /// ⚠️ The only way to have a capture lifecycle genuinely in flight while something else runs. A
+    /// test that emits, then stops, is not testing a join — by the time it stops, nothing is running,
+    /// and its negative control passes.
+    func holdNextStart() { holdGate.arm() }
+    func releaseHeldStart() { holdGate.release() }
+    private let holdGate = StartGate()
+
+    final class StartGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var armed = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func arm() { lock.lock(); armed = true; lock.unlock() }
+        func release() {
+            lock.lock(); armed = false; let w = waiters; waiters.removeAll(); lock.unlock()
+            for c in w { c.resume() }
+        }
+        func wait() async {
+            let shouldWait: Bool = { lock.lock(); defer { lock.unlock() }; return armed }()
+            guard shouldWait else { return }
+            await withCheckedContinuation { c in
+                lock.lock()
+                if armed { waiters.append(c); lock.unlock() } else { lock.unlock(); c.resume() }
+            }
+        }
+    }
+
     func start(microphoneDeviceID: String) async throws {
+        await holdGate.wait()
         enterLifecycle()
         defer { leaveLifecycle() }
         recordStart(microphoneDeviceID)

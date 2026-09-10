@@ -38,17 +38,23 @@ public final class RecordingSession: @unchecked Sendable {
     /// deliberately.** The lifetime is the recording, including its capture restarts; the session owns
     /// the token *and* the work its handler queues, and a manager-side registry could not acquire the
     /// stronger guarantee — cancelling a token fences the directory callback, it does not cancel Tasks
-    /// that callback already started. The app gets the whole-app guarantee by awaiting both owners in
-    /// the quit sequence.
+    /// that callback already started.
+    ///
+    /// ⚠️ **The state behind it lives in an actor, not in this class.** This type is `@unchecked
+    /// Sendable` and its own documentation says so in as many words: there is no ambient actor to
+    /// inherit and anything added must bring its own synchronization. My first version put the epoch and
+    /// an in-flight flag in plain properties, mutated by `stop()` on the cooperative pool and read from
+    /// a main-actor Task — a data race, and a flag that dropped intervening observations rather than
+    /// coalescing them.
     private let deviceReader: (any AudioDeviceReading)?
     private var deviceObservation: (any AudioDeviceObservation)?
-    /// Bumped by `stop()`. Queued handler work checks it, because cancelling the token does not undo a
-    /// hop that has already been scheduled.
-    private var deviceEpoch: UInt64 = 0
-    private var lossHandling = false
+    private let lossWatch: MicrophoneLossWatch
 
-    /// Called when the pinned microphone is **proved** to have gone and the capture was re-resolved.
-    /// Not called on the main actor.
+    /// Called when the recording's microphone changed, or when it cannot be watched. Not called on the
+    /// main actor.
+    ///
+    /// ⚠️ **A notice channel, and only for things that are not recording failures.** When nothing is
+    /// recording the report goes to `fatalStall` instead — see there.
     public var onMicrophoneChanged: (@Sendable (ControllerMessage) -> Void)?
 
     /// The watchdog's give-up route, kept so the loss path can reach it too.
@@ -109,6 +115,7 @@ public final class RecordingSession: @unchecked Sendable {
                                      permissions: permissions,
                                      microphone: microphone)
         self.recorder = recorder
+        lossWatch = MicrophoneLossWatch(recorder: recorder)
         self.selfCheck = SelfCheck(recorder: recorder, permissions: permissions,
                                    clock: dependencies.makeClock())
     }
@@ -141,6 +148,19 @@ public final class RecordingSession: @unchecked Sendable {
             guard let self else { return }
             manifestQueue.async { self.persistSegmentCount(count) }
         }
+        // ⚠️ **Installed before the capture comes up, not after verification.** A device lost during
+        // the startup probe is otherwise missed for want of a listener, permanently — and an earlier
+        // comment of mine claimed the controller's callback assignment covered that window, which it
+        // never did: assigning a callback installs nothing.
+        await lossWatch.install(report: { [weak self] in self?.onMicrophoneChanged?($0) },
+                                fatal: { [weak self] in self?.fatalStall?($0) })
+        observeDeviceLoss()
+        // A watchdog recovery that lands on a different microphone is a device change the user must be
+        // able to explain — the plan's "reported, not silent".
+        recorder.onDeviceAdopted = { [weak self] previous, adopted in
+            self?.onMicrophoneChanged?(.microphoneSwitched(device: adopted.name,
+                                                           reason: "\(previous.name) stopped working"))
+        }
         do {
             try await recorder.start()
         } catch StartupFailure.streamNotStarted {
@@ -159,13 +179,13 @@ public final class RecordingSession: @unchecked Sendable {
 
         confirmed = true
         didStart = true
-        // A watchdog recovery that lands on a different microphone is a device change the user must be
-        // able to explain — the plan's "reported, not silent".
-        recorder.onDeviceAdopted = { [weak self] previous, adopted in
-            self?.onMicrophoneChanged?(.microphoneSwitched(device: adopted.name,
-                                                            reason: "\(previous.name) stopped working"))
+        // Reconcile once now that a device is actually pinned: the observer was installed before the
+        // capture came up, so anything that happened during the probe has to be looked at rather than
+        // waited for.
+        if let deviceReader {
+            let snapshot = deviceReader.enumerateInputDevices()
+            await lossWatch.observe(snapshot)
         }
-        observeDeviceLoss()
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
         }
@@ -178,54 +198,43 @@ public final class RecordingSession: @unchecked Sendable {
     /// Clean stop: stop the capture, assemble the segments, mark the marker as `done`. Deleting the
     /// segments after the assembly comes from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
-    /// Watch for the pinned microphone disappearing.
+    /// Watch for the pinned microphone becoming unusable.
     ///
     /// ⚠️ **The watchdog is not a substitute, and assuming it was is what left this missing.**
     /// `TrackWatchdog` deliberately reads a track's count not increasing as ordinary source silence,
     /// and the system track keeps advancing when only the microphone goes — so a lost headset produced
     /// no stall at all. Even where the whole stream dies, the watchdog answers after its six-second
-    /// window, and the plan's requirement is that losing the pinned microphone is surfaced
-    /// **immediately**.
+    /// window, and the requirement is that the loss is surfaced **immediately**.
+    ///
+    /// ⚠️ **Installed before `recorder.start()`**, so a device lost during the startup probe is not
+    /// missed for want of a listener. An earlier comment claimed the controller's callback assignment
+    /// covered that window; it did not — assigning a callback installs nothing.
     private func observeDeviceLoss() {
         guard let deviceReader, deviceObservation == nil else { return }
-        let epoch = deviceEpoch
         switch deviceReader.observe({ [weak self] change in
-            guard case .deviceListChanged = change else { return }
+            switch change {
+            case .deviceListChanged, .readinessChanged:
+                // ⚠️ **Readiness counts.** A device can stay listed and stop being usable — not alive,
+                // or no input channels — and an observer that only watches the list never learns.
+                break
+            case .defaultInputChanged:
+                return
+            case .observationDegraded(let reason):
+                self?.onMicrophoneChanged?(.microphoneObservationDegraded(reason: reason))
+                return
+            }
             // Read where the change was delivered: by the time the hop lands the device may be back.
             let snapshot = deviceReader.enumerateInputDevices()
-            Task { @MainActor [weak self] in
-                guard let self, deviceEpoch == epoch else { return }
-                await handlePossibleLoss(snapshot)
-            }
+            let watch = self?.lossWatch
+            Task { await watch?.observe(snapshot) }
         }) {
-        case .observing(let subscription): deviceObservation = subscription
-        case .failed: deviceObservation = nil
-        }
-    }
-
-    private func handlePossibleLoss(_ snapshot: DeviceEnumeration) async {
-        guard !lossHandling, let pinned = recorder.pinnedMicrophone else { return }
-        guard case .devices(let devices, let uninspectable) = snapshot else { return }
-
-        // ⚠️ Absence is **proved**, never inferred. A snapshot that could not describe every driver is
-        // not evidence the pinned microphone left, and failing a recording over on it would be acting
-        // on an unknown.
-        guard MicrophonePolicy.presence(of: pinned.uid, in: devices,
-                                        snapshotComplete: uninspectable.isEmpty) == .absent else { return }
-
-        lossHandling = true
-        defer { lossHandling = false }
-        do {
-            try await recorder.restart()
-            if let now = recorder.pinnedMicrophone, now.uid != pinned.uid {
-                onMicrophoneChanged?(.microphoneSwitched(device: now.name,
-                                                         reason: "\(pinned.name) disconnected"))
-            }
-        } catch {
-            // ⚠️ Nothing is recording. Routed through the fatal path immediately, with its reason
-            // preserved, rather than published as a notice that says the old microphone is still going.
-            let failure = (error as? StartupFailure) ?? .streamNotStarted
-            fatalStall?(failure)
+        case .observing(let subscription):
+            deviceObservation = subscription
+        case .failed(let reason):
+            // ⚠️ Not swallowed: a recording watching nothing looks exactly like a recording whose
+            // microphone never goes away.
+            deviceObservation = nil
+            onMicrophoneChanged?(.microphoneObservationDegraded(reason: reason))
         }
     }
 
@@ -274,11 +283,11 @@ public final class RecordingSession: @unchecked Sendable {
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
         // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments
         // after the assembly (a race over `stream`). Cancel + await serializes the transitions.
-        // Stop scheduling before anything else: a queued loss hop must not start a restart while the
-        // recorder is being torn down.
-        deviceEpoch &+= 1
+        // Stop scheduling before anything else, then **join** what is already running: cancelling the
+        // token fences the directory callback and does nothing about a restart already in flight.
         deviceObservation?.cancel()
         deviceObservation = nil
+        await lossWatch.stop()
         watchdogTask?.cancel()
         await watchdogTask?.value
         watchdogTask = nil
@@ -359,6 +368,87 @@ public final class RecordingSession: @unchecked Sendable {
         } catch {
             // Not fatal: the segments on disk are intact, and recovery goes off the FS anyway.
             log.error("Failed to update segment_count: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+}
+
+/// The execution domain for one recording's microphone-loss handling.
+///
+/// ⚠️ **An actor because `RecordingSession` is not one.** That type is `@unchecked Sendable` and its own
+/// documentation says there is no ambient actor to inherit and that anything added must bring its own
+/// synchronization. The first version of this code kept an epoch and an in-flight flag as plain
+/// properties, written by `stop()` on the cooperative pool and read from a main-actor Task.
+@available(macOS 15.0, *)
+actor MicrophoneLossWatch {
+    private let recorder: AudioRecorder
+    private var report: (@Sendable (ControllerMessage) -> Void)?
+    private var fatal: (@Sendable (StartupFailure) -> Void)?
+    private var stopped = false
+    /// The newest observation not yet acted on. ⚠️ **Coalesced, never dropped**: an in-flight flag that
+    /// discarded whatever arrived while a restart was running would throw away the very snapshot that
+    /// says the fallback has gone too.
+    private var latest: DeviceEnumeration?
+    private var driver: Task<Void, Never>?
+
+    init(recorder: AudioRecorder) { self.recorder = recorder }
+
+    func install(report: @escaping @Sendable (ControllerMessage) -> Void,
+                 fatal: @escaping @Sendable (StartupFailure) -> Void) {
+        self.report = report
+        self.fatal = fatal
+    }
+
+    func observe(_ snapshot: DeviceEnumeration) {
+        guard !stopped else { return }
+        latest = snapshot
+        guard driver == nil else { return }
+        driver = Task { await self.drain() }
+    }
+
+    /// Latch, then **join**. A recording that has stopped owns nothing still running.
+    func stop() async {
+        stopped = true
+        latest = nil
+        let running = driver
+        await running?.value
+        driver = nil
+    }
+
+    private func drain() async {
+        while !stopped, let snapshot = latest {
+            latest = nil
+            await handle(snapshot)
+        }
+        driver = nil
+    }
+
+    private func handle(_ snapshot: DeviceEnumeration) async {
+        guard let pinned = recorder.pinnedMicrophone else { return }
+        guard case .devices(let devices, let uninspectable) = snapshot else { return }
+
+        // ⚠️ **Unusable is not only absent.** A device can stay listed and stop being alive, or lose its
+        // input channels; an observer that only asks "is it in the list" never learns. And absence is
+        // **proved**, never inferred: missing from a snapshot that could not describe every driver is
+        // `.unknown`, and failing a recording over on an unknown acts on a guess.
+        let listed = devices.first { $0.uid == pinned.uid }
+        switch (listed, uninspectable.isEmpty) {
+        case (let device?, _) where device.isCaptureCandidate: return
+        case (nil, false): return
+        default: break
+        }
+
+        do {
+            try await recorder.restart()
+        } catch {
+            // ⚠️ Checked **after** the await: the recording may have stopped while this was running, and
+            // a stopped recording must not be handed a fatal failure it did not experience.
+            guard !stopped else { return }
+            fatal?((error as? StartupFailure) ?? .streamNotStarted)
+            return
+        }
+        guard !stopped else { return }
+        if let now = recorder.pinnedMicrophone, now.uid != pinned.uid {
+            report?(.microphoneSwitched(device: now.name, reason: "\(pinned.name) is no longer usable"))
         }
     }
 }
