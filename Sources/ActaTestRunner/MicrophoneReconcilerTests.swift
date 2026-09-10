@@ -19,13 +19,6 @@ import Testing
 struct MicrophoneReconcilerTests {
     // MARK: - Harness
 
-    /// A `@Sendable` counter for the `onSleep` hook, which cannot capture a mutable local.
-    final class Steps: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = 0
-        func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
-    }
-
     private func harness(devices: [AudioInputDevice],
                          defaultInput: String?,
                          order: [String],
@@ -371,8 +364,10 @@ struct MicrophoneReconcilerTests {
                                                      defaultInput: "00-00-5E-00-53-01:input",
                                                      order: ["BuiltInMicrophoneDevice"])
         directory.setWritesTakeEffect(false)
-        // The pre-write read, then one stale read, then the write has landed.
+        // The pass's own observing read, the pre-write read, one stale read inside the verification
+        // window, and then the write has landed.
         directory.scriptDefaultReads([.device(uid: "00-00-5E-00-53-01:input"),
+                                      .device(uid: "00-00-5E-00-53-01:input"),
                                       .device(uid: "00-00-5E-00-53-01:input"),
                                       .device(uid: "BuiltInMicrophoneDevice")])
         await reconciler.enable()
@@ -401,7 +396,7 @@ struct MicrophoneReconcilerTests {
         }
 
         #expect(await reconciler.state.status ==
-            .suspended(conflicts: MicrophoneEnforcementTuning.conflictsBeforeSuspension))
+            .suspended(.repeatedReversals(MicrophoneEnforcementTuning.conflictsBeforeSuspension)))
         // The last reversal is not fought: one write fewer than reversals.
         #expect(directory.attemptedWrites.count == MicrophoneEnforcementTuning.conflictsBeforeSuspension - 1)
     }
@@ -460,7 +455,7 @@ struct MicrophoneReconcilerTests {
         await reconciler.wake()
 
         #expect(await reconciler.state.status ==
-            .suspended(conflicts: MicrophoneEnforcementTuning.conflictsBeforeSuspension))
+            .suspended(.repeatedReversals(MicrophoneEnforcementTuning.conflictsBeforeSuspension)))
     }
 
     @Test("a long enough quiet period lifts suspension at the next trigger")
@@ -686,66 +681,67 @@ struct MicrophoneReconcilerTests {
         let second = await iterator.next()
         #expect(second?.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
         #expect(second?.preferred == "BuiltInMicrophoneDevice")
-        #expect(second?.actualDefault == "BuiltInMicrophoneDevice")
+        #expect(second?.observedDefault == .device(uid: "BuiltInMicrophoneDevice"))
         _ = directory
     }
 }
 
 /// The conflict budget on its own, from literals — every case here is a sequence of timestamps a live
 /// machine cannot be asked to produce.
-@Suite("Conflict budget")
-struct ConflictBudgetTests {
+@Suite("Enforcement budget")
+struct EnforcementBudgetTests {
     @Test("fewer conflicts than the threshold does not suspend")
     func belowThresholdDoesNotSuspend() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         for i in 0 ..< (MicrophoneEnforcementTuning.conflictsBeforeSuspension - 1) {
-            #expect(budget.recordConflict(at: Double(i)) == false)
+            #expect(budget.record(.reversal, at: Double(i)) == false)
         }
         #expect(budget.isSuspended == false)
     }
 
     @Test("the threshold inside the window suspends, and reports the count")
     func thresholdInsideTheWindowSuspends() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         var tripped = false
         for i in 0 ..< MicrophoneEnforcementTuning.conflictsBeforeSuspension {
-            tripped = budget.recordConflict(at: Double(i))
+            tripped = budget.record(.reversal, at: Double(i))
         }
         #expect(tripped)
         #expect(budget.isSuspended)
-        #expect(budget.conflictCount == MicrophoneEnforcementTuning.conflictsBeforeSuspension)
+        #expect(budget.reversalCount == MicrophoneEnforcementTuning.conflictsBeforeSuspension)
     }
 
     @Test("conflicts spread wider than the window never reach the threshold")
     func conflictsOutsideTheWindowDoNotAccumulate() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         let step = MicrophoneEnforcementTuning.conflictWindow + 1
         for i in 0 ..< (MicrophoneEnforcementTuning.conflictsBeforeSuspension + 2) {
-            #expect(budget.recordConflict(at: Double(i) * step) == false)
+            #expect(budget.record(.reversal, at: Double(i) * step) == false)
         }
         #expect(budget.isSuspended == false)
     }
 
     @Test("suspension outlives the counting window")
     func suspensionIsALatch() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         for i in 0 ..< MicrophoneEnforcementTuning.conflictsBeforeSuspension {
-            budget.recordConflict(at: Double(i))
+            budget.record(.reversal, at: Double(i))
         }
         // Far enough that every one of the recorded conflicts has aged out of the window.
         budget.refresh(at: MicrophoneEnforcementTuning.conflictWindow
             + Double(MicrophoneEnforcementTuning.conflictsBeforeSuspension))
         #expect(budget.isSuspended)
-        #expect(budget.conflictCount == 0)
-        // ⚠️ And the reported count survives the drain — see `suspendedAfter`.
-        #expect(budget.suspendedAfter == MicrophoneEnforcementTuning.conflictsBeforeSuspension)
+        #expect(budget.reversalCount == 0)
+        // ⚠️ And the cause survives the drain: it is captured when the latch trips, never recomputed.
+        #expect(budget.suspension ==
+            .repeatedReversals(MicrophoneEnforcementTuning.conflictsBeforeSuspension))
     }
 
     @Test("a long enough quiet period lifts the latch")
     func aQuietPeriodResetsTheLatch() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         for i in 0 ..< MicrophoneEnforcementTuning.conflictsBeforeSuspension {
-            budget.recordConflict(at: Double(i))
+            budget.record(.reversal, at: Double(i))
         }
         // Measured from the *last* conflict, not from zero.
         budget.refresh(at: MicrophoneEnforcementTuning.quietResetInterval
@@ -755,13 +751,13 @@ struct ConflictBudgetTests {
 
     @Test("reset clears the latch and the count")
     func resetClearsEverything() {
-        var budget = ConflictBudget()
+        var budget = EnforcementBudget()
         for i in 0 ..< MicrophoneEnforcementTuning.conflictsBeforeSuspension {
-            budget.recordConflict(at: Double(i))
+            budget.record(.reversal, at: Double(i))
         }
         budget.reset()
         #expect(budget.isSuspended == false)
-        #expect(budget.conflictCount == 0)
-        #expect(budget.suspendedAfter == 0)
+        #expect(budget.reversalCount == 0)
+        #expect(budget.suspension == nil)
     }
 }

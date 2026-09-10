@@ -224,6 +224,16 @@ be one that cannot loop.
       write, and the **reset rule**. Starting proposal, to be adjusted only with a stated reason: 3
       reversals within 60 s trips suspension; a write is verified within 2 s; the budget resets on
       explicit Resume, on enable, and after 5 minutes with no conflict
+      — ⚠️ **adjusted during execution, with the reason, as this bullet requires.** Counting reversals
+      alone does not bound enforcement: a competitor that restores its choice *before* the first
+      verification read means Acta's write never visibly wins, so no reversal is ever provable, while
+      each write provokes the notification that starts the next pass. A peer review reproduced nine
+      writes and no suspension. A **second** setback kind was therefore added —
+      `EnforcementSetback.convergenceFailure`, charged once per pass that issued writes and ended with
+      the default elsewhere — against the same threshold and window, and the status names which of the
+      two suspended it, because sampling can prove a reversal and cannot prove intent. The reversal is
+      also consumed when charged: one displacement is one setback, however many passes can still see
+      its aftermath
 - [x] ⚠️ **Bounded verification must tell delayed convergence from repeated conflict.** A successful
       write followed by a briefly stale read is not a fight, and must not spend the budget
 - [x] ⚠️ **"A stale result must not be applied" was imprecise, and is corrected here**: ignoring a late
