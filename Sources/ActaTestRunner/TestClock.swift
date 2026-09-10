@@ -56,6 +56,15 @@ final class TestClock: SelfCheckClock, @unchecked Sendable {
     /// leave the watchdog holding a way to resume it.
     func freeze() { withLock { frozen = true; handler = nil } }
 
+    /// Move `now` forward without sleeping.
+    ///
+    /// ⚠️ **This does not make the clock a scheduler**, and the paragraphs above still hold: nothing is
+    /// queued here, nothing is drained, and no pending work is released by calling it. It exists for
+    /// code that *reads* elapsed time across an interval it never sleeps through — the microphone
+    /// reconciler's conflict window and its quiet-reset period are both minutes long and are crossed by
+    /// the machine sitting idle, not by anything Acta waits for.
+    func advance(by seconds: Double) { withLock { if !frozen { self.seconds += seconds } } }
+
     /// How many waits the code under test has performed.
     var sleepCount: Int { withLock { sleeps } }
 

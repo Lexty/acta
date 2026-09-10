@@ -22,6 +22,14 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     /// than a single value so a test can script "the first write fails, the retry succeeds".
     private var writeOutcomes: [DefaultInputWrite] = []
     private var writeFallback: DefaultInputWrite = .written
+    /// Queued read outcomes, consumed in order before `defaultRead` answers. A queue is what lets a test
+    /// script **delayed convergence**: the first read after a write still shows the old device, the
+    /// second shows the new one. Without it the verification deadline has nothing to prove.
+    private var readOutcomes: [DefaultInputRead] = []
+    /// When false, a `.written` write reports success and does **not** move the fake's default — the OS
+    /// accepting a write that never takes effect, which is a different animal from a refused write and
+    /// must be scriptable separately.
+    private var writesTakeEffect = true
     /// When set, `observe` reports this instead of subscribing — the third outcome that otherwise hides.
     private var observationFailure: String?
 
@@ -58,6 +66,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     private var attemptedWritesStorage: [String] = []
     private var enumerationCountStorage = 0
     private var defaultReadCountStorage = 0
+    private var enumerationCountAtSubscribeStorage: Int?
 
     /// Every write attempted, in order — including the ones the script failed, because "it tried and
     /// the OS refused" and "it never tried" are different bugs.
@@ -67,6 +76,14 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     var enumerationCount: Int { lock.lock(); defer { lock.unlock() }; return enumerationCountStorage }
     /// How many times the default input was read. The contract says re-read immediately before writing.
     var defaultReadCount: Int { lock.lock(); defer { lock.unlock() }; return defaultReadCountStorage }
+    /// `enumerationCount` at the moment the first subscription was installed, or `nil` if none was.
+    ///
+    /// This is how the **startup race** is pinned rather than described: a consumer that enumerates
+    /// first and subscribes afterwards has a window in which a change is delivered to nobody and is then
+    /// absent from the snapshot it already took. Zero here means the window does not exist.
+    var enumerationCountAtSubscribe: Int? {
+        lock.lock(); defer { lock.unlock() }; return enumerationCountAtSubscribeStorage
+    }
 
     init(devices: [AudioInputDevice] = [], defaultInput: String? = nil) {
         enumeration = .devices(devices, uninspectable: [])
@@ -90,12 +107,27 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
         lock.lock(); defaultRead = read; lock.unlock()
     }
 
+    /// Script the next reads, in order; afterwards `defaultRead` answers as usual.
+    func scriptDefaultReads(_ reads: [DefaultInputRead]) {
+        lock.lock(); readOutcomes = reads; lock.unlock()
+    }
+
+    func setWritesTakeEffect(_ takeEffect: Bool) {
+        lock.lock(); writesTakeEffect = takeEffect; lock.unlock()
+    }
+
     func scriptWrites(_ outcomes: [DefaultInputWrite], thereafter fallback: DefaultInputWrite = .written) {
         lock.lock(); writeOutcomes = outcomes; writeFallback = fallback; lock.unlock()
     }
 
     func failObservation(reason: String) {
         lock.lock(); observationFailure = reason; lock.unlock()
+    }
+
+    /// Let subscriptions succeed again — the other half of `failObservation`, without which "it
+    /// recovered" is not expressible and a permanently blind reconciler passes.
+    func allowObservation() {
+        lock.lock(); observationFailure = nil; lock.unlock()
     }
 
     /// Deliver a change to every current subscriber, exactly as the HAL listeners would.
@@ -129,6 +161,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     func currentDefaultInput() -> DefaultInputRead {
         lock.lock(); defer { lock.unlock() }
         defaultReadCountStorage += 1
+        if !readOutcomes.isEmpty { return readOutcomes.removeFirst() }
         return defaultRead
     }
 
@@ -138,7 +171,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
         let outcome = writeOutcomes.isEmpty ? writeFallback : writeOutcomes.removeFirst()
         // A successful write moves the fake's own default, so a verification read afterwards sees what
         // the OS would have shown. A test scripting a *fight* overrides the read explicitly.
-        if case .written = outcome { defaultRead = .device(uid: uid) }
+        if case .written = outcome, writesTakeEffect { defaultRead = .device(uid: uid) }
         return outcome
     }
 
@@ -148,6 +181,11 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
             let failure = observationFailure
             lock.unlock()
             if let failure { return .failed(reason: failure) }
+            lock.lock()
+            if enumerationCountAtSubscribeStorage == nil {
+                enumerationCountAtSubscribeStorage = enumerationCountStorage
+            }
+            lock.unlock()
             let token = nextToken
             nextToken += 1
             subscribers[token] = Gate(handler)

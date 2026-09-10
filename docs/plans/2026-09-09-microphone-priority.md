@@ -190,50 +190,50 @@ makes the hard cases (a temporary override expiring, no eligible device) reachab
 no "manual change" flag, so intent cannot be classified — only a policy can be chosen, and it has to
 be one that cannot loop.
 
-- [ ] A reconciler in **ActaRuntime** over `AudioDeviceDirectory` + the Task 2 policy, with time from
+- [x] A reconciler in **ActaRuntime** over `AudioDeviceDirectory` + the Task 2 policy, with time from
       an **injected clock** (reuse `SelfCheckClock`'s shape)
-- [ ] **Serialize** reconciliation; **coalesce** bursts of notifications; **re-read the actual default
+- [x] **Serialize** reconciliation; **coalesce** bursts of notifications; **re-read the actual default
       immediately before writing**; **write only on a mismatch**; **verify after the write**. A
       notification caused by Acta's own successful write must then be a no-op
-- [ ] ⚠️ **Triggers include two with no HAL notification behind them at all**: a priority-list edit and
+- [x] ⚠️ **Triggers include two with no HAL notification behind them at all**: a priority-list edit and
       *Use now*. Both must reconcile. The full trigger list is: enable, wake, device-list change,
       default-input change, readiness change, override expiry, **preference edit**, **Use now**
-- [ ] ⚠️ **Do not diff winners.** The winner can stay unchanged while the actual default moves; the
+- [x] ⚠️ **Do not diff winners.** The winner can stay unchanged while the actual default moves; the
       comparison is always against the freshly read actual default
-- [ ] ⚠️ **A fallback selection is not evidence that the previous device left.** `MicrophonePolicy.select`
+- [x] ⚠️ **A fallback selection is not evidence that the previous device left.** `MicrophonePolicy.select`
       takes no snapshot-completeness input by design, so on a partial snapshot it will happily return a
       lower-priority candidate. That must never be read as proof the override's or the current device
       disappeared: expiry and failover go through `MicrophonePolicy.presence`, whose `.unknown` exists
       for exactly this, and a pin is retired only on `.absent`. Pin the sequence here **and** at the
       capture consumer in Task 5 — a helper only protects the caller that consults it
-- [ ] ⚠️ **A refused candidate must not reset the error or retry history.** `select` reports
+- [x] ⚠️ **A refused candidate must not reset the error or retry history.** `select` reports
       `.allPreferredCandidatesRefused` rather than disguising a rejected write as ordinary waiting or as
       missing hardware; the reconciler must carry that through to a visible operational status, not
       fold it into "waiting for a preferred microphone". Pin both sequences: a rejected *last* preferred
       candidate must not become success, must not become ordinary waiting, and must not become
       no-hardware
-- [ ] ⚠️ **Coalescing must not eat the fact that a device left.** The sequence that breaks a naive
+- [x] ⚠️ **Coalescing must not eat the fact that a device left.** The sequence that breaks a naive
       coalescer: *override on X → X disappears → X reconnects with the same UID → coalescing delivers
       only the final snapshot, which contains X.* The override should have expired on the
       disappearance, and a snapshot-only reconciler will instead keep it alive. Preserve observed
       removals across coalescing. If **both** transitions land before any observation, say so in the
       code as a stated detection limit rather than pretending it is handled
-- [ ] ⚠️ **Choose the constants here, not at implementation time.** "Bound the conflict budget" is a
+- [x] ⚠️ **Choose the constants here, not at implementation time.** "Bound the conflict budget" is a
       wish without numbers. Fix and pin with the fake clock: the **conflict count** that trips
       suspension, the **rolling window** it is counted over, the **verification deadline** after a
       write, and the **reset rule**. Starting proposal, to be adjusted only with a stated reason: 3
       reversals within 60 s trips suspension; a write is verified within 2 s; the budget resets on
       explicit Resume, on enable, and after 5 minutes with no conflict
-- [ ] ⚠️ **Bounded verification must tell delayed convergence from repeated conflict.** A successful
+- [x] ⚠️ **Bounded verification must tell delayed convergence from repeated conflict.** A successful
       write followed by a briefly stale read is not a fight, and must not spend the budget
-- [ ] ⚠️ **"A stale result must not be applied" was imprecise, and is corrected here**: ignoring a late
+- [x] ⚠️ **"A stale result must not be applied" was imprecise, and is corrected here**: ignoring a late
       completion cannot undo an OS write already issued. The requirements are that a stale completion
       produces **no follow-up action** and **no false success published to the UI**; that after a
       preference change the *actual* result is reconciled against the *new* preference; and that after
       Pause **no compensating write is issued** to undo what was already written
-- [ ] The temporary override expires on its device's disconnect or on explicit resume — never on a
+- [x] The temporary override expires on its device's disconnect or on explicit resume — never on a
       timer, and never silently into the persistent list
-- [ ] Tests through `FakeAudioDeviceDirectory`, at minimum: both notification orders; duplicate and
+- [x] Tests through `FakeAudioDeviceDirectory`, at minimum: both notification orders; duplicate and
       coalesced notifications; **unchanged winner with a changed actual default**; the override
       disappear/reconnect sequence above; a preference edit and a *Use now* with no HAL notification;
       a **subscription startup race** (a change between the initial enumeration and observer
@@ -244,6 +244,11 @@ be one that cannot loop.
       actual state stays observable); conflict-budget exhaustion and its visible suspension;
       suspension followed by explicit Resume; enforcement while idle; repeated recording start/stop
       with the reconciler running throughout
+      — ⚠️ **the last two are deferred to Task 4, deliberately.** `MicrophoneReconciler` names no
+      recording type and holds no controller, so "it still enforces while nothing is recording" would
+      assert that a type it cannot reach did not affect it. The real question is *ownership* — one
+      reconciler for the app's lifetime, surviving stop/restart — which is Task 4's acceptance, and
+      `MicrophoneReconcilerTests`' suite comment says so where an executor will read it
 
 ### Task 4: App-lifetime ownership
 
