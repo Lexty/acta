@@ -167,9 +167,13 @@ evidence that forced the change: `RecordingDependencies`' members are **factorie
 says why — "a source is stateful and belongs to exactly one recording, so `.live` must mint a fresh
 one per session". Microphone management is the first seam where that is exactly backwards. It must run
 **while nothing is recording** (feature B's promise is that the Mac's default input stays on your list
-while Acta is merely running) and **survive a recording ending**; putting it in
-`RecordingDependencies` would mint one enforcer per session — several alive at once during a watchdog
-restart, each writing `kAudioHardwarePropertyDefaultInputDevice`, which is Acta fighting itself.
+while Acta is merely running) and **survive a recording ending**; a per-recording factory gives it
+neither — it would exist only between `start()` and `stop()`, which is precisely the interval the
+feature is *not* about. ⚠️ An earlier draft of this paragraph also claimed a watchdog restart would
+produce several enforcers at once. **That was wrong and is removed rather than softened**:
+`AudioRecorder.restart()` (`AudioRecorder.swift:187`) stops and restarts the *same* source with the
+same writers and the same session — it mints no `RecordingSession` and no `RecordingDependencies`.
+The lifetime argument above stands on its own and needs no invented mechanism.
 So: an **app-lifetime** seam gets its own owner with its own wiring value.
 `MicrophoneWiring.live` is that value and carries the same burden `RecordingDependencies.live` does
 (a claim about production a test can call back, which a default argument can never be); the
@@ -177,9 +181,18 @@ difference is that `MicrophoneManager` calls each factory **once, in `init`**, a
 for the process. **`MicrophoneManager` is the composition root** for this, exactly as
 `RecordingSession` is for permissions: it builds the one `AudioDeviceDirectory` and hands it out —
 whole to the reconciler it owns, and as the read-only `AudioDeviceReading` to everyone else.
-⚠️ That protocol split is structural, not documentation: `AudioDeviceReading` has no
-`setDefaultInput`, so "a recording never enforces, and never constructs a reconciler" is a fact the
-package graph checks rather than a rule a reviewer has to remember. `MicrophoneManager.shared` inherits
+⚠️ The `AudioDeviceReading` split is **static narrowing, not a capability guarantee, and the
+difference matters**: both protocols are public in the same target and the object handed out still
+conforms to `AudioDeviceDirectory`, so anything holding the reader can cast it back and construct a
+second reconciler. What the split buys is that a recording cannot reach `setDefaultInput` *by
+accident* — the type it is handed does not offer it. "A recording never enforces and never constructs
+a reconciler" stays a **composition rule**, enforced by review, and this paragraph is where it is
+written down. ⚠️ **`shutdown()` does not unregister the raw HAL listeners**, and must not be described as if it
+did: `CoreAudioDeviceDirectory` removes its `AudioObjectAddPropertyListenerBlock` registrations only
+in `deinit`, and the manager keeps the directory alive — in production, to process exit. What it does
+guarantee, awaited, is that nothing in Acta reads or writes through the directory afterwards. A
+deliberate final close would mean resurrecting teardown-on-last-subscriber, whose races were the
+reason that machinery was deleted. `MicrophoneManager.shared` inherits
 the `ControlAPI.shared` prohibition — it reaches the real CoreAudio, so **no test may touch it**; tests
 build their own over a fake directory. The scope of this exception is one owner per app-lifetime
 concern, injected explicitly at composition; it does **not** loosen the per-recording rule, and a new

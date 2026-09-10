@@ -1,4 +1,5 @@
 import ActaKit
+import AppKit
 import Foundation
 
 /// The shipped wiring for microphone management, as a value a test can call.
@@ -81,10 +82,13 @@ public struct MicrophoneInventory: Equatable, Sendable {
 /// about lifetime because until now every seam had the same one. Enforcement is the first seam that
 /// must run **while nothing is recording** and **survive a recording ending**, which is the whole
 /// promise of feature (B): the Mac's default input stays on your list while Acta is merely running.
-/// Putting it in `RecordingDependencies` would mint one enforcer per recording session — several of
-/// them alive at once during a watchdog restart, each writing the same HAL property. The honest move
-/// is to widen the rule with the lifetime distinction, which `CLAUDE.md` now records; it is **not** to
-/// argue that the existing wording anticipated this.
+/// A per-recording factory gives it neither: it would exist only between `start()` and `stop()`, which
+/// is exactly the interval the feature is *not* about. ⚠️ An earlier draft of this comment also blamed
+/// watchdog restarts for producing several enforcers at once. That was **invented** —
+/// `AudioRecorder.restart()` reuses the same source, writers and session — and it is removed rather
+/// than softened; the lifetime argument needs no such mechanism. The honest move is to widen the rule
+/// with the lifetime distinction, which `CLAUDE.md` now records; it is **not** to argue that the
+/// existing wording anticipated this.
 ///
 /// **Two consumers, one subscription each, neither owning the other:**
 /// - the **reconciler** (feature B) — opt-in, holds the writable directory, and is the only thing in
@@ -108,7 +112,11 @@ public final class MicrophoneManager {
     /// The read-only half of the directory, for a recording's device selection and for the menu.
     ///
     /// ⚠️ A recording receives **this**, never the directory itself, and never constructs a reconciler.
-    /// The type is what enforces it: `AudioDeviceReading` has no `setDefaultInput`.
+    /// The type narrows what is reachable *by accident* — `AudioDeviceReading` has no
+    /// `setDefaultInput` — but it is **not** a capability guarantee: both protocols are public in this
+    /// target and the object returned still conforms to `AudioDeviceDirectory`, so a caller determined
+    /// to cast it back can. The rule is a composition rule, kept by review; the type keeps the mistake
+    /// out of reach, not the intent.
     public var deviceReader: any AudioDeviceReading { directory }
 
     public private(set) var inventory: MicrophoneInventory = .unknown
@@ -116,6 +124,15 @@ public final class MicrophoneManager {
 
     private var observation: (any AudioDeviceObservation)?
     private var observationDegraded: String?
+    private var wakeObserver: (any NSObjectProtocol)?
+
+    /// Bumped by `shutdown()`.
+    ///
+    /// ⚠️ **Cancelling a task does not withdraw a value it has already been handed.** The mirror can be
+    /// suspended holding a state it received before cancellation, resume afterwards, and publish it into
+    /// a manager that has shut down — or into a restarted one's streams. Cancellation closes the tap;
+    /// this fences what is already in the pipe.
+    private var lifetimeEpoch: UInt64 = 0
     private var enforcementMirror: Task<Void, Never>?
     private var started = false
 
@@ -145,19 +162,73 @@ public final class MicrophoneManager {
         subscribe()
         refreshInventory()
         mirrorEnforcement()
+        observeWake()
     }
 
-    /// Release the HAL listeners. Not a `deinit`: this is a `@MainActor` singleton in production and
-    /// its lifetime is the process, so the only honest teardown is an explicit one.
-    public func shutdown() {
+    /// The app-lifetime wake source. ⚠️ Sleep is the one interval during which the world changes with
+    /// **no HAL notification delivered**, so the reconciler's `wake` trigger is useless without
+    /// something to pull it — and until now nothing did: it existed as an endpoint with no caller.
+    /// This is the app-lifetime owner, so this is where it belongs.
+    ///
+    /// ⚠️ Not verified automatically: no test sleeps a Mac. What a test can reach is that the observer
+    /// is installed while monitoring and removed on shutdown.
+    private func observeWake() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshInventory()
+                await self.reconciler.wake()
+            }
+        }
+    }
+
+    /// Whether the wake source is installed. Test-facing: the notification itself cannot be produced.
+    var isObservingWake: Bool { wakeObserver != nil }
+
+    /// Stop writing the system default, and **wait until that is true**.
+    ///
+    /// ⚠️ Separate from `shutdown()` and ordered before it in the quit flow, because read-only
+    /// monitoring is still wanted while a recording finishes: what must stop first is the half that
+    /// changes state other applications depend on.
+    public func stopEnforcement() async {
+        await reconciler.disable()
+    }
+
+    /// Stop this app's consumers of the directory, and **wait until that is true**.
+    ///
+    /// ⚠️ **It is `async` because the old synchronous version was a lie.** It kicked off
+    /// `Task { await reconciler.disable() }` and returned; the reconciler still held its subscription,
+    /// and a device change arriving in that window produced a corrective write *after* shutdown had
+    /// supposedly finished. An unstructured task is not a guarantee, and `waitForQuiescence()` cannot
+    /// stand in for one — it waits for passes, not for a `disable` that has not begun.
+    ///
+    /// ⚠️ **It does not unregister the raw HAL listeners, and must not be described as if it did.**
+    /// `CoreAudioDeviceDirectory` removes its `AudioObjectAddPropertyListenerBlock` registrations only
+    /// in `deinit`; cancelling a subscription removes a *subscriber*. The manager and the reconciler
+    /// keep the directory alive, and in production the manager is a singleton, so those registrations
+    /// live until the process exits. That is the intended contract — a deliberate final close would
+    /// mean resurrecting teardown-on-last-subscriber, whose races were the reason that machinery was
+    /// deleted. What this does guarantee: nothing in Acta reads or writes through the directory
+    /// afterwards.
+    public func shutdown() async {
+        // Fence first: everything below may be racing a value already in flight.
+        lifetimeEpoch &+= 1
         started = false
+        await stopEnforcement()
         observationDegraded = nil
         observation?.cancel()
         observation = nil
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
+        // Cancel *and join*: a cancelled task that has not yet run its final turn is not a stopped one.
         enforcementMirror?.cancel()
+        await enforcementMirror?.value
         enforcementMirror = nil
-        let reconciler = reconciler
-        Task { await reconciler.disable() }
         for continuation in inventoryContinuations.values { continuation.finish() }
         inventoryContinuations.removeAll()
         for continuation in enforcementContinuations.values { continuation.finish() }
@@ -166,8 +237,18 @@ public final class MicrophoneManager {
 
     private func subscribe() {
         guard started, observation == nil else { return }
-        switch directory.observe({ [weak self] _ in
-            Task { @MainActor in self?.refreshInventory() }
+        let epoch = lifetimeEpoch
+        switch directory.observe({ [weak self] change in
+            Task { @MainActor in
+                guard let self, self.lifetimeEpoch == epoch, self.started else { return }
+                // ⚠️ **`observationDegraded` is not just another reason to re-read.** It says the
+                // subscription is live but *incomplete* — a per-device readiness listener could not be
+                // installed — so the transition that listener existed to catch will never arrive.
+                // Treating it as a plain refresh request republishes a clean inventory and the one
+                // failure that announces itself in no other way disappears.
+                if case .observationDegraded(let reason) = change { self.observationDegraded = reason }
+                self.refreshInventory()
+            }
         }) {
         case .observing(let subscription):
             observation = subscription

@@ -118,12 +118,35 @@ struct MicrophoneManagerTests {
         directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
         directory.emit([.deviceListChanged, .defaultInputChanged])
         await manager.reconciler.waitForQuiescence()
-        manager.refreshInventory()
 
         // The reconciler put it back...
         #expect(directory.attemptedWrites == ["BuiltInMicrophoneDevice"])
-        // ...and the inventory saw the new device.
-        #expect(manager.inventory.devices.count == 2)
+        // ...and the inventory saw the new device **through its own subscription**. ⚠️ Pulling
+        // `refreshInventory()` here instead would assert that enumeration works and nothing about
+        // whether anything was ever delivered.
+        let delivered = await awaitInventory(manager) { $0.devices.count == 2 }
+        #expect(delivered != nil, "the inventory's own subscription never delivered the change")
+    }
+
+    /// ⚠️ **A degraded observation is not just another reason to re-read.** It says the subscription is
+    /// live but *incomplete* — a per-device readiness listener could not be installed — so the very
+    /// transition that listener existed to catch will never arrive. Handling it as a plain refresh
+    /// republishes a clean inventory and the failure vanishes; and it is a different event from
+    /// `observe()` itself failing, which is why one field is not enough on its own.
+    @Test("a partial-observation failure survives a successful refresh")
+    func aDegradedObservationIsNotSwallowedByASuccessfulRefresh() async {
+        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+
+        directory.setDevices([.usbMic()])
+        directory.emit(.observationDegraded(reason: "readiness listener refused"))
+
+        // Waiting for the USB device proves the callback actually ran; no manual refresh rescues it.
+        let delivered = await awaitInventory(manager) { $0.devices.map(\.uid) == ["USBAudioDevice_UID"] }
+        #expect(delivered != nil, "the degradation event never reached the inventory")
+        #expect(manager.inventory.observationDegraded == "readiness listener refused")
+        #expect(manager.inventory.failure == nil)
     }
 
     /// ⚠️ A recording's device selection gets the **read-only** half. `AudioDeviceReading` has no
@@ -168,8 +191,14 @@ struct MicrophoneManagerTests {
 
     // MARK: - Shutdown
 
-    @Test("shutdown releases the listeners and stops enforcement")
-    func shutdownUnregisters() async {
+    /// ⚠️ **The name says "this app's consumers", not "the HAL listeners", because the second would be
+    /// false.** `CoreAudioDeviceDirectory` removes its raw registrations only in `deinit`; cancelling a
+    /// subscription removes a subscriber. The manager and reconciler keep the directory alive, and in
+    /// production the manager is a singleton, so those registrations live until the process exits.
+    /// What is guaranteed, and what this asserts, is that nothing in Acta reads or writes through the
+    /// directory afterwards.
+    @Test("shutdown stops this app's consumers, awaited")
+    func shutdownStopsTheAppsConsumers() async {
         let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "00-00-5E-00-53-01:input")
         manager.start()
@@ -177,11 +206,81 @@ struct MicrophoneManagerTests {
         await manager.enableEnforcement()
         #expect(directory.subscriberCount == 2)
 
-        manager.shutdown()
-        await manager.reconciler.waitForQuiescence()
-
+        await manager.shutdown()
+        // ⚠️ **The main actor is held here on purpose.** The old synchronous shutdown kicked off an
+        // unstructured `Task { await disable() }` and returned; any incidental `await` afterwards —
+        // including the `await` in the assertion below — hands that task the suspension it needs and
+        // rescues the bug. Blocking first is what makes "it was already true when shutdown returned"
+        // a claim rather than a coin toss.
+        holdMainActor()
         #expect(directory.subscriberCount == 0)
         #expect(await manager.reconciler.isEnabled == false)
+    }
+
+    /// The defect the awaited shutdown exists for: a device change arriving in the window the old
+    /// version left open produced a corrective write **after** shutdown had supposedly finished.
+    @Test("nothing is written after shutdown returns")
+    func noWriteEscapesAfterShutdown() async {
+        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+                                                                defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        await manager.enableEnforcement()
+
+        await manager.shutdown()
+        holdMainActor()
+        let writesAtShutdown = directory.attemptedWrites
+        #expect(directory.subscriberCount == 0, "the reconciler still held its subscription on return")
+
+        // Exactly the change that would have provoked a correction a moment earlier.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.emit([.deviceListChanged, .defaultInputChanged])
+        await manager.reconciler.waitForQuiescence()
+
+        #expect(directory.attemptedWrites == writesAtShutdown)
+    }
+
+    /// ⚠️ **Cancelling a task does not withdraw a value it has already been handed.** The mirror can be
+    /// suspended holding a state received before cancellation and publish it afterwards, into a manager
+    /// that has shut down. Joining the task and fencing on the lifetime epoch is what closes it; here
+    /// the state change is issued before shutdown and must not land after it.
+    @Test("a state in flight when shutdown runs does not land afterwards")
+    func theMirrorCannotPublishAfterShutdown() async {
+        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+                                                                defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        await manager.enableEnforcement()
+        _ = await awaitEnforcement(manager) { $0.status == .enforcing(uid: "BuiltInMicrophoneDevice") }
+
+        // Issued before shutdown, so the mirror may already be holding it.
+        await manager.reconciler.pause()
+        await manager.shutdown()
+        let afterShutdown = manager.enforcement
+
+        // Give any surviving mirror turn every chance to run.
+        for _ in 0 ..< 20 { await Task.yield() }
+
+        #expect(manager.enforcement.status == afterShutdown.status)
+        #expect(directory.subscriberCount == 0)
+    }
+
+    /// ⚠️ Sleep is the one interval during which the world changes with **no HAL notification
+    /// delivered**, so the reconciler's `wake` trigger is worthless without a source pulling it — and
+    /// until this task nothing did: it was an endpoint with no caller. What a test can reach is that the
+    /// source is installed while monitoring and removed on shutdown; the notification itself needs a
+    /// human to sleep a Mac, and is listed as such in the plan.
+    @Test("the wake source is installed while monitoring and removed on shutdown")
+    func theWakeSourceFollowsMonitoring() async {
+        let (_, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                        defaultInput: "BuiltInMicrophoneDevice")
+        #expect(manager.isObservingWake == false)
+
+        manager.start()
+        #expect(manager.isObservingWake)
+
+        await manager.shutdown()
+        #expect(manager.isObservingWake == false)
     }
 
     // MARK: - Enforcement is opt-in

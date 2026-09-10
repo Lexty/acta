@@ -86,3 +86,67 @@ func makeTestMicrophoneManager(
                                                              makeClock: { clock }))
     return (directory, clock, manager)
 }
+
+/// Wait for the manager's **own notification path** to produce an inventory satisfying `predicate`.
+///
+/// ⚠️ **The bounded failure path is the point.** A test that pulls `refreshInventory()` itself and then
+/// asserts on the result proves the enumeration works and says nothing about whether the subscription
+/// delivered anything — replace the whole notification body with a no-op and it still passes. This
+/// waits for the delivery instead, and returns `nil` rather than hanging when it never comes.
+@MainActor
+func awaitInventory(_ manager: MicrophoneManager,
+                    timeout: Duration = .seconds(2),
+                    until predicate: @escaping @Sendable (MicrophoneInventory) -> Bool) async
+    -> MicrophoneInventory? {
+    // The stream is taken here, on the main actor; iterating it needs no isolation.
+    let stream = manager.inventories()
+    return await withTaskGroup(of: MicrophoneInventory?.self) { group in
+        group.addTask {
+            for await inventory in stream where predicate(inventory) { return inventory }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(for: timeout)
+            return nil
+        }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+}
+
+/// The enforcement equivalent of `awaitInventory`, with the same bounded failure path.
+@MainActor
+func awaitEnforcement(_ manager: MicrophoneManager,
+                      timeout: Duration = .seconds(2),
+                      until predicate: @escaping @Sendable (MicrophoneEnforcementState) -> Bool) async
+    -> MicrophoneEnforcementState? {
+    let stream = manager.enforcementStates()
+    return await withTaskGroup(of: MicrophoneEnforcementState?.self) { group in
+        group.addTask {
+            for await state in stream where predicate(state) { return state }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(for: timeout)
+            return nil
+        }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+}
+
+/// Occupy the main actor synchronously for `milliseconds`, so no queued task can start.
+///
+/// ⚠️ **A busy wait, deliberately, and the only thing that makes an "it finished before returning"
+/// assertion mean anything.** An unstructured `Task { ... }` created inside a `@MainActor` method
+/// inherits the main actor, so it runs at the *next* suspension — and any incidental `await` in the
+/// code under test, or in the test itself, hands it that suspension and rescues the bug. Blocking the
+/// main actor removes the rescue: whatever has not happened by the time this returns genuinely had not
+/// happened when the awaited call returned. `Task.sleep` would do the opposite of what is needed here.
+@MainActor
+func holdMainActor(milliseconds: Int = 40) {
+    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(milliseconds) * 1_000_000
+    while DispatchTime.now().uptimeNanoseconds < deadline { /* deliberately spinning */ }
+}

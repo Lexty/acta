@@ -514,6 +514,11 @@ The seams end below all of this; the suite proves the decision logic and none of
   the next candidate actually producing audio rather than silence.
 - ***Use now* during a real recording** — that the switch happens, that the segments on both sides of it
   are valid, and that the assembled file is not broken by a format change.
+- **That sleep and wake reconcile.** `MicrophoneManager` now installs `NSWorkspace.didWakeNotification`
+  as the app-lifetime wake source — until this task the reconciler's `wake` trigger had **no production
+  caller at all** and existed only as an endpoint. A test can reach that the source is installed while
+  monitoring and removed on shutdown; nothing in the suite can sleep a Mac, so that the notification
+  arrives and that the world is correctly re-read after a real sleep needs a human.
 - **That the production HAL listeners actually fire.** The observation tests drive the *fake*; they
   establish the contract's shape, not that `CoreAudioDeviceDirectory`'s registrations deliver. Only
   plugging a device in and out on a real Mac shows that — and it is the same gap as

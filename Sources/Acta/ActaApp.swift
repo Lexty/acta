@@ -55,15 +55,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stays `recording`, and up to `segmentSeconds` of audio is lost. Recovery does handle that,
     /// but it exists for crashes, not for a deliberate user action — here the recording must be
     /// honestly finished and assembled.
+    /// ⚠️ **Always `.terminateLater` now, and the ordering inside is the whole point.** Quitting has
+    /// three things to finish and they are not interchangeable:
+    ///
+    /// 1. **Stop writing the system default first.** It is the only part of shutdown that changes state
+    ///    other applications depend on, and it must not still be correcting the default while the user
+    ///    is quitting.
+    /// 2. **Then let a recording finish honestly** — the original reason this method exists. Read-only
+    ///    monitoring stays up across this step: `stopAndWait()` waits for capture and self-check work,
+    ///    not merely for the assembler, and a recording's own device observation is independent of the
+    ///    manager's.
+    /// 3. **Then release the manager's consumers**, awaited, so nothing reads or writes through the
+    ///    directory afterwards.
+    ///
+    /// The idle branch used to return `.terminateNow` immediately, which meant the microphone shutdown
+    /// it had just started never ran at all.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
-            // The HAL listeners are process-lifetime, so the only honest teardown is an explicit one.
-            ControlAPI.shared.microphone.shutdown()
-            guard ControlAPI.shared.state.hasWorkInFlight else { return .terminateNow }
             Task {
-                await ControlAPI.shared.stopAndWait()
+                await ControlAPI.shared.microphone.stopEnforcement()
+                if ControlAPI.shared.state.hasWorkInFlight {
+                    await ControlAPI.shared.stopAndWait()
+                }
+                await ControlAPI.shared.microphone.shutdown()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater

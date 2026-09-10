@@ -36,10 +36,12 @@ public final class ControlAPI {
     /// itself owns nothing of the recorder and the recorder owns nothing of it; `ControlAPI` is the
     /// place they are handed to the same client.
     ///
-    /// ⚠️ Its state is **not** folded into `ControlState`, and that is deliberate for now: `ControlState`
-    /// is projected onto the wire by `WireProjection`, so a field added here is a wire change and a
-    /// protocol version bump. That bump is Task 6 of the microphone plan, done once, with the fixtures
-    /// it invalidates. Until then the menu reads `microphone` directly.
+    /// ⚠️ Its state is **not** folded into `ControlState` yet, and the reason is scheduling, not
+    /// necessity. `WireProjection` selects the fields it projects explicitly, so a runtime-only field on
+    /// `ControlState` would *not* by itself change the wire — the earlier claim that it forced a
+    /// protocol bump was wrong. What is true is that the aggregation and the wire fields belong in one
+    /// change with the fixtures they invalidate, which is Task 6 of the microphone plan. Until then the
+    /// menu reads `microphone` directly.
     public let microphone: MicrophoneManager
 
     /// The production façade. Wraps the menu's controller — see the privacy invariant above.
