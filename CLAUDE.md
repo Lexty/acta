@@ -7,7 +7,8 @@ plan — **`docs/plans/acta.md`**.
 
 ## Language convention (applies to everything)
 
-**English only** across the whole project — no exceptions:
+**English only** across the app and its own docs. One directory is exempt, and only one:
+`tools/` — see "Companion plugins" below. Everything else:
 
 - **UI strings** shown to the user (menu bar, buttons, statuses, errors, notifications) — including
   `NSMicrophoneUsageDescription` in `Resources/Info.plist`, which macOS renders verbatim in the TCC
@@ -15,8 +16,11 @@ plan — **`docs/plans/acta.md`**.
 - **Code**: identifiers, comments, log messages, error text, generated files (e.g. `~/Acta/CLAUDE.md`).
 - **Docs**: `SPEC.md`, `docs/plans/*.md`, `CLAUDE.md`, `.claude/skills/**`, shell scripts, configs
   (`Resources/Info.plist`, `Resources/Acta.entitlements`, `.swiftlint.yml`, `.claude/hooks/**`).
-  Check with `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .` — a grep
-  scoped to `Sources/` alone once let a Russian TCC prompt ship.
+  Check with
+  `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build --exclude-dir=tools .`
+  — a grep scoped to `Sources/` alone once let a Russian TCC prompt ship, so keep it repo-wide;
+  `tools/` is excluded **by name**, not by narrowing the scope, so adding a second exempt
+  directory is a deliberate edit here rather than a side effect.
 - **Git**: commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
   `type(scope): subject` — `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`.
   Subject in imperative mood, lowercase, no trailing period. Body explains *why*, not just *what*.
@@ -194,6 +198,40 @@ distinction is existence, not readability. Both readings of a pass go through
 `RecoveryReport.Counts`, whose `init` defaults nothing: a field added to `Outcome` and forgotten in
 either reading fails to compile instead of going quiet, which is how `retrying` and `lost` once
 reached the log while the other three reached the user.
+
+## Companion plugins (`tools/`)
+
+The app only records. What happens to a recording afterwards ships beside it, as a Claude Code
+plugin, so that handing someone this repository hands them the whole product rather than half of it.
+`.claude-plugin/marketplace.json` at the root makes the repo a marketplace; a recipient runs
+`/plugin marketplace add Lexty/acta` and then `/plugin install acta-notes@acta`.
+
+- `tools/acta-notes/` — the post-processing pipeline: local transcription, diarization, speaker
+  naming, quality gates, summary. `plugin/` is what gets installed, `tests/` is its suite,
+  `PLAN.md` and `FINDINGS-*.md` are its design record.
+
+**Two audiences, two directories, never mixed.** `.claude/skills/` holds skills for *developing*
+Acta (`screencapturekit-audio`, `crash-safe-recording`, …); they load automatically when working in
+this repo and are useless to someone who just wants to process a recording. `tools/*/plugin/` holds
+skills for *using* Acta, installed deliberately. A dev skill must never move under `tools/`, and a
+companion skill must never be dropped into `.claude/skills/` — that would install
+`swiftpm-macos-app-bundle` onto the machine of someone who only wanted meeting notes.
+
+Rules for anything under `tools/`:
+
+- **Russian is allowed here, and only here.** These skills emit Russian by design — the `summary.md`
+  format is Russian, and the trigger phrases a user types are Russian. That is why the language
+  check above excludes `tools/`. It does not license Russian anywhere else.
+- **Python, stdlib only** — no pip, no virtualenv, nothing to install. External binaries (`ffmpeg`,
+  `fluidaudiocli`) are located at runtime and reported by the plugin's own `doctor.py`.
+- Tests run with `make test-skills` from the repo root. They are plain `unittest`, discovered under
+  each plugin's `tests/`. **One test module per script**, and every test module's first import is
+  `_ctx` — `tests/_ctx.py` is the single place that bridges the suite to the scripts under
+  `plugin/skills/*/scripts/`, loading them by file path so stems like `gate`, `merge` and `verify`
+  cannot collide with installed modules.
+- A plugin's suite asserts things about *this* repo — that `marketplace.json` registers it, that the
+  `SKILL_PLUGINS` list in the `Makefile` names it, that this file documents these conventions. Those
+  tests are the reason the section you are reading exists; do not delete it to make them pass.
 
 ## Conventions and rules
 - Environment: **Command Line Tools only**, build via **SwiftPM** (never assume Xcode/xcodebuild).

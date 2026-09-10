@@ -1,0 +1,20 @@
+{
+  "audioFile": "/Users/x/Acta/2026-07-29 Weekly/.acta-notes/system.16k.wav",
+  "mode": "batch",
+  "modelVersion": "v3",
+  "text": "Привет коллеги начнём стендап Дим ты первый",
+  "durationSeconds": 6.4,
+  "processingTimeSeconds": 0.83,
+  "rtfx": 7.71,
+  "confidence": 0.9612,
+  "wordTimings": [
+    { "word": "Привет", "startTime": 0.24, "endTime": 0.72, "confidence": 0.9781 },
+    { "word": "коллеги", "startTime": 0.76, "endTime": 1.28, "confidence": 0.9634 },
+    { "word": "начнём", "startTime": 1.36, "endTime": 1.84, "confidence": 0.9412 },
+    { "word": "стендап", "startTime": 1.88, "endTime": 2.44, "confidence": 0.8873 },
+    { "word": "Дим", "startTime": 3.52, "endTime": 3.8, "confidence": 0.9205 },
+    { "word": "ты", "startTime": 3.84, "endTime": 3.98, "confidence": 0.9744 },
+    { "word": "первый", "startTime": 4.02, "endTime": 4.51, "confidence": 0.9508 }
+  ],
+  "timingsConfirmed": true
+}
