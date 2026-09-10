@@ -489,22 +489,22 @@ honest — not compatibility adapters.
 `controlProtocolSourcesImportOnlyFoundation` is a test; the ScreenCaptureKit and TCC rules are held by
 a human remembering to run `grep`. The new rule gets a test rather than joining the honour system.
 
-- [ ] A test asserting CoreAudio HAL symbols appear only in `CoreAudioDeviceDirectory.swift`
-- [ ] ⚠️ **Do not copy the existing parser unchanged.** It matches `trimmed.hasPrefix("import ")`, so
+- [x] A test asserting CoreAudio HAL symbols appear only in `CoreAudioDeviceDirectory.swift`
+- [x] ⚠️ **Do not copy the existing parser unchanged.** It matches `trimmed.hasPrefix("import ")`, so
       `@preconcurrency import CoreAudio` is invisible to it — and `SCKCaptureSource.swift:5` proves that
       form is in use here. Fix the same hole in the existing
       `controlProtocolSourcesImportOnlyFoundation` while here: today a `@preconcurrency import AppKit`
       under `ActaControlProtocol/` would **pass** it
-- [ ] **Parser fixtures**, so the guard's own correctness is tested rather than assumed: an attributed
+- [x] **Parser fixtures**, so the guard's own correctness is tested rather than assumed: an attributed
       import is caught, and an import named in a comment is ignored
-- [ ] Guard **HAL symbol use**, not only imports — a transitive framework import can expose the API with
+- [x] Guard **HAL symbol use**, not only imports — a transitive framework import can expose the API with
       no `import CoreAudio` line at all
-- [ ] Define precisely: which directories are production, which single file is the allowed adapter, and
+- [x] Define precisely: which directories are production, which single file is the allowed adapter, and
       which HAL API families are guarded. Do **not** forbid unrelated audio buffer types
       (`CMSampleBuffer`, `AudioBufferList` in the writer) merely for belonging to audio frameworks
-- [ ] Match type references, not prose — doc comments legitimately name these APIs. Move the comment
+- [x] Match type references, not prose — doc comments legitimately name these APIs. Move the comment
       rather than contorting the code
-- [ ] Converting the ScreenCaptureKit and TCC rules into tests stays **out of scope**; note the gap in
+- [x] Converting the ScreenCaptureKit and TCC rules into tests stays **out of scope**; note the gap in
       `CLAUDE.md` so the wording stops overstating what is enforced
 
 ### Task 9: The live divergence probe

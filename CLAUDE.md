@@ -326,6 +326,25 @@ reached the log while the other three reached the user.
   recording no one on the machine can see, which the privacy rule forbids. **No test can guard this** — `.shared` reaches for the real `~/Acta`, real TCC and real
   time, so every test injects its own controller and none may touch `.shared`. It is a review-only
   invariant.
+- **Four confinements, and only two are tests — the wording used to overstate this.**
+  ⚠️ `controlProtocolSourcesImportOnlyFoundation` and `SourceConfinementTests` are real tests and fail
+  the suite. The **ScreenCaptureKit and TCC rules are not**: they are held by a human remembering to run
+  a `grep`, and calling all of them "grep-enforceable" read as though something checked them. Converting
+  those two is deliberately still out of scope; this line exists so the gap is visible rather than
+  implied away.
+  ⚠️ The reader behind both real guards is shared (`SourceConfinement`) and is **itself tested**
+  against fixtures. It has to be: the first version matched `trimmed.hasPrefix("import ")`, so
+  `@preconcurrency import AppKit` under `ActaControlProtocol/` would have **passed** it — and that form
+  is in use here (`SCKCaptureSource.swift:5`), so the hole was reachable, not theoretical. A guard whose
+  reader has a hole is worse than no guard, because it is believed.
+- **The fourth: the CoreAudio HAL lives only in `CoreAudioDeviceDirectory.swift`.** Guarded by **symbol
+  use**, not by imports — a transitive framework import exposes `AudioObject*` with no `import
+  CoreAudio` line at all. Deliberately narrow: it covers the object/property API and its `kAudio*`
+  constants and nothing else, because forbidding `CMSampleBuffer` or `AudioBufferList` for belonging to
+  an audio framework would make it a rule people route around. Comments are stripped, so a doc comment
+  may name these APIs; move the comment rather than contorting the code. Task 9's live probe is outside
+  the production targets by design — it must import `AVFoundation` — which is why the guard scans the
+  four production targets rather than keeping an exemption list.
 - **Three confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
   ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
   `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,

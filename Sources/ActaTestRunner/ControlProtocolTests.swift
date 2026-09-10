@@ -430,26 +430,15 @@ func controlProtocolSourcesImportOnlyFoundation() throws {
     // reason this test exists alongside the package graph. And a relative path makes the guard a claim
     // about the runner's working directory: this suite is the only thing standing behind the rule, so it
     // resolves the target from its own source location instead.
-    let root = URL(fileURLWithPath: #filePath)       // …/Sources/ActaTestRunner/ControlProtocolTests.swift
-        .deletingLastPathComponent()                 // …/Sources/ActaTestRunner
-        .deletingLastPathComponent()                 // …/Sources
-        .appendingPathComponent("ActaControlProtocol")
-    let enumerator = try #require(FileManager.default.enumerator(at: root,
-                                                                includingPropertiesForKeys: nil))
-    let files = enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+    // ⚠️ **The reader is shared with the CoreAudio guard now, and this one had the hole.** It matched
+    // `trimmed.hasPrefix("import ")`, so `@preconcurrency import AppKit` under `ActaControlProtocol/`
+    // would have **passed** it — and that form is in use elsewhere in this codebase, so the hole was
+    // reachable rather than theoretical. `SourceConfinementTests` drives the reader against fixtures.
+    let root = SourceConfinement.sourcesRoot.appendingPathComponent("ActaControlProtocol")
+    let files = SourceConfinement.swiftFiles(under: root)
     #expect(!files.isEmpty)
     for file in files {
-        let text = try String(contentsOf: file, encoding: .utf8)
-        let imported = text.split(separator: "\n").compactMap { line -> String? in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("import ") else { return nil }
-            // `import struct Foundation.Data` — drop the optional kind keyword, keep the module.
-            let rest = trimmed.dropFirst("import ".count).trimmingCharacters(in: .whitespaces)
-            let kinds = ["struct", "class", "enum", "protocol", "typealias", "func", "var", "let"]
-            let words = rest.split(separator: " ").map(String.init)
-            let module = kinds.contains(words.first ?? "") ? words.dropFirst().first ?? "" : words.first ?? ""
-            return module.split(separator: ".").first.map(String.init)
-        }
+        let imported = SourceConfinement.importedModules(in: try String(contentsOf: file, encoding: .utf8))
         #expect(Set(imported) == ["Foundation"],
                 "\(file.lastPathComponent) must import Foundation and nothing else, got \(imported)")
     }
