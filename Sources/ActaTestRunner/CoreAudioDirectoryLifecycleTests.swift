@@ -156,11 +156,11 @@ func theLastOwnerMayBeReleasedFromTheHALsOwnQueue() {
     // deinit comment makes, and this is the arrangement it claims to survive.
     let hal = FakeAudioHAL()
     hal.setDevices([(id: 9, uid: "USBAudioDevice_UID")])
-    let halQueue = DispatchQueue(label: "test.hal.domain")
 
     weak var weakDirectory: CoreAudioDeviceDirectory?
     final class Box: @unchecked Sendable { var directory: CoreAudioDeviceDirectory? }
     let box = Box()
+    var halQueue: DispatchQueue?
 
     do {
         let directory = CoreAudioDeviceDirectory(hal: hal)
@@ -168,12 +168,16 @@ func theLastOwnerMayBeReleasedFromTheHALsOwnQueue() {
         guard case .observing(let token) = directory.observe({ _ in }) else {
             Issue.record("expected a subscription"); return
         }
+        // ⚠️ The **actual** queue the registration was made on, not a freshly made one with a
+        // HAL-sounding name. A stand-in queue tests the shape of the arrangement; this tests the
+        // arrangement.
+        halQueue = hal.savedDelivery(for: .deviceList)?.queue
         token.cancel()
         box.directory = directory
     }
     #expect(weakDirectory != nil, "the box should still hold the only reference")
 
-    // The final release happens inside a block on another queue, standing in for the HAL's.
+    guard let halQueue else { Issue.record("no registration queue was captured"); return }
     halQueue.sync { box.directory = nil }
 
     #expect(weakDirectory == nil)
@@ -208,8 +212,10 @@ func aDeviceReplacedUnderTheSameNumericIDRetiresTheOldListener() {
             if case .readinessChanged(let uid) = change { return uid }
             return nil
         }
-        #expect(!labels.contains("DeviceA_UID"), "a readiness change was announced under the departed device's identity")
-        #expect(labels.allSatisfy { $0 == "DeviceB_UID" })
+        // ⚠️ An **exact** sequence, not `allSatisfy` plus `!contains`. Both of those are true of an
+        // empty array, so the pair of them would have passed a build that announced nothing at all —
+        // the same vacuity that has already bitten this file once.
+        #expect(labels == ["DeviceB_UID"], "expected exactly one announcement, under B's identity")
     }
 }
 
@@ -235,4 +241,89 @@ func aRefusedRemovalIsReportedRatherThanPassingForACleanTeardown() {
     // and it belongs to the HAL, not to the bookkeeping.
     #expect(hal.liveWatches == [.deviceAlive(4)])
     #expect(Set(hal.removed) == Set([.deviceList, .defaultInput, .deviceStreams(4)]))
+}
+
+@Test
+func aSavedDeliveryFromAReplacedRegistrationAnnouncesNothing() {
+    // ⚠️ The narrow window the coordinator guard exists for: A's readiness delivery is captured while
+    // A is live, A is then replaced by B under the same numeric id, and the *saved* A delivery is
+    // executed afterwards — which is what a HAL callback already in flight during a replacement looks
+    // like. Without the guard it announces A, and everything above believes the departed device just
+    // changed state.
+    let hal = FakeAudioHAL()
+    hal.setDevices([(id: 42, uid: "DeviceA_UID")])
+    let directory = CoreAudioDeviceDirectory(hal: hal)
+
+    let recorder = Recorder()
+    guard case .observing(let token) = directory.observe({ recorder.append($0) }) else {
+        Issue.record("expected a subscription"); return
+    }
+    withExtendedLifetime(token) {
+        guard let savedA = hal.savedDelivery(for: .deviceAlive(42)) else {
+            Issue.record("no readiness delivery was captured for A"); return
+        }
+
+        hal.setDevices([(id: 42, uid: "DeviceB_UID")])
+        hal.fire(.deviceList)
+        directory.waitForPendingDeliveries()
+
+        savedA.queue.sync { savedA.fire() }      // the in-flight callback from the replaced registration
+        directory.waitForPendingDeliveries()
+        hal.fire(.deviceAlive(42))               // and then a genuine one from B
+        directory.waitForPendingDeliveries()
+
+        let labels: [String] = recorder.changes.compactMap { change in
+            if case .readinessChanged(let uid) = change { return uid }
+            return nil
+        }
+        #expect(labels == ["DeviceB_UID"], "the saved delivery from A's registration announced something")
+    }
+}
+
+@Test
+func workQueuedWhileAliveDoesNothingOnceTheOwnerIsGone() {
+    // ⚠️ The case a plain drop cannot reach: work genuinely **queued** on the coordinator while the
+    // directory was alive, held there by a latch, with the owner released before it runs. Draining it
+    // needs a handle to the queue that outlives the directory, which is why the queue is captured up
+    // front — asking the directory to drain would itself require a live owner and prove nothing.
+    let hal = FakeAudioHAL()
+    hal.setDevices([(id: 6, uid: "USBAudioDevice_UID")])
+    let recorder = Recorder()
+
+    weak var weakDirectory: CoreAudioDeviceDirectory?
+    var coordinator: DispatchQueue?
+    let latch = DispatchSemaphore(value: 0)
+    let blocked = DispatchSemaphore(value: 0)
+    // ⚠️ The token deliberately **outlives** the directory. Cancelling — or letting it deinit — while
+    // the coordinator is latched would deadlock, since cancellation runs there; and dropping the
+    // subscription before firing would make the test vacuous, because a callback with no subscriber
+    // proves nothing. Its owner reference is weak, so once the directory is gone its cancellation is a
+    // no-op.
+    var token: (any AudioDeviceObservation)?
+
+    do {
+        let directory = CoreAudioDeviceDirectory(hal: hal)
+        weakDirectory = directory
+        coordinator = directory.coordinatorQueueForTesting
+        guard case .observing(let observation) = directory.observe({ recorder.append($0) }) else {
+            Issue.record("expected a subscription"); return
+        }
+        token = observation
+        // Occupy the coordinator so the callback's work is queued behind the latch rather than run.
+        coordinator?.async { blocked.signal(); latch.wait() }
+        blocked.wait()
+        hal.fire(.deviceList)   // enqueues the coordinator hop behind the blocked block
+    }
+
+    // The owner is released while its queued work is still parked.
+    #expect(weakDirectory == nil, "the directory must be gone before the queued work runs")
+    let deliveredBefore = recorder.changes.count
+    let addedBefore = hal.added.count
+
+    latch.signal()
+    coordinator?.sync {}   // drain through the retained handle, not through the dead directory
+
+    #expect(recorder.changes.count == deliveredBefore, "queued work delivered after its owner died")
+    #expect(hal.added.count == addedBefore, "queued work registered something after its owner died")
+    _ = token
 }

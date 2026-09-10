@@ -117,10 +117,15 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         // object. There is therefore no concurrent reader left to race. Scheduling the removal instead
         // would be worse, not better: a queued job capturing `self` weakly would find nothing and skip
         // it, leaving registered blocks with no cleanup path at all.
-        // ⚠️ Best effort, and it has to be: a removal the HAL refuses cannot be retried from here —
-        // there is no `self` left to retry with — and `deinit` may not throw. Failures are logged, not
-        // swallowed silently, because a listener that outlives its owner keeps firing against freed
-        // state and the log is the only trace that will exist.
+        // ⚠️ Best effort, and it has to be: there is no `self` left to retry with and `deinit` may not
+        // throw. Failures are logged rather than swallowed, because a listener the HAL declined to
+        // unregister is still installed and still firing, and the log is the only trace that will exist.
+        //
+        // Two things this comment used to overclaim, corrected. A callback that survives this teardown
+        // does **not** dereference freed state: every one of them holds `self` weakly, so the load
+        // simply fails and the callback does nothing. And "the caller cannot retry" is a *policy* for a
+        // live owner, not a property of the API — `remove` returns a result precisely so a future caller
+        // could decide otherwise.
         for registration in systemRegistrations { report(hal.remove(registration)) }
         for listener in readinessListeners.values {
             for registration in listener.registrations { report(hal.remove(registration)) }
@@ -134,7 +139,7 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         return coordinatorQueue.sync(execute: body)
     }
 
-    /// Block until everything already handed to the coordinator has run.
+    /// Block until work **already enqueued** on the coordinator has run.
     ///
     /// ⚠️ **A test affordance, and deliberately not a public one.** HAL callbacks hop onto the
     /// coordinator asynchronously by design — the HAL thread must never wait on our work — so a test
@@ -142,7 +147,23 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     /// The alternative is polling with a deadline, which turns a deterministic question into a flaky
     /// one; this suite has already paid for that lesson once. It adds no behaviour: production never
     /// calls it, and it cannot make a delivery happen that was not already scheduled.
-    func waitForPendingDeliveries() { coordinatorQueue.sync {} }
+    ///
+    /// ⚠️ **Two limits, stated because the name promises more than it delivers.** First, the caller must
+    /// be **off** the coordinator: this is a bare `sync`, so calling it from inside a subscriber's
+    /// handler deadlocks. It is deliberately not `onCoordinator {}` — that variant would run inline and
+    /// return having drained nothing, which is worse than a deadlock because it looks like it worked.
+    /// Second, it drains what is **already** queued and nothing else: not future HAL deliveries, and not
+    /// work that the drained work itself enqueues.
+    func waitForPendingDeliveries() {
+        precondition(DispatchQueue.getSpecific(key: coordinatorKey) != ObjectIdentifier(self),
+                     "waitForPendingDeliveries() must be called off the coordinator")
+        coordinatorQueue.sync {}
+    }
+
+    /// The coordinator queue itself, so a test can retain a handle to it **across the owner's death** —
+    /// the only way to drain work that was queued while the directory was alive and assert that it does
+    /// nothing now that the directory is gone. Read-only, and production never touches it.
+    var coordinatorQueueForTesting: DispatchQueue { coordinatorQueue }
 
     // MARK: - Observation
 
