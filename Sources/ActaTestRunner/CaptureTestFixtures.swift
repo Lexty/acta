@@ -219,6 +219,12 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     func releaseHeldStart() { holdGate.release() }
     private let holdGate = StartGate()
 
+    /// Hold the **next** `stop` until released — the other half, and the one that lets a test put a
+    /// restart in flight while it is still tearing the old capture down.
+    func holdNextStop() { stopGate.arm() }
+    func releaseHeldStop() { stopGate.release() }
+    private let stopGate = StartGate()
+
     final class StartGate: @unchecked Sendable {
         private let lock = NSLock()
         private var armed = false
@@ -267,6 +273,7 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     }
 
     func stop() async {
+        await stopGate.wait()
         enterLifecycle()
         defer { leaveLifecycle() }
         await Task.yield()

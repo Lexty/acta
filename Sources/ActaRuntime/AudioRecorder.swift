@@ -299,8 +299,18 @@ public final class AudioRecorder: @unchecked Sendable {
     /// that is what re-checks the permissions.
     /// - Parameter reason: who asked, and therefore who reports the outcome. The default is the
     ///   watchdog, which is the caller that cannot pass one — `SelfCheck` knows nothing of this.
-    public func restart(reason: RestartReason = .watchdog) async throws {
-        try await serialized { try await self.performRestart(reason: reason) }
+    /// - Parameter expecting: the capture generation this restart is **about**. Checked inside the
+    ///   serialized body, immediately before the source is torn down.
+    ///
+    ///   ⚠️ **Not the same as checking before calling, and that gap is a real defect.** A user's
+    ///   restart can already own the lifecycle while it is still stopping the old source: the
+    ///   generation is unchanged when a loss watch looks, so its restart is admitted and queues behind
+    ///   the user's — and by the time it runs, it tears down the healthy capture that replaced the one
+    ///   it was about. An actor-side check followed by an unconditional queued operation closes
+    ///   nothing.
+    public func restart(reason: RestartReason = .watchdog,
+                        expecting: UInt64? = nil) async throws {
+        try await serialized { try await self.performRestart(reason: reason, expecting: expecting) }
     }
 
     /// Why a restart is happening. ⚠️ **Carried so that exactly one owner reports it, with the true
@@ -322,7 +332,12 @@ public final class AudioRecorder: @unchecked Sendable {
     /// cannot tell why has been handed a mystery.
     public var onDeviceAdopted: (@Sendable (AudioInputDevice, AudioInputDevice) -> Void)?
 
-    private func performRestart(reason: RestartReason) async throws {
+    private func performRestart(reason: RestartReason, expecting: UInt64?) async throws {
+        // ⚠️ Checked **here**, holding the lifecycle, before anything is torn down.
+        if let expecting, captureIdentity.generation != expecting {
+            log.info("Skipping a restart for a capture that has already been replaced")
+            throw StartupFailure.captureSuperseded
+        }
         // ⚠️ Checked at **admission**, before the source is torn down, so a late switch cannot even
         // interrupt a finished recording — never mind reopen one.
         guard !isStopped else {

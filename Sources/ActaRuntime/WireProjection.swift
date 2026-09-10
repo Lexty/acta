@@ -172,6 +172,7 @@ extension WireControlState.Message {
             case .preferredMicrophoneAbsent: return WireMessageCode.startupPreferredMicrophoneAbsent
             case .noMicrophoneOnThisMac: return WireMessageCode.startupNoMicrophoneOnThisMac
             case .microphoneUnreadable: return WireMessageCode.startupMicrophoneUnreadable
+            case .captureSuperseded: return WireMessageCode.startupCaptureSuperseded
             }
         case .startFailed:
             return WireMessageCode.startFailed

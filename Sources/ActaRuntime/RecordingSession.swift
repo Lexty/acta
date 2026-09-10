@@ -232,10 +232,14 @@ public final class RecordingSession: @unchecked Sendable {
                 self?.onMicrophoneChanged?(.microphoneObservationDegraded(reason: reason))
                 return
             }
-            // Read where the change was delivered: by the time the hop lands the device may be back.
+            // ⚠️ **Both read here, at delivery.** Reading the snapshot early and the capture identity
+            // late labels an old event with a newer capture's generation — so a departure that happened
+            // to the AirPods passes a check against the USB capture that replaced them, and tears it
+            // down. Attribution has to travel with the observation, not be stamped on at consumption.
             let snapshot = deviceReader.enumerateInputDevices()
+            let identity = self?.recorder.captureIdentity
             let watch = self?.lossWatch
-            Task { await watch?.observe(snapshot) }
+            Task { await watch?.observe(snapshot, identity: identity) }
         }) {
         case .observing(let subscription):
             deviceObservation = subscription
@@ -423,10 +427,12 @@ actor MicrophoneLossWatch {
     /// deliveries are queued ahead of the driver: calling `observe` twice from a test gives the driver a
     /// chance to run in between, and the test then passes against the bug it was written for.
     func observe(_ snapshots: [DeviceEnumeration]) {
-        for snapshot in snapshots { observe(snapshot) }
+        for snapshot in snapshots { observe(snapshot, identity: nil) }
     }
 
-    func observe(_ snapshot: DeviceEnumeration) {
+    /// - Parameter identity: the capture that was current **when this observation was delivered**.
+    ///   `nil` means "read it now", which is right only for an observation the actor makes itself.
+    func observe(_ snapshot: DeviceEnumeration, identity: AudioRecorder.CaptureIdentity? = nil) {
         guard !stopped else { return }
         // ⚠️ Evaluated **here**, against the snapshot that was delivered and the capture that was
         // current — not later, against whichever snapshot and whichever capture happen to exist then.
@@ -435,9 +441,13 @@ actor MicrophoneLossWatch {
         // the other half of the fix: a loss delivered while the new source is up but `start()` has not
         // returned would otherwise find no device to test against and vanish, and that is precisely the
         // window a recording most needs covered.
-        let identity = recorder.captureIdentity
-        if let device = identity.device, Self.isProvedUnusable(device, in: snapshot) {
-            lossProved = identity
+        let observed = identity ?? recorder.captureIdentity
+        if let device = observed.device, Self.isProvedUnusable(device, in: snapshot) {
+            // ⚠️ **A stale observation never replaces a newer pending fact.** Two losses about two
+            // different captures are not interchangeable, and the older one must not win by arriving
+            // later.
+            if let pending = lossProved, pending.generation > observed.generation { return }
+            lossProved = observed
         }
         guard lossProved != nil, driver == nil, !driverGate else { return }
         driver = Task { await self.drain() }
@@ -462,6 +472,24 @@ actor MicrophoneLossWatch {
         await running?.value
         driver = nil
     }
+
+    /// Occupy the actor until released, so a queued `observe` cannot run.
+    ///
+    /// ⚠️ Test-facing, and it is the only way to force the ordering that matters: a snapshot read at
+    /// delivery whose actor work lands **after** something else has replaced the capture. Holding the
+    /// driver is not the same thing — that stops the driver, not the entry.
+    func occupy(_ park: @Sendable () async -> Void) async {
+        await park()
+    }
+
+    /// Whether the driver has actually reached its restart.
+    ///
+    /// ⚠️ **Not "the fact was consumed"**, which was my first version and is too weak: that is true the
+    /// instant `drain` picks the fact up, including when the actor-side guard then rejects it — so a
+    /// test could assert the branch was reached while nothing was ever queued on the lifecycle, and its
+    /// negative control passed.
+    func hasEnteredRestart() -> Bool { enteredRestart }
+    private var enteredRestart = false
 
     /// Hold the driver before it can act, so a test can queue a loss and then let something else
     /// happen first.
@@ -496,7 +524,10 @@ actor MicrophoneLossWatch {
         let pinned = device
 
         do {
-            try await recorder.restart(reason: .deviceLoss)
+            // ⚠️ The generation goes **into** the lifecycle operation: the check above can go stale
+            // between here and admission, because a user's restart may already own the queue.
+            enteredRestart = true
+            try await recorder.restart(reason: .deviceLoss, expecting: loss.generation)
         } catch {
             // ⚠️ Checked **after** the await: the recording may have stopped while this was running, and
             // a stopped recording must not be handed a fatal failure it did not experience.

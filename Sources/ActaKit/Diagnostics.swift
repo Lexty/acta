@@ -41,6 +41,12 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
     /// The devices could not be described well enough to choose one. ⚠️ Transient, and must not read
     /// like a setting the user got wrong.
     case microphoneUnreadable
+    /// A restart was admitted for a capture that has since been replaced.
+    ///
+    /// ⚠️ Not a failure of anything: the newer capture is healthy, and this is the older request being
+    /// turned away at the lifecycle boundary. It exists so that a caller which believed it was
+    /// recovering something is told it did not, instead of being told it succeeded.
+    case captureSuperseded
 
     /// Why no microphone could be resolved, kept distinct all the way to the user.
     ///
@@ -84,6 +90,8 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
             return "No microphone is available on this Mac."
         case .microphoneUnreadable:
             return "Could not read the audio devices. Try starting the recording again."
+        case .captureSuperseded:
+            return "That microphone change no longer applies."
         }
     }
 }
@@ -281,7 +289,8 @@ public enum SelfDiagnosis {
             // A restart recreates both the stream and the segment — it heals a stalled stream as well
             // as a one-off write failure.
             return restartAttemptsLeft > 0 ? .restartStream : .reportError(failure)
-        case .recordingAlreadyStopped, .preferredMicrophoneAbsent, .noMicrophoneOnThisMac:
+        case .recordingAlreadyStopped, .preferredMicrophoneAbsent, .noMicrophoneOnThisMac,
+             .captureSuperseded:
             // None of these is healed by bringing the stream up again: the answer is a device or a
             // choice, not a retry.
             return .reportError(failure)

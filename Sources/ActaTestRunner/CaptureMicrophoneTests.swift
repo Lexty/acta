@@ -445,12 +445,13 @@ struct CaptureMicrophoneTests {
 /// registry on `MicrophoneManager`, because cancelling a token fences the directory callback and does
 /// not cancel the work that callback has already queued, and only the owner can drain that.
 ///
-/// ⚠️ **Both are skipped by default, visibly, and they pass when run**: `ACTA_SLOW_TESTS=1 bash
-/// Scripts/test.sh`. Each drives a whole `RecordingSession`, which takes the suite from 4 s to 63 s and
-/// — measured over three runs, each failing a *different* test — makes the gate unreliable. A gate
-/// nobody trusts stops being a gate. The cost itself is not understood: it is flat in the amount of
-/// audio and survives freezing the clock before the assembly, which is the same signature as the
-/// format switch, and it is recorded in `docs/backlog/slow-non-48k-segment-writing.md`.
+/// ⚠️ **These are in the mandatory gate, and the reason they briefly were not is worth recording.** I
+/// measured them at about a minute each, concluded a finalisation stall, and put them behind an opt-in
+/// flag — twice. The actual cause was that this suite's closing brace sat **above** them, so five tests
+/// including these were at file scope and never serialized at all; the runner said so plainly, "2 tests
+/// in 0 suites", and I did not read it. Moving one brace put the whole suite at 5.3 s. A peer review
+/// measured it; I had asserted "already serialized, so serializing cannot help" without checking where
+/// the suite actually ended.
 @Suite("Recording-owned microphone loss", .serialized)
 struct RecordingMicrophoneLossTests {
     /// ⚠️ **The watchdog is not a substitute, and believing it was is why this was missing.**
@@ -565,7 +566,6 @@ struct RecordingMicrophoneLossTests {
         clock.freeze()
         _ = await session.stop()
     }
-}
 
     /// ⚠️ **Unusable is not only absent.** A device can stay listed and stop being alive, or lose its
     /// input channels — an observer that only asks "is it in the list" never learns, and the recording
@@ -666,27 +666,11 @@ struct RecordingMicrophoneLossTests {
         }
     }
 
-    /// ⚠️ **Both are skipped by default and they pass when run**: `ACTA_SLOW_TESTS=1 bash
-    /// Scripts/test.sh`. Each costs about thirty seconds and I did not find why. What is known: the
-    /// only 30-second constant in this code is `SegmentWriter.finishTimeoutSeconds`, the cap
-    /// `finish()` waits for pending finalisations on stop, so `stop()` is timing out in both; and what
-    /// these two do that the other loss tests do not is an explicit `switchMicrophone`, which rotates a
-    /// segment mid-recording. Freezing the clock before the switch, and giving the post-switch segment
-    /// audio, both changed nothing.
-    ///
-    /// ⚠️ **This is a regression against something I argued three commits ago** — that tests behind an
-    /// opt-in flag are the edge of the honour system this project avoids, not a place to settle. It is
-    /// the third instance of the same 30-second signature, and the honest reading is that the
-    /// finalisation wait in the backlog is a product concern I keep working around instead of chasing.
-    /// The next person here should chase it rather than add a fourth.
     /// ⚠️ **A pending loss belongs to the capture it was about.** Queue "the AirPods are gone" behind an
     /// explicit switch to a USB microphone and an unscoped flag tears the healthy USB capture down for a
     /// device nobody is using — breaking "a healthy capture is never preempted except by *Use now*",
     /// with the gap and restart-failure risk that rule exists to avoid.
-    @Test("a pending loss does not preempt the capture that replaced it",
-          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
-                   "costs ~30s each on an unexplained finalisation wait; run with ACTA_SLOW_TESTS=1"),
-    )
+    @Test("a pending loss does not preempt the capture that replaced it",)
     @available(macOS 15.0, *)
     func aPendingLossDoesNotPreemptItsReplacement() async throws {
         try await withLossHarness { devices, source, resolver, session, _, clock in
@@ -724,10 +708,7 @@ struct RecordingMicrophoneLossTests {
     /// ⚠️ **The same-uid variant, which a uid comparison cannot tell apart.** A device that disconnects
     /// and reconnects has the same identity and a different capture, so only a generation distinguishes
     /// "the capture that lost this device" from "the capture that just opened it again".
-    @Test("a pending loss does not preempt a capture reopened on the same device",
-          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
-                   "costs ~30s each on an unexplained finalisation wait; run with ACTA_SLOW_TESTS=1"),
-    )
+    @Test("a pending loss does not preempt a capture reopened on the same device",)
     @available(macOS 15.0, *)
     func aPendingLossDoesNotPreemptTheSameDeviceReopened() async throws {
         try await withLossHarness { devices, source, resolver, session, _, clock in
@@ -755,6 +736,65 @@ struct RecordingMicrophoneLossTests {
                     "a stale loss restarted a capture reopened on the same device")
         }
     }
+
+    /// ⚠️ **The check has to run where the restart is *admitted*, not where the fact is recorded.** A
+    /// user's restart can already own the lifecycle while it is still stopping the old source: the
+    /// generation is unchanged when the loss watch looks, so its restart is admitted and queues behind
+    /// the user's — and by the time it runs it tears down the healthy capture that replaced the one it
+    /// was about. An actor-side check followed by an unconditional queued operation closes nothing.
+    ///
+    /// Driven against `MicrophoneLossWatch` directly, with a stop-gated source, because the ordering is
+    /// the property: through a whole session the scheduler picks the order and the test passes against
+    /// the bug. My two previous attempts did exactly that.
+    @Test("a loss restart queued behind a user switch is refused at admission")
+    @available(macOS 15.0, *)
+    func aQueuedLossRestartIsRefusedAtAdmission() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-admit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            let source = FakeCaptureSource()
+            let resolver = FakeCaptureMicrophoneResolver(.pinned(.airPods(), alternatives: []))
+            let recorder = AudioRecorder(directory: directory, segmentSeconds: 60,
+                                         source: source, permissions: FakePermissions(),
+                                         microphone: resolver)
+            try await recorder.start()
+            let watch = MicrophoneLossWatch(recorder: recorder)
+            await watch.install(report: { _ in }, fatal: { _ in })
+
+            // The user's restart takes the lifecycle and parks inside the teardown of the old capture,
+            // so the generation has not advanced yet.
+            source.holdNextStop()
+            resolver.set(.pinned(.usbMic(), alternatives: []))
+            let switching = Task { try await recorder.restart(reason: .userSwitch) }
+            _ = await awaitCondition { source.isStreaming == false || source.stopCount >= 1 }
+
+            await watch.observe(.devices([.builtInMic()], uninspectable: []))
+            // ⚠️ Asserted, not assumed: the driver must have consumed its fact and be waiting on the
+            // lifecycle. Without this the test can pass by never reaching the branch at all.
+            var reached = false
+            for _ in 0 ..< 2000 where !reached {
+                reached = await watch.hasEnteredRestart()
+                if !reached { try? await Task.sleep(for: .milliseconds(1)) }
+            }
+            #expect(reached, "the loss driver never reached its restart — the branch under test was not exercised")
+
+            source.releaseHeldStop()
+            try await switching.value
+
+            // ⚠️ **Waited for, not yielded at.** A queued restart is an async lifecycle operation; a
+            // fixed number of yields can finish before it does, and the test then passes because it
+            // looked too early rather than because nothing happened.
+            let preempted = await awaitCondition { source.startedMicrophoneIDs.count > 2 }
+            #expect(preempted == false,
+                    "a queued loss restart tore down the capture that replaced it")
+            await watch.stop()
+            await recorder.stop()
+        }
+    }
+
+}
 
 /// A `@Sendable` sink for the messages a session reports.
 final class ReportedMessages: @unchecked Sendable {

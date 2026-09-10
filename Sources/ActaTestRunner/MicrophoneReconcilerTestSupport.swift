@@ -258,3 +258,36 @@ final class FakeCaptureMicrophoneResolver: CaptureMicrophoneResolving, @unchecke
         return resolution
     }
 }
+
+/// A barrier a test can park an actor on and release later.
+///
+/// ⚠️ It exists because two of the loss-watch properties are **orderings**, and a test that cannot pin
+/// the order does not reach the branch it is about — mine passed twice against the bugs they were
+/// written for before this existed.
+final class TestBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = false
+    private var entered = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Whether something is parked on it right now.
+    var isEntered: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+
+    func release() {
+        lock.lock()
+        open = true
+        let waiting = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for continuation in waiting { continuation.resume() }
+    }
+
+    func wait() async {
+        let shouldPark: Bool = { lock.lock(); defer { lock.unlock() }; entered = true; return !open }()
+        guard shouldPark else { return }
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if open { lock.unlock(); continuation.resume() } else { waiters.append(continuation); lock.unlock() }
+        }
+    }
+}

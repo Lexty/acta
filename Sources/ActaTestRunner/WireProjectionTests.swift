@@ -194,6 +194,7 @@ private let failureCodes: [(ControlFailure.Category, String)] = [
     (.startup(.preferredMicrophoneAbsent), "startup_preferred_microphone_absent"),
     (.startup(.noMicrophoneOnThisMac), "startup_no_microphone_on_this_mac"),
     (.startup(.microphoneUnreadable), "startup_microphone_unreadable"),
+    (.startup(.captureSuperseded), "startup_capture_superseded"),
     (.startFailed, "start_failed"),
     (.assemblyFailed(ffmpegMissing: false), "assembly_failed"),
     (.assemblyFailed(ffmpegMissing: true), "assembly_failed_ffmpeg_missing"),

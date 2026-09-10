@@ -49,36 +49,26 @@ of them is optional any more.
    checking.
 3. Sampling did not yield usable thread states, so no exact executor/AVFoundation cycle is proven.
 
-## A third instance, and this one is not parallelism
+## The "third instance" was my own misplaced brace
 
-Two later tests — `aPendingLossDoesNotPreemptItsReplacement` and its same-uid variant — cost about
-**thirty seconds each, serialized, on an otherwise idle machine**. Serializing cannot help: they are
-already in a serialized suite.
+I recorded a section here claiming a third instance of the stall that was "not parallelism": two loss
+tests costing thirty seconds each inside an already-serialized suite. **That was wrong in its premise.**
+`RecordingMicrophoneLossTests`' closing brace sat *above* five of its tests, so those tests — including
+both new ones — were at **file scope and never serialized at all**. The runner said so in as many
+words, `2 tests in 0 suites`, and I did not read it.
 
-What is known:
+Moving one brace and removing the two opt-in guards: the full suite runs in **5.3 s** with every test
+mandatory, and no `pendingWrites` wait longer than a second. Measured independently by the review and
+reproduced here.
 
-- The only 30-second constant in this code is `SegmentWriter.finishTimeoutSeconds`, the cap `finish()`
-  waits for pending finalisations on stop. So `stop()` is timing out in both.
-- What these two do that the other loss tests do not is an explicit `switchMicrophone`, which rotates a
-  segment mid-recording through `finishAndAdvance()`.
-- Freezing the clock before the switch (stopping emission) changed nothing. Giving the post-switch
-  segment audio changed nothing.
+So there are **no** tests behind an opt-in flag now, and my assertion that "they are already in a
+serialized suite, so serializing cannot help" was an assumption about where the suite ended rather
+than a measurement.
 
-⚠️ **This matters beyond the tests.** `finish()` runs inside `stop()`, so if a mid-recording rotation
-can leave `pendingWrites` unbalanced, a real recording that was switched mid-way sits in "saving" for
-thirty seconds per track before its file appears — a user-visible stall on the same wait that has now
-interfered three separate times.
-
-⚠️ It is **not** established that this reproduces outside the test fixtures, and after a review already
-misattributed a sandbox artifact to this code, it is not being called a shipping defect until it is.
-
-## Chase it, do not route around it
-
-Three tests now sit behind `ACTA_SLOW_TESTS` because of this wait. I argued three commits earlier that
-a flag is the edge of the honour system this project avoids rather than a place to settle — and then
-added two more. The instrumentation that would answer it is a log line in `finalizeCurrent` and in
-`finishWriting`'s completion: minutes of work. Every time I have chosen to route around it instead, it
-has come back.
+What the review *did* measure, and what stays open, is item 1 above: in a genuinely parallel full run,
+multiple writers hit the 30-second `pendingWrites` timeout. That is real and unexplained. It is
+**not** established that a single recording switched mid-way stalls — `finishAndAdvance` does not wait
+on `pendingWrites` at all, which is another thing I asserted without reading it.
 
 ## The lesson worth keeping
 
