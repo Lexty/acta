@@ -19,17 +19,27 @@ public struct MicrophoneWiring: Sendable {
     public var makeDirectory: @Sendable () -> any AudioDeviceDirectory
     /// What the reconciler measures its verification deadline and conflict window against.
     public var makeClock: @Sendable () -> any SelfCheckClock
+    /// Where `NSWorkspace.didWakeNotification` is posted.
+    ///
+    /// ⚠️ **Injected because the handler is testable and I claimed it was not.** A synthetic post
+    /// exercises it perfectly well — what a synthetic post must not do is reach a *different* manager
+    /// running in a parallel test, which is what posting into the real workspace centre would allow.
+    /// Only real OS sleep/wake stays manual.
+    public var makeWakeCenter: @Sendable () -> NotificationCenter
 
     public init(makeDirectory: @escaping @Sendable () -> any AudioDeviceDirectory,
-                makeClock: @escaping @Sendable () -> any SelfCheckClock) {
+                makeClock: @escaping @Sendable () -> any SelfCheckClock,
+                makeWakeCenter: @escaping @Sendable () -> NotificationCenter) {
         self.makeDirectory = makeDirectory
         self.makeClock = makeClock
+        self.makeWakeCenter = makeWakeCenter
     }
 
-    /// The production wiring: the real HAL, real time.
+    /// The production wiring: the real HAL, real time, the real workspace notification centre.
     public static let live = MicrophoneWiring(
         makeDirectory: { CoreAudioDeviceDirectory() },
-        makeClock: { SystemClock() }
+        makeClock: { SystemClock() },
+        makeWakeCenter: { NSWorkspace.shared.notificationCenter }
     )
 }
 
@@ -104,6 +114,7 @@ public final class MicrophoneManager {
 
     private let directory: any AudioDeviceDirectory
     private let clock: any SelfCheckClock
+    private let wakeCenter: NotificationCenter
 
     /// The reconciler, created once with the manager. It is *created* eagerly and *enabled* only on
     /// request: feature (B) is opt-in, and an object that exists is not an object that is writing.
@@ -145,6 +156,7 @@ public final class MicrophoneManager {
         let clock = wiring.makeClock()
         self.directory = directory
         self.clock = clock
+        wakeCenter = wiring.makeWakeCenter()
         reconciler = MicrophoneReconciler(directory: directory, clock: clock)
     }
 
@@ -174,11 +186,16 @@ public final class MicrophoneManager {
     /// is installed while monitoring and removed on shutdown.
     private func observeWake() {
         guard wakeObserver == nil else { return }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        let epoch = lifetimeEpoch
+        wakeObserver = wakeCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
+                // ⚠️ The same fence the inventory callback carries, and for the same reason: removing
+                // the observer stops *future* notifications and does nothing about a Task this one has
+                // already queued. Without it a wake delivered just before shutdown re-enumerates and
+                // republishes in the middle of it.
+                guard let self, self.lifetimeEpoch == epoch, self.started else { return }
                 self.refreshInventory()
                 await self.reconciler.wake()
             }
@@ -209,20 +226,34 @@ public final class MicrophoneManager {
     /// `CoreAudioDeviceDirectory` removes its `AudioObjectAddPropertyListenerBlock` registrations only
     /// in `deinit`; cancelling a subscription removes a *subscriber*. The manager and the reconciler
     /// keep the directory alive, and in production the manager is a singleton, so those registrations
-    /// live until the process exits. That is the intended contract — a deliberate final close would
-    /// mean resurrecting teardown-on-last-subscriber, whose races were the reason that machinery was
-    /// deleted. What this does guarantee: nothing in Acta reads or writes through the directory
+    /// live until the process exits. **That is a deliberate ownership policy, not a necessity**: the
+    /// manager owns the directory for the life of the app, so releasing the registrations early would
+    /// mean tearing down an object that is still owned. ⚠️ An earlier version of this comment claimed a
+    /// deliberate final close would amount to resurrecting teardown-on-last-subscriber. That was wrong —
+    /// they are different operations, and nobody argued otherwise; the policy stands on ownership alone.
+    /// What this does guarantee, awaited: nothing in Acta reads or writes through the directory
     /// afterwards.
     public func shutdown() async {
         // Fence first: everything below may be racing a value already in flight.
         lifetimeEpoch &+= 1
         started = false
         await stopEnforcement()
+        // ⚠️ **A second bound, and honestly a redundant one today.** What actually stops the in-flight
+        // verification from going on reading the directory is `verify()`'s own per-iteration guard
+        // (`MicrophoneReconciler.verify`), which is what the suite pins; by the time this line runs the
+        // pass has usually already ended. It stays because it is the only thing that covers a suspension
+        // the guard does not sit on, and because it costs nothing — but no test distinguishes its
+        // presence from its absence, and that is stated here rather than implied by its existence.
+        //
+        // It is legitimate at all only because `disable()` was awaited above: draining is meaningful
+        // once no new work can be scheduled. The earlier mistake was reaching for it to wait on a
+        // `disable` that had not begun, which is a different thing and did not work.
+        await reconciler.waitForQuiescence()
         observationDegraded = nil
         observation?.cancel()
         observation = nil
         if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            wakeCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
         // Cancel *and join*: a cancelled task that has not yet run its final turn is not a stopped one.
@@ -315,9 +346,14 @@ public final class MicrophoneManager {
     private func mirrorEnforcement() {
         guard enforcementMirror == nil else { return }
         let reconciler = reconciler
+        let epoch = lifetimeEpoch
         enforcementMirror = Task { @MainActor [weak self] in
             for await state in await reconciler.states() {
-                guard let self else { return }
+                // ⚠️ The boundary that actually fixed publishing-after-shutdown is `shutdown()`
+                // **joining** this task, not this check — a joined task cannot publish afterwards
+                // whatever it is holding. The check is here so an old mirror can never publish into a
+                // *restarted* manager's streams, which joining alone does not prevent.
+                guard let self, self.lifetimeEpoch == epoch else { return }
                 enforcement = state
                 for continuation in enforcementContinuations.values { continuation.yield(state) }
             }

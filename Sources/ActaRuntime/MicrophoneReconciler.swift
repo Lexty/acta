@@ -233,8 +233,12 @@ public actor MicrophoneReconciler {
     public func wake() async { await schedule(.wake) }
 
     /// Returns once no pass is running, none is pending, and no delivered observation is unconsumed.
-    /// Test-facing; production has no reason to wait, and using it to sequence production work would
-    /// serialize the app behind the HAL.
+    ///
+    /// Two callers, and the difference matters. Tests use it to sequence assertions.
+    /// `MicrophoneManager.shutdown()` uses it as a **barrier**, and only legitimately because it awaits
+    /// `disable()` first: draining is meaningful once no new work can be scheduled, and the earlier
+    /// mistake was reaching for it to wait on a `disable` that had not begun. It is not for ordinary
+    /// production sequencing — that would serialize the app behind the HAL.
     func waitForQuiescence() async {
         guard !isQuiescent else { return }
         await withCheckedContinuation { quiescenceWaiters.append($0) }
@@ -578,7 +582,7 @@ public actor MicrophoneReconciler {
             break
         }
 
-        let verdict = await verify(target: uid)
+        let verdict = await verify(target: uid, generationAtStart: generationAtStart)
 
         // ⚠️ The stale-completion rule, stated as what is actually achievable: a late completion cannot
         // un-issue an OS write, so the requirement is that it produces **no follow-up action** and **no
@@ -613,12 +617,19 @@ public actor MicrophoneReconciler {
     /// requested sleeps ignores oversleep, a slow HAL call and a machine that slept in the middle; a
     /// two-second deadline can then span a minute and a half of real time while the code believes it is
     /// being punctual. The iteration cap is a second bound, for a clock that does not move.
-    private func verify(target: String) async -> Verification {
+    /// - Parameter generationAtStart: ⚠️ **Checked on every iteration, not only afterwards.** The
+    ///   outer guard runs when this returns, which stops a stale *write* but not a stale *read*: a
+    ///   verification that keeps polling after `disable()` goes on touching the directory long after
+    ///   the owner was told to stop, so "nothing reads or writes through the directory after shutdown"
+    ///   was false for the reconciler itself. Bailing here is what makes the drain in
+    ///   `MicrophoneManager.shutdown()` a boundary rather than a hope.
+    private func verify(target: String, generationAtStart: UInt64) async -> Verification {
         let deadline = clock.now + MicrophoneEnforcementTuning.verificationDeadline
         let maxPolls = Int(MicrophoneEnforcementTuning.verificationDeadline
             / MicrophoneEnforcementTuning.verificationPollInterval) + 2
         var polls = 0
         while true {
+            guard generation == generationAtStart, enabled, !paused else { return .diverged }
             let read = directory.currentDefaultInput()
             record(read)
             switch read {

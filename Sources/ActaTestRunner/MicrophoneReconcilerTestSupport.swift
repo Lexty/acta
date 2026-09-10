@@ -75,16 +75,22 @@ final class FightingAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Senda
 ///
 /// ⚠️ It exists so that no test ever touches `MicrophoneManager.shared`, which reaches the real
 /// CoreAudio: the same rule `ControlAPI.shared` carries, and for the same reason.
+/// ⚠️ **A private notification centre per manager, never the real workspace one.** The wake handler is
+/// perfectly testable with a synthetic post — the claim that it needed a sleeping Mac was wrong — but a
+/// post into `NSWorkspace.shared.notificationCenter` would reach every manager alive in the process,
+/// including other tests running in parallel.
 @MainActor
 func makeTestMicrophoneManager(
     devices: [AudioInputDevice] = [],
     defaultInput: String? = nil
-) -> (FakeAudioDeviceDirectory, TestClock, MicrophoneManager) {
+) -> (FakeAudioDeviceDirectory, TestClock, NotificationCenter, MicrophoneManager) {
     let directory = FakeAudioDeviceDirectory(devices: devices, defaultInput: defaultInput)
     let clock = TestClock()
+    let center = NotificationCenter()
     let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
-                                                             makeClock: { clock }))
-    return (directory, clock, manager)
+                                                             makeClock: { clock },
+                                                             makeWakeCenter: { center }))
+    return (directory, clock, center, manager)
 }
 
 /// Wait for the manager's **own notification path** to produce an inventory satisfying `predicate`.
@@ -149,4 +155,12 @@ func awaitEnforcement(_ manager: MicrophoneManager,
 func holdMainActor(milliseconds: Int = 40) {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(milliseconds) * 1_000_000
     while DispatchTime.now().uptimeNanoseconds < deadline { /* deliberately spinning */ }
+}
+
+/// A `@Sendable` slot for a number a closure has to hand back to its test.
+final class IntBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Int?
+    func set(_ value: Int) { lock.lock(); stored = value; lock.unlock() }
+    var value: Int? { lock.lock(); defer { lock.unlock() }; return stored }
 }

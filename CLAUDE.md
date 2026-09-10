@@ -190,9 +190,12 @@ a reconciler" stays a **composition rule**, enforced by review, and this paragra
 written down. ⚠️ **`shutdown()` does not unregister the raw HAL listeners**, and must not be described as if it
 did: `CoreAudioDeviceDirectory` removes its `AudioObjectAddPropertyListenerBlock` registrations only
 in `deinit`, and the manager keeps the directory alive — in production, to process exit. What it does
-guarantee, awaited, is that nothing in Acta reads or writes through the directory afterwards. A
-deliberate final close would mean resurrecting teardown-on-last-subscriber, whose races were the
-reason that machinery was deleted. `MicrophoneManager.shared` inherits
+guarantee, awaited, is that nothing in Acta reads or writes through the directory afterwards — which
+requires draining the reconciler's in-flight verification, not merely disabling it, since a poll
+already running goes on reading. Keeping the raw registrations to process exit is a **deliberate
+ownership policy**: the manager owns the directory for the life of the app. ⚠️ An earlier draft
+justified it by claiming a final close would amount to resurrecting teardown-on-last-subscriber; that
+equated two different operations and is removed. `MicrophoneManager.shared` inherits
 the `ControlAPI.shared` prohibition — it reaches the real CoreAudio, so **no test may touch it**; tests
 build their own over a fake directory. The scope of this exception is one owner per app-lifetime
 concern, injected explicitly at composition; it does **not** loosen the per-recording rule, and a new

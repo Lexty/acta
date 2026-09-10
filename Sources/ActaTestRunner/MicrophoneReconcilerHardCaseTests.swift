@@ -200,6 +200,45 @@ struct MicrophoneReconcilerHardCaseTests {
         #expect(await reconciler.state.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
     }
 
+    // MARK: - 1d. Disabling ends an in-flight verification, it does not merely outlive it
+
+    /// ⚠️ **The write guard runs when `verify()` returns; the reads happen while it is still running.**
+    /// So a reconciler told to stop went on polling the directory for the rest of its verification
+    /// deadline — the owner's "nothing reads or writes through this afterwards" was false about the
+    /// reconciler itself, and the write guard said nothing because no write was attempted.
+    ///
+    /// Sampled the instant `disable()` returns, because sampling later lets the poll finish first and
+    /// the assertion becomes vacuous. It cannot produce a false failure: if `disable()` happened to land
+    /// after the verification had already ended, there is nothing left to read either way.
+    @Test("disabling stops a verification already in flight from reading")
+    func disablingEndsAnInFlightVerification() async {
+        let (directory, clock, reconciler) = harness(devices: [.builtInMic(), .airPods()],
+                                                     defaultInput: "00-00-5E-00-53-01:input",
+                                                     order: ["BuiltInMicrophoneDevice"])
+        // Accepted, never takes effect: the verification polls until its deadline.
+        directory.setWritesTakeEffect(false)
+
+        let steps = Steps()
+        let done = Steps()
+        let readsAtDisable = IntBox()
+        clock.onSleep { _ in
+            guard steps.next() == 1 else { return }
+            Task {
+                await reconciler.disable()
+                readsAtDisable.set(directory.defaultReadCount)
+                _ = done.next()
+            }
+        }
+        await reconciler.enable()
+        for _ in 0 ..< 500 where done.count == 0 { await Task.yield() }
+        #expect(done.count == 1, "the disable never completed")
+
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        #expect(directory.defaultReadCount == readsAtDisable.value,
+                "the verification kept reading the directory after it was disabled")
+    }
+
     // MARK: - 2c. The hold is a question about each candidate, not about the pass
 
     /// ⚠️ **A refused higher-ranked write proves nothing about the devices below the held one.** The

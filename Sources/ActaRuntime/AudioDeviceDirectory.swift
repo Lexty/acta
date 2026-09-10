@@ -104,10 +104,14 @@ public enum ObservationOutcome: Sendable {
 ///
 /// ⚠️ **The split is structural, not decorative.** A recording needs to know which microphones exist
 /// and which one the system prefers; it has no business moving the Mac's default input, and feature
-/// (B) is opt-in precisely because that write affects every other application on the machine. Handing
-/// a recording the full directory would make "a recording never enforces" a rule enforced by review
-/// alone — with this protocol the package graph refuses it instead. `MicrophoneManager` hands out this
-/// half; only the reconciler it owns holds the other.
+/// (B) is opt-in precisely because that write affects every other application on the machine.
+/// `MicrophoneManager` hands out this half; only the reconciler it owns holds the other.
+///
+/// ⚠️ **It narrows what is reachable by accident; it is not a capability guarantee, and an earlier
+/// version of this comment said otherwise.** Both protocols are public in one target and the object
+/// handed out still conforms to `AudioDeviceDirectory`, so a caller determined to cast it back can.
+/// "A recording never enforces and never constructs a reconciler" stays a composition rule kept by
+/// review — see the seam amendment in `CLAUDE.md`.
 public protocol AudioDeviceReading: AnyObject, Sendable {
     /// Every input-capable device the OS currently lists.
     ///

@@ -1,5 +1,6 @@
 import ActaKit
 @testable import ActaRuntime
+import AppKit
 import Foundation
 import Testing
 
@@ -23,6 +24,7 @@ struct MicrophoneManagerTests {
     func liveWiringIsTheRealThing() {
         #expect(MicrophoneWiring.live.makeDirectory() is CoreAudioDeviceDirectory)
         #expect(MicrophoneWiring.live.makeClock() is SystemClock)
+        #expect(MicrophoneWiring.live.makeWakeCenter() === NSWorkspace.shared.notificationCenter)
     }
 
     /// ⚠️ **One directory for the process, and this is the test that says so.** Two would mean two sets
@@ -37,7 +39,8 @@ struct MicrophoneManagerTests {
         // once is visible as an identity change rather than netting out invisibly.
         let manager = MicrophoneManager(wiring: MicrophoneWiring(
             makeDirectory: { builds.next() == 1 ? first : FakeAudioDeviceDirectory() },
-            makeClock: { TestClock() }
+            makeClock: { TestClock() },
+            makeWakeCenter: { NotificationCenter() }
         ))
         manager.start()
         manager.start()
@@ -56,7 +59,7 @@ struct MicrophoneManagerTests {
 
     @Test("monitoring is running before anything opens a menu or starts a recording")
     func monitoringStartsAtLaunch() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         #expect(directory.subscriberCount == 0)
 
@@ -70,7 +73,7 @@ struct MicrophoneManagerTests {
     /// The menu is built and torn down on every click. A second `start()` must change nothing.
     @Test("starting twice neither duplicates nor restarts the subscription")
     func startIsIdempotent() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         manager.start()
@@ -87,7 +90,7 @@ struct MicrophoneManagerTests {
     /// and drops it. That must not touch the manager's own subscription to the HAL.
     @Test("a consumer subscribing and going away does not disturb monitoring")
     func aConsumerComingAndGoingLeavesMonitoringAlone() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
 
@@ -106,7 +109,7 @@ struct MicrophoneManagerTests {
     /// and a change reaches both.
     @Test("both consumers receive the change, from the one shared directory")
     func bothConsumersSeeTheChange() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
@@ -135,7 +138,7 @@ struct MicrophoneManagerTests {
     /// `observe()` itself failing, which is why one field is not enough on its own.
     @Test("a partial-observation failure survives a successful refresh")
     func aDegradedObservationIsNotSwallowedByASuccessfulRefresh() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
 
@@ -155,7 +158,7 @@ struct MicrophoneManagerTests {
     /// recording gets this half is that this is the type it is handed.
     @Test("a recording is handed the reading half, and it observes the same directory")
     func aRecordingGetsTheReadingHalf() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.usbMic()], defaultInput: nil)
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.usbMic()], defaultInput: nil)
         manager.start()
 
         let reader: any AudioDeviceReading = manager.deviceReader
@@ -173,7 +176,7 @@ struct MicrophoneManagerTests {
     /// standing in as what it actually does to the directory.
     @Test("a recording's observation coming and going leaves the manager subscribed")
     func aRecordingsObservationDoesNotDisturbTheManager() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
 
@@ -199,7 +202,7 @@ struct MicrophoneManagerTests {
     /// directory afterwards.
     @Test("shutdown stops this app's consumers, awaited")
     func shutdownStopsTheAppsConsumers() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "00-00-5E-00-53-01:input")
         manager.start()
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
@@ -221,7 +224,7 @@ struct MicrophoneManagerTests {
     /// version left open produced a corrective write **after** shutdown had supposedly finished.
     @Test("nothing is written after shutdown returns")
     func noWriteEscapesAfterShutdown() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
@@ -246,7 +249,7 @@ struct MicrophoneManagerTests {
     /// the state change is issued before shutdown and must not land after it.
     @Test("a state in flight when shutdown runs does not land afterwards")
     func theMirrorCannotPublishAfterShutdown() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
@@ -267,13 +270,11 @@ struct MicrophoneManagerTests {
 
     /// ⚠️ Sleep is the one interval during which the world changes with **no HAL notification
     /// delivered**, so the reconciler's `wake` trigger is worthless without a source pulling it — and
-    /// until this task nothing did: it was an endpoint with no caller. What a test can reach is that the
-    /// source is installed while monitoring and removed on shutdown; the notification itself needs a
-    /// human to sleep a Mac, and is listed as such in the plan.
+    /// until this task nothing did: it was an endpoint with no caller.
     @Test("the wake source is installed while monitoring and removed on shutdown")
     func theWakeSourceFollowsMonitoring() async {
-        let (_, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
-                                                        defaultInput: "BuiltInMicrophoneDevice")
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                           defaultInput: "BuiltInMicrophoneDevice")
         #expect(manager.isObservingWake == false)
 
         manager.start()
@@ -283,13 +284,104 @@ struct MicrophoneManagerTests {
         #expect(manager.isObservingWake == false)
     }
 
+    /// ⚠️ **Registration lifetime is not the behaviour, and asserting only it left the handler's whole
+    /// body untested** — replacing it with a no-op passed the suite. I had claimed this needed a
+    /// sleeping Mac; it does not. A synthetic post into the manager's own notification centre exercises
+    /// the real installed handler, and only *actual* OS sleep/wake stays manual.
+    @Test("a wake reconciles a world that changed with no notification delivered")
+    func aWakeReconcilesWhatSleepHid() async {
+        let (directory, _, center, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic(), .airPods()],
+            defaultInput: "BuiltInMicrophoneDevice"
+        )
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        await manager.enableEnforcement()
+        #expect(directory.attemptedWrites.isEmpty)
+
+        // Exactly what sleep looks like from here: the world moved and nothing was reported.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+
+        let corrected = await awaitEnforcement(manager) {
+            $0.status == .enforcing(uid: "BuiltInMicrophoneDevice")
+        }
+        #expect(corrected != nil, "the wake handler never reconciled")
+        #expect(directory.attemptedWrites == ["BuiltInMicrophoneDevice"])
+    }
+
+    /// ⚠️ Removing the observer stops *future* notifications and does nothing about a Task this one has
+    /// already queued — the same lifetime hole the inventory callback was fenced against.
+    @Test("a wake already queued when shutdown runs does not act afterwards")
+    func aQueuedWakeDoesNotActAfterShutdown() async {
+        let (directory, _, center, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic()],
+            defaultInput: "BuiltInMicrophoneDevice"
+        )
+        manager.start()
+        let enumerationsBefore = directory.enumerationCount
+
+        // Posted while the main actor is ours, so the handler's Task is queued and cannot start.
+        directory.setDevices([.usbMic()])
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await manager.shutdown()
+        holdMainActor()
+        for _ in 0 ..< 20 { await Task.yield() }
+
+        #expect(directory.enumerationCount == enumerationsBefore,
+                "a queued wake re-enumerated after shutdown")
+        #expect(manager.inventory.devices.map(\.uid) == ["BuiltInMicrophoneDevice"])
+    }
+
+    /// ⚠️ **`disable()` stops new work; it does not end a pass already inside its verification poll.**
+    /// That poll goes on *reading* the directory, so "nothing reads or writes through the directory
+    /// after shutdown" was false for the reconciler itself — the write guard caught the write and said
+    /// nothing about the reads. Shutdown drains the in-flight pass now, which is only meaningful
+    /// because `disable()` is awaited first.
+    @Test("no read escapes an awaited shutdown, including from a verification in flight")
+    func noReadEscapesAfterShutdown() async {
+        let (directory, clock, _, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic(), .airPods()],
+            defaultInput: "00-00-5E-00-53-01:input"
+        )
+        // Accepted, never takes effect: the verification polls until its deadline.
+        directory.setWritesTakeEffect(false)
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+
+        let steps = Steps()
+        let shutdownDone = Steps()
+        // ⚠️ **Sampled inside the shutdown task, the instant it returns.** Sampling after a yield loop
+        // in the test instead lets the verification finish first and the assertion becomes vacuous —
+        // which is exactly what happened, and both negative controls passed against it.
+        let readsAtReturn = IntBox()
+        clock.onSleep { _ in
+            guard steps.next() == 1 else { return }
+            Task { @MainActor in
+                await manager.shutdown()
+                readsAtReturn.set(directory.defaultReadCount)
+                _ = shutdownDone.next()
+            }
+        }
+        await manager.enableEnforcement()
+        // Let the shutdown task, started from inside the verification, run to completion.
+        for _ in 0 ..< 500 where shutdownDone.count == 0 { await Task.yield() }
+        #expect(shutdownDone.count == 1, "shutdown never completed")
+
+        holdMainActor()
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        #expect(directory.defaultReadCount == readsAtReturn.value,
+                "the verification kept polling the directory after shutdown returned")
+    }
+
     // MARK: - Enforcement is opt-in
 
     /// ⚠️ Constructing the manager must not start writing anything. Feature (B) changes state every
     /// other application on the machine depends on, so it is off until asked.
     @Test("monitoring alone writes nothing")
     func monitoringDoesNotEnforce() async {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "00-00-5E-00-53-01:input")
         manager.start()
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
@@ -307,7 +399,7 @@ struct MicrophoneManagerTests {
     @Test("the façade hands the menu the same manager it was built with")
     @available(macOS 15.0, *)
     func theFacadeExposesTheManager() {
-        let (_, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()], defaultInput: nil)
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()], defaultInput: nil)
         let harness = ControllerHarness(label: "microphone-route")
         let api = ControlAPI(controller: harness.controller, microphone: manager)
 
@@ -318,7 +410,7 @@ struct MicrophoneManagerTests {
 
     @Test("an enumeration failure keeps the known devices and says so")
     func anEnumerationFailureIsNotAnEmptyMachine() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         #expect(manager.inventory.devices.count == 2)
@@ -332,7 +424,7 @@ struct MicrophoneManagerTests {
 
     @Test("a failed subscription is recorded rather than looking like a quiet machine")
     func aFailedSubscriptionIsRecorded() {
-        let (directory, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                                 defaultInput: "BuiltInMicrophoneDevice")
         directory.failObservation(reason: "AudioObjectAddPropertyListenerBlock failed")
         manager.start()

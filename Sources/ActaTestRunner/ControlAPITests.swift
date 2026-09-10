@@ -88,7 +88,7 @@ struct ControlAPITests {
     func aRecordingDrivenThroughTheFacadeWalksTheOperationsAndAssemblesBothTracks() async throws {
         let harness = ControllerHarness(label: "api-success")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
         let log = StateLog(api)
         defer { log.stop() }
@@ -143,7 +143,7 @@ struct ControlAPITests {
     func aSubscriberJoiningMidRecordingIsReplayedTheCurrentStateAndThenTheTransitions() async throws {
         let harness = ControllerHarness(label: "api-replay")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
 
         api.start(title: "Replay")
@@ -176,7 +176,7 @@ struct ControlAPITests {
         let harness = ControllerHarness(label: "api-denied",
                                         permissions: FakePermissions(screenGranted: false))
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
         let log = StateLog(api)
         defer { log.stop() }
@@ -211,7 +211,7 @@ struct ControlAPITests {
     func aStopDuringTheStartupWindowIsIgnoredAndASecondStartBringsUpNoSecondCapture() async throws {
         let harness = ControllerHarness(label: "api-guards")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
 
         api.start(title: "Guarded")
@@ -237,7 +237,7 @@ struct ControlAPITests {
     func aSecondStopAfterASavedRecordingChangesNothingObservable() async throws {
         let harness = ControllerHarness(label: "api-stop-twice")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
         let log = StateLog(api)
         defer { log.stop() }
@@ -274,7 +274,7 @@ struct ControlAPITests {
     func recoverRunsOnceAndRefreshNeverRecovers() async throws {
         let harness = ControllerHarness(label: "api-recover-once")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
 
         let interrupted = try placeInterruptedMeeting(in: harness.root, named: "2026-07-15-1200-standup")
@@ -327,7 +327,7 @@ struct ControlAPITests {
     func theTitleIsEditableThroughTheFacadeAndReachesTheState() async throws {
         let harness = ControllerHarness(label: "api-title")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
 
         api.title = "Board review"
@@ -356,7 +356,7 @@ struct ControlAPITests {
     func savingSettingsNormalisesThemBeforeTheyReachTheStateOrTheStore() throws {
         let harness = ControllerHarness(label: "api-settings")
         defer { harness.tearDown() }
-        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().2)
+        let api = ControlAPI(controller: harness.controller, microphone: makeTestMicrophoneManager().3)
         defer { api.finish() }
 
         var settings = api.settings
