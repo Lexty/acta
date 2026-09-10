@@ -129,33 +129,33 @@ discovery; per-app input routing; converting the ScreenCaptureKit and TCC confin
 default. Building the seam first is what lets the policy and the reconciler be tested without a
 sound card, and what keeps the HAL in one file.
 
-- [ ] `AudioInputDevice` in **ActaKit** — a pure value: `uid`, `name`, `transport`, `inputChannels`,
+- [x] `AudioInputDevice` in **ActaKit** — a pure value: `uid`, `name`, `transport`, `inputChannels`,
       `canBeSystemDefault`, `isAlive`, `isRunningSomewhere`. No HAL types and no `AudioObjectID`: the
       ephemeral integer must not escape the adapter (it changed `140 → 181` across one reconnect)
-- [ ] ⚠️ **Presence plus input channels is not availability.** Carry `kAudioDevicePropertyDeviceIsAlive`
+- [x] ⚠️ **Presence plus input channels is not availability.** Carry `kAudioDevicePropertyDeviceIsAlive`
       and decide, in this task, **how a readiness or capability change refreshes the snapshot when the
       device list itself is unchanged** — a device can stop being usable without leaving the list, and
       a directory that only watches the list will never notice
-- [ ] `AudioDeviceDirectory` protocol in **ActaRuntime**: enumerate input devices, read the current
+- [x] `AudioDeviceDirectory` protocol in **ActaRuntime**: enumerate input devices, read the current
       default input, write it, and observe changes. Every operation returns an **explicit outcome**,
       never a bare value
-- [ ] ⚠️ **An enumeration failure is not an empty device list, and a failed eligibility query is not
+- [x] ⚠️ **An enumeration failure is not an empty device list, and a failed eligibility query is not
       `false`.** This is the shape of the bug measured above (a swallowed `OSStatus` reporting `0` for
       every device). Model both explicitly; a regression test must distinguish them
-- [ ] ⚠️ **Listener registration can fail, and that is a third outcome** — not "registered" and not
+- [x] ⚠️ **Listener registration can fail, and that is a third outcome** — not "registered" and not
       "no changes". A directory that silently registered nothing looks exactly like a quiet machine
-- [ ] ⚠️ **Observation is broadcast, not a single stream.** Two consumers subscribe (the reconciler and
+- [x] ⚠️ **Observation is broadcast, not a single stream.** Two consumers subscribe (the reconciler and
       the recording-side observer); they must not compete for events from one stream, and one
       consumer's lifetime must not end the other's subscription
-- [ ] ⚠️ Query `kAudioDevicePropertyDeviceCanBeDefaultDevice` in **`kAudioObjectPropertyScopeInput`**.
+- [x] ⚠️ Query `kAudioDevicePropertyDeviceCanBeDefaultDevice` in **`kAudioObjectPropertyScopeInput`**.
       Global scope returns `kAudioHardwareUnknownPropertyError` for every device
-- [ ] ⚠️ **Do not drop a device from the directory because `canBeSystemDefault` is false.** That
+- [x] ⚠️ **Do not drop a device from the directory because `canBeSystemDefault` is false.** That
       property answers system-default eligibility, not whether ScreenCaptureKit can capture it. Carry
       it as a field and apply it only when choosing a system-default candidate
-- [ ] `CoreAudioDeviceDirectory` — the **only** file naming a HAL symbol. Property listeners on
+- [x] `CoreAudioDeviceDirectory` — the **only** file naming a HAL symbol. Property listeners on
       `kAudioHardwarePropertyDevices` **and** `kAudioHardwarePropertyDefaultInputDevice`; names from
       `kAudioObjectPropertyName`; identity from `kAudioDevicePropertyDeviceUID`
-- [ ] `FakeAudioDeviceDirectory` in the test target: scriptable device sets, scriptable read/write
+- [x] `FakeAudioDeviceDirectory` in the test target: scriptable device sets, scriptable read/write
       outcomes, scriptable listener-registration failure, and scriptable notification delivery **in
       either order**, duplicated, and coalesced
 
@@ -164,22 +164,22 @@ sound card, and what keeps the HAL in one file.
 **Why.** The decision is the part worth freezing in tests; separating it from reconciliation is what
 makes the hard cases (a temporary override expiring, no eligible device) reachable from literals.
 
-- [ ] `MicrophonePriority` in **ActaKit**: an ordered list of UIDs plus an optional temporary override
-- [ ] A **total** function from (device snapshot, preferences) to a selection outcome. The outcomes are
+- [x] `MicrophonePriority` in **ActaKit**: an ordered list of UIDs plus an optional temporary override
+- [x] A **total** function from (device snapshot, preferences) to a selection outcome. The outcomes are
       distinct values, not an optional: a chosen device, **no preferred device available**, and **no
       eligible device at all**
-- [ ] ⚠️ "No preferred device available" must be its own outcome, distinct from Pause and distinct from
+- [x] ⚠️ "No preferred device available" must be its own outcome, distinct from Pause and distinct from
       an error. It means *leave the system default untouched and keep watching*
-- [ ] Selection for the **system default** filters on `canBeSystemDefault`; selection for **Acta's
+- [x] Selection for the **system default** filters on `canBeSystemDefault`; selection for **Acta's
       capture** does not use that filter. Two call sites, one function, an explicit parameter
-- [ ] ⚠️ **An `.unknown`-eligibility candidate that the OS then refuses must not become a dead end.**
+- [x] ⚠️ **An `.unknown`-eligibility candidate that the OS then refuses must not become a dead end.**
       Task 1 decided that an unanswered eligibility query counts as eligible, so the policy will happily
       pick such a device — but a rejected write is **not** the same as a reversal by a competitor, and
       re-selecting the same uncertain top candidate forever would prevent ever trying a known-good
       device below it. Selection must therefore be able to exclude a candidate the *write* refused, for
       this reconciliation pass, and fall through to the next one. Test it: an uncertain first candidate
       whose write is refused, and a known-good second candidate that is then selected
-- [ ] Tests from literals: order respected; an absent device skipped; a present-but-not-alive device
+- [x] Tests from literals: order respected; an absent device skipped; a present-but-not-alive device
       skipped; the override winning; the override's device gone; an empty list; a list whose every
       entry is absent; a device present but not default-eligible; an incomplete snapshot (some devices
       uninspectable) not being treated as proof that the missing device disconnected
