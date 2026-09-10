@@ -261,12 +261,47 @@ struct MenuContent: View {
 
             microphoneStates(mic)
 
-            ForEach(mic.devices, id: \.uid) { device in
-                microphoneRow(device, in: mic)
+            // ⚠️ **Priority order first, including entries whose device is absent.** Iterating the
+            // device list rendered rows in enumeration order while the arrows moved a different list —
+            // so the numbers and the rows disagreed — and a preferred microphone that was unplugged
+            // vanished from the menu while staying in the persistent list, which left the user unable
+            // to see or remove a preference without reconnecting the device.
+            ForEach(Array(mic.priority.enumerated()), id: \.element) { index, uid in
+                microphoneRow(device(uid, in: mic), rank: index, in: mic)
             }
-            if mic.devices.isEmpty {
-                Text("No microphones found.").font(.caption).foregroundStyle(.secondary)
+            let unranked = mic.devices.filter { !mic.priority.contains($0.uid) }
+            if !unranked.isEmpty {
+                Text(mic.priority.isEmpty ? "Available" : "Not on your list")
+                    .font(.caption2).foregroundStyle(.secondary).padding(.top, 2)
+                ForEach(unranked, id: \.uid) { device in
+                    microphoneRow(device, rank: nil, in: mic)
+                }
             }
+            if mic.devices.isEmpty, mic.priority.isEmpty {
+                // ⚠️ An incomplete read is never rendered as a settled claim about the hardware.
+                Text(mic.isComplete ? "No microphones found."
+                                    : "The audio devices could not be read.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // ⚠️ **The explicit capture policy had no control at all**, so a persisted setting could
+            // only be changed outside the shipped chooser.
+            Picker("Recordings use", selection: Binding(
+                get: { mic.captureChoice },
+                set: { model.setCaptureChoice($0) }
+            )) {
+                Text("my list").tag(CaptureMicrophoneChoice.followPriority)
+                Text("the Mac's input at the time").tag(CaptureMicrophoneChoice.systemDefault)
+            }
+            .font(.caption)
+
+            // ⚠️ **The split the menu never explained.** A list edit reaches a running recording only
+            // at its next start or recovery — a healthy capture is not preempted — while enabled
+            // management of the Mac's input reconciles immediately. Conflating them would make the menu
+            // lie about one of the two promises.
+            Text("Changes apply to the next recording. If Acta manages the Mac's input, that changes "
+                 + "right away.")
+                .font(.caption2).foregroundStyle(.secondary)
 
             if mic.override != nil {
                 Button("Resume automatic selection") { model.resumeAutomaticMicrophoneSelection() }
@@ -325,11 +360,20 @@ struct MenuContent: View {
     /// ⚠️ **Two distinct actions, never one click that does both** (plan decision 2). Borrowing a
     /// headset for one call is not a preference change, so *Use now* is temporary and the arrows edit
     /// the persistent list.
+    /// A device on the list whose hardware is absent, so a preference can still be seen and removed.
+    private func device(_ uid: String, in mic: ControlAPI.MicrophoneStatus) -> AudioInputDevice {
+        mic.devices.first { $0.uid == uid }
+            ?? AudioInputDevice(uid: uid, name: uid, transport: .other(0), inputChannels: 0,
+                                canBeSystemDefault: .unknown, isAlive: .unknown,
+                                isRunningSomewhere: false)
+    }
+
     @ViewBuilder
-    private func microphoneRow(_ device: AudioInputDevice,
+    private func microphoneRow(_ device: AudioInputDevice, rank: Int?,
                                in mic: ControlAPI.MicrophoneStatus) -> some View {
-        let rank = mic.priority.firstIndex(of: device.uid)
+        let present = mic.devices.contains { $0.uid == device.uid }
         HStack(spacing: 6) {
+            if let rank { Text("\(rank + 1).").font(.caption2).foregroundStyle(.secondary) }
             Button {
                 model.togglePreferred(device.uid)
             } label: {
@@ -350,6 +394,9 @@ struct MenuContent: View {
                 if mic.managingSystemInput, device.isCaptureCandidate, !device.isSystemDefaultCandidate {
                     Text("recording only — the Mac's input will not follow")
                         .font(.caption2).foregroundStyle(.secondary)
+                } else if !present {
+                    Text(mic.isComplete ? "not connected" : "not readable")
+                        .font(.caption2).foregroundStyle(.secondary)
                 } else if !device.isCaptureCandidate {
                     Text("unavailable").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -368,7 +415,7 @@ struct MenuContent: View {
             }
             Button("Use now") { model.useMicrophoneNow(device.uid) }
                 .font(.caption)
-                .disabled(model.pendingSelection == device.uid)
+                .disabled(!present || model.pendingSelection == device.uid)
         }
     }
 

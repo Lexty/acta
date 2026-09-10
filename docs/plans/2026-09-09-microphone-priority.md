@@ -477,11 +477,12 @@ honest — not compatibility adapters.
       true until capture succeeds, so the pending value drives the selection tick and never the
       "recording from" line, which reads `recordingFrom` — the recorder's pin, set only after capture
       came up
-- [ ] ⚠️ **NOT covered by a test, and not ticked as if it were**: `ControlViewModel` and the menu views
-      live in the `Acta` executable target, which SwiftPM cannot import, so nothing in `ActaTestRunner`
-      can reach them. Everything below the view model — the seeding policy, the three states, the
-      startup flows, Pause's scope — is tested through `MicrophoneManager` and `ControlAPI`; the
-      rendering itself is manual, like the rest of the UI
+- [x] ⚠️ **I recorded this as untestable and that was wrong.** The claim was that `ControlViewModel`
+      lives in the `Acta` executable target, which SwiftPM cannot import, so nothing could reach it. The
+      import restriction is real; the conclusion was not — a review compiled a byte-identical copy into
+      the test target and found **four** defects in the adapter. It has been moved to `ActaRuntime`
+      (it is an adapter, not a view) and is tested directly, which also avoids a copy that would drift.
+      **Rendering** stays manual; missing subscriptions, stale continuations and lost edits do not
 
 ### Task 8: The CoreAudio confinement, as a real test
 

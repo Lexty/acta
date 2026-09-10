@@ -761,14 +761,22 @@ struct RecordingMicrophoneLossTests {
                                          microphone: resolver)
             try await recorder.start()
             let watch = MicrophoneLossWatch(recorder: recorder)
-            await watch.install(report: { _ in }, fatal: { _ in })
+            // ⚠️ **A real sink, not a black hole.** My first version installed `fatal: { _ in }`, so it
+            // could not see that the refused restart was being forwarded to the fatal path — which in
+            // production parks the phase in error and assembles the healthy recording that replaced it.
+            let fatals = ReportedFailures()
+            await watch.install(report: { _ in }, fatal: { fatals.record($0) })
 
             // The user's restart takes the lifecycle and parks inside the teardown of the old capture,
             // so the generation has not advanced yet.
             source.holdNextStop()
             resolver.set(.pinned(.usbMic(), alternatives: []))
             let switching = Task { try await recorder.restart(reason: .userSwitch) }
-            _ = await awaitCondition { source.isStreaming == false || source.stopCount >= 1 }
+            // ⚠️ **The signal is the held stop itself.** Waiting on `isStreaming == false` or a stop
+            // count cannot succeed on this path — `stop` parks *before* changing either — so the wait
+            // burned its whole deadline and the test then proceeded on a state it had never confirmed.
+            let parked = await awaitCondition { source.isHoldingStop }
+            #expect(parked, "the user's restart never reached the held teardown")
 
             await watch.observe(.devices([.builtInMic()], uninspectable: []))
             // ⚠️ Asserted, not assumed: the driver must have consumed its fact and be waiting on the
@@ -789,6 +797,8 @@ struct RecordingMicrophoneLossTests {
             let preempted = await awaitCondition { source.startedMicrophoneIDs.count > 2 }
             #expect(preempted == false,
                     "a queued loss restart tore down the capture that replaced it")
+            #expect(fatals.failures.isEmpty,
+                    "a refused restart was reported as a recording failure, which stops the recording")
             await watch.stop()
             await recorder.stop()
         }
@@ -849,4 +859,13 @@ private func withLossHarness(
     try await body(devices, source, resolver, session, reported, clock)
     clock.freeze()
     _ = await session.stop()
+}
+
+
+/// A `@Sendable` sink for the fatal failures a session reports.
+final class ReportedFailures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [StartupFailure] = []
+    func record(_ failure: StartupFailure) { lock.lock(); stored.append(failure); lock.unlock() }
+    var failures: [StartupFailure] { lock.lock(); defer { lock.unlock() }; return stored }
 }

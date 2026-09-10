@@ -140,11 +140,17 @@ Consequences to keep in mind:
   target**: while this code lived in `Sources/Acta`, nothing above pure logic could be reached from a
   test at all. A library target may import AppKit/SwiftUI, so the AppKit-touching types live here too.
 - `Sources/Acta/` — the executable and nothing else: `ActaApp.swift` (`@main`, the SwiftUI menu bar
-  and its views) and `ControlViewModel.swift` (the UI-owned `ControlAPI` adapter — `@MainActor`
+  and its views). ⚠️ **`ControlViewModel` moved to `ActaRuntime`**, and the reason is worth keeping:
+  while it lived here it was unreachable from any test, and "the executable target cannot be imported"
+  got recorded as "the adapter cannot be tested". It is not a view — it is the `ControlAPI` adapter
+  (`@MainActor` `ObservableObject`, owned by `MenuContent` as a `@StateObject` — `@MainActor`
   `ObservableObject`, owned by `MenuContent` as `@StateObject`; seeds its `state` synchronously from
-  `ControlAPI.shared.state` so the first frame is not blank, subscribes to `states()` from the view's
-  `.task {}`, and keeps an optimistic local title reconciled against the pending write). New non-UI
-  code belongs in `ActaRuntime`, not here.
+  `ControlAPI.shared.state` so the first frame is not blank, subscribes to `states()` **and**
+  `microphoneStatuses()` from the view's `.task {}`, and keeps optimistic local values reconciled
+  against the pending write). Four defects were found in it the day it became importable — a missing
+  subscription, a stale continuation, a lost edit intent and a dropped incompleteness — none of which
+  manual rendering acceptance would have caught. New non-UI code belongs in `ActaRuntime`, not here,
+  and so does anything the views merely *call*.
 - `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via
   `bash Scripts/test.sh`).
 - `Tests/ActaTests/` — **a stub only**, so `swift test` compiles. Never add real tests here: under

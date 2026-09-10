@@ -221,6 +221,14 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
 
     /// Hold the **next** `stop` until released — the other half, and the one that lets a test put a
     /// restart in flight while it is still tearing the old capture down.
+    /// Whether a `stop` is parked on the gate right now.
+    ///
+    /// ⚠️ Without this a test waits on `isStreaming == false || stopCount >= 1`, neither of which the
+    /// held path reaches until the gate is released — so it simply burns its whole deadline and then
+    /// proceeds anyway, which is two seconds of nothing and an assertion about a state it never
+    /// confirmed.
+    var isHoldingStop: Bool { stopGate.isHolding }
+
     func holdNextStop() { stopGate.arm() }
     func releaseHeldStop() { stopGate.release() }
     private let stopGate = StartGate()
@@ -234,6 +242,8 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
             lock.lock(); armed = false; let w = waiters; waiters.removeAll(); lock.unlock()
             for c in w { c.resume() }
         }
+        var isHolding: Bool { lock.lock(); defer { lock.unlock() }; return !waiters.isEmpty }
+
         func wait() async {
             let shouldWait: Bool = { lock.lock(); defer { lock.unlock() }; return armed }()
             guard shouldWait else { return }

@@ -209,16 +209,26 @@ public final class ControlAPI {
         public var recordingFrom: AudioInputDevice?
         /// Whether Acta is managing the Mac's default input.
         public var managingSystemInput: Bool
+        /// Whether recordings follow the list or start from the system default.
+        public var captureChoice: CaptureMicrophoneChoice
         /// Enforcement's own status — waiting, paused, suspended, refused, uncertain.
         public var enforcement: MicrophoneEnforcementStatus
-        /// Set when the device list could not be fully read.
+        /// Set when the enumeration or the subscription failed outright.
         public var inventoryFailure: String?
+        /// Devices the directory could not describe. ⚠️ **Not the same as absent**, and the menu must
+        /// not turn an incomplete read into "there is nothing here".
+        public var uninspectable: [String]
+
+        /// Whether the machine was described completely.
+        public var isComplete: Bool { inventoryFailure == nil && uninspectable.isEmpty }
 
         public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,
                     preferred: String? = nil, systemDefault: ObservedDefaultInput = .unread,
                     recordingFrom: AudioInputDevice? = nil, managingSystemInput: Bool = false,
+                    captureChoice: CaptureMicrophoneChoice = .followPriority,
                     enforcement: MicrophoneEnforcementStatus = .disabled,
-                    inventoryFailure: String? = nil) {
+                    inventoryFailure: String? = nil,
+                    uninspectable: [String] = []) {
             self.devices = devices
             self.priority = priority
             self.override = override
@@ -226,8 +236,45 @@ public final class ControlAPI {
             self.systemDefault = systemDefault
             self.recordingFrom = recordingFrom
             self.managingSystemInput = managingSystemInput
+            self.captureChoice = captureChoice
             self.enforcement = enforcement
             self.inventoryFailure = inventoryFailure
+            self.uninspectable = uninspectable
+        }
+    }
+
+    /// A stream of microphone statuses: the current one first, then one for every change either the
+    /// device inventory or enforcement publishes.
+    ///
+    /// ⚠️ **Without this the menu was static.** `states()` is driven by the recording controller's
+    /// `objectWillChange`, and microphone state is deliberately not part of `ControlState`, so an open
+    /// idle menu never learned that a microphone was plugged in, that the Mac's default had moved, that
+    /// enforcement had suspended itself, or that a *Use now* had expired. Refreshing after a command is
+    /// not observation.
+    public func microphoneStatuses() -> AsyncStream<MicrophoneStatus> {
+        let inventories = microphone.inventories()
+        let enforcements = microphone.enforcementStates()
+        return AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            continuation.yield(microphoneStatus)
+            let pump = Task { [weak self] in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        for await _ in inventories {
+                            guard let api = self else { return }
+                            let next = await MainActor.run { api.microphoneStatus }
+                            continuation.yield(next)
+                        }
+                    }
+                    group.addTask {
+                        for await _ in enforcements {
+                            guard let api = self else { return }
+                            let next = await MainActor.run { api.microphoneStatus }
+                            continuation.yield(next)
+                        }
+                    }
+                }
+            }
+            continuation.onTermination = { _ in pump.cancel() }
         }
     }
 
@@ -241,8 +288,14 @@ public final class ControlAPI {
             systemDefault: microphone.inventory.observedDefault,
             recordingFrom: controller.recordingMicrophone,
             managingSystemInput: microphone.enforcement.status != .disabled,
+            captureChoice: preference.choice,
             enforcement: microphone.enforcement.status,
-            inventoryFailure: microphone.inventory.failure ?? microphone.inventory.observationDegraded
+            inventoryFailure: microphone.inventory.failure ?? microphone.inventory.observationDegraded,
+            // ⚠️ **Carried, not dropped.** Without it a snapshot that could not describe some driver
+            // projected as a successfully enumerated empty machine, and the menu said "No microphones
+            // found" — a settled claim about the hardware drawn from a read that admitted it was
+            // incomplete.
+            uninspectable: microphone.inventory.uninspectable
         )
     }
 

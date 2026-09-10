@@ -268,6 +268,9 @@ public final class RecordingSession: @unchecked Sendable {
     public func switchMicrophone(to requested: String) async -> MicrophoneSwitchResult {
         do {
             try await recorder.restart(reason: .userSwitch)
+        } catch StartupFailure.captureSuperseded {
+            // Another switch already replaced this capture; the newer one owns the outcome.
+            return .failed(requested: requested)
         } catch {
             log.error("Microphone switch failed: \(error.localizedDescription, privacy: .public)")
             // ⚠️ Same rule as a lost device: an explicit switch that leaves **nothing** recording is a
@@ -476,15 +479,6 @@ actor MicrophoneLossWatch {
         driver = nil
     }
 
-    /// Occupy the actor until released, so a queued `observe` cannot run.
-    ///
-    /// ⚠️ Test-facing, and it is the only way to force the ordering that matters: a snapshot read at
-    /// delivery whose actor work lands **after** something else has replaced the capture. Holding the
-    /// driver is not the same thing — that stops the driver, not the entry.
-    func occupy(_ park: @Sendable () async -> Void) async {
-        await park()
-    }
-
     /// Whether the driver has actually reached its restart.
     ///
     /// ⚠️ **Not "the fact was consumed"**, which was my first version and is too weak: that is true the
@@ -531,6 +525,13 @@ actor MicrophoneLossWatch {
             // between here and admission, because a user's restart may already own the queue.
             enteredRestart = true
             try await recorder.restart(reason: .deviceLoss, expecting: loss.generation)
+        } catch StartupFailure.captureSuperseded {
+            // ⚠️ **Not a failure, and forwarding it stopped a healthy recording.** The lifecycle refused
+            // this restart because the capture it was about had already been replaced — by a *Use now*
+            // that succeeded. Handing that to the fatal path parks `phase` in `.error` and assembles the
+            // recording that is working perfectly well. The `StartupFailure` doc comment saying it is
+            // "not a failure of anything" changed nothing about what its caller did with it.
+            return
         } catch {
             // ⚠️ Checked **after** the await: the recording may have stopped while this was running, and
             // a stopped recording must not be handed a fatal failure it did not experience.
