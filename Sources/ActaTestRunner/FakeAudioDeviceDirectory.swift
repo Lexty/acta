@@ -68,6 +68,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     private var enumerationCountStorage = 0
     private var defaultReadCountStorage = 0
     private var enumerationCountAtSubscribeStorage: Int?
+    private var observeCountStorage = 0
 
     /// Every write attempted, in order — including the ones the script failed, because "it tried and
     /// the OS refused" and "it never tried" are different bugs.
@@ -77,6 +78,13 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
     var enumerationCount: Int { lock.lock(); defer { lock.unlock() }; return enumerationCountStorage }
     /// How many times the default input was read. The contract says re-read immediately before writing.
     var defaultReadCount: Int { lock.lock(); defer { lock.unlock() }; return defaultReadCountStorage }
+    /// How many times `observe` was called, **including calls whose subscription was later dropped**.
+    ///
+    /// ⚠️ `subscriberCount` cannot answer "did this re-register?": a replaced subscription deinits and
+    /// cancels itself, so re-observing on every menu click nets out to one live subscriber and looks
+    /// perfectly healthy. Against the real HAL that is a `AudioObjectAddPropertyListenerBlock` per
+    /// click.
+    var observeCount: Int { lock.lock(); defer { lock.unlock() }; return observeCountStorage }
     /// `enumerationCount` at the moment the first subscription was installed, or `nil` if none was.
     ///
     /// This is how the **startup race** is pinned rather than described: a consumer that enumerates
@@ -202,6 +210,7 @@ final class FakeAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Sendable 
             lock.unlock()
             if let failure { return .failed(reason: failure) }
             lock.lock()
+            observeCountStorage += 1
             if enumerationCountAtSubscribeStorage == nil {
                 enumerationCountAtSubscribeStorage = enumerationCountStorage
             }

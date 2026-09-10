@@ -7,6 +7,7 @@ final class Steps: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 /// A directory that **wins every race**: it accepts each write and restores its own choice before the
@@ -67,4 +68,21 @@ final class FightingAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Senda
     func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome {
         inner.observe(handler)
     }
+}
+
+/// A `MicrophoneManager` over a scripted directory and a test clock — everything the real one is
+/// except the HAL.
+///
+/// ⚠️ It exists so that no test ever touches `MicrophoneManager.shared`, which reaches the real
+/// CoreAudio: the same rule `ControlAPI.shared` carries, and for the same reason.
+@MainActor
+func makeTestMicrophoneManager(
+    devices: [AudioInputDevice] = [],
+    defaultInput: String? = nil
+) -> (FakeAudioDeviceDirectory, TestClock, MicrophoneManager) {
+    let directory = FakeAudioDeviceDirectory(devices: devices, defaultInput: defaultInput)
+    let clock = TestClock()
+    let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                             makeClock: { clock }))
+    return (directory, clock, manager)
 }

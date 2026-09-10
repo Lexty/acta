@@ -42,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
             ControlAPI.shared.recover()
+            // ⚠️ **Here, and not from a view.** `MenuBarExtra(.window)` builds its content on the first
+            // click, so anything that waits for the menu has already missed every device change since
+            // launch — and feature (B)'s promise is that the default input stays on your list while
+            // Acta is *running*, not while its menu happens to be open.
+            ControlAPI.shared.microphone.start()
         }
     }
 
@@ -54,6 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
+            // The HAL listeners are process-lifetime, so the only honest teardown is an explicit one.
+            ControlAPI.shared.microphone.shutdown()
             guard ControlAPI.shared.state.hasWorkInFlight else { return .terminateNow }
             Task {
                 await ControlAPI.shared.stopAndWait()

@@ -27,13 +27,32 @@ public final class ControlAPI {
     /// nothing the typed state can see (a private field, an identical rewrite) does not emit.
     private var lastPublished: ControlState
 
+    /// Microphone management: the device inventory, and feature (B)'s enforcement of the system
+    /// default input.
+    ///
+    /// ⚠️ **It hangs here because this is the route the menu already has**, not because a façade over
+    /// the recording pipeline naturally owns audio-device policy. The alternative was a second global
+    /// the UI would have to reach for directly, which is how two sources of truth start. The manager
+    /// itself owns nothing of the recorder and the recorder owns nothing of it; `ControlAPI` is the
+    /// place they are handed to the same client.
+    ///
+    /// ⚠️ Its state is **not** folded into `ControlState`, and that is deliberate for now: `ControlState`
+    /// is projected onto the wire by `WireProjection`, so a field added here is a wire change and a
+    /// protocol version bump. That bump is Task 6 of the microphone plan, done once, with the fixtures
+    /// it invalidates. Until then the menu reads `microphone` directly.
+    public let microphone: MicrophoneManager
+
     /// The production façade. Wraps the menu's controller — see the privacy invariant above.
-    public static let shared = ControlAPI(controller: .shared)
+    public static let shared = ControlAPI(controller: .shared, microphone: .shared)
 
     /// - Parameter controller: the controller to wrap. Production passes `.shared`; a test passes one
     ///   built with the injected seams.
-    public init(controller: RecordingController) {
+    /// - Parameter microphone: the app-lifetime microphone owner. Production passes `.shared`; a test
+    ///   passes one built over a fake directory. ⚠️ Not a default argument, for the reason
+    ///   `RecordingDependencies` is not one: a default argument is a wiring claim no test can read back.
+    public init(controller: RecordingController, microphone: MicrophoneManager) {
         self.controller = controller
+        self.microphone = microphone
         lastPublished = ControlState(from: ControlAPI.snapshot(of: controller))
         observe()
     }

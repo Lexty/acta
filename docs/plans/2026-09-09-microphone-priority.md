@@ -287,19 +287,19 @@ its own doc says a source "belongs to exactly one recording, so `.live` must min
 session". The reconciler must run while idle and survive stop/restart. Getting this wrong creates one
 global enforcer **per recording session**.
 
-- [ ] ⚠️ **Amend the rule; do not claim it already excluded this.** The rule says "new seams", with no
+- [x] ⚠️ **Amend the rule; do not claim it already excluded this.** The rule says "new seams", with no
       lifetime qualifier. The honest move is to add the app-lifetime exclusion to `CLAUDE.md` with the
       lifecycle evidence, not to argue the current wording anticipated it
-- [ ] One owner, created once for the app's lifetime, with explicit injectable wiring (a `.live`-style
+- [x] One owner, created once for the app's lifetime, with explicit injectable wiring (a `.live`-style
       value a test can assert against — the reason `RecordingDependencies` exists as a value at all)
-- [ ] Name the **composition root** explicitly, the way `RecordingSession` is named as the root for
+- [x] Name the **composition root** explicitly, the way `RecordingSession` is named as the root for
       permissions
-- [ ] A recording receives **shared read access** to the directory; it never constructs a reconciler
-- [ ] The menu reaches the manager through the **existing `ControlAPI`/`ControlState` path** — the
+- [x] A recording receives **shared read access** to the directory; it never constructs a reconciler
+- [x] The menu reaches the manager through the **existing `ControlAPI`/`ControlState` path** — the
       transient commands (*Use now*, Pause, Resume) and the microphone status are assigned to that
       path in this task, so the executor does not have to invent a route
-- [ ] Record the decision and its rationale in `CLAUDE.md`, next to the existing seam rule
-- [ ] ⚠️ **Acceptance is behavioural, not a constructor count**: monitoring starts without the menu
+- [x] Record the decision and its rationale in `CLAUDE.md`, next to the existing seam rule
+- [x] ⚠️ **Acceptance is behavioural, not a constructor count**: monitoring starts without the menu
       being opened and without a recording; opening and closing the menu neither stops nor duplicates
       monitoring; **both** consumers receive the relevant changes; a recording stop/restart does not
       remove the manager's subscription; shutdown unregisters the listeners

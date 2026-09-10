@@ -100,7 +100,15 @@ public enum ObservationOutcome: Sendable {
 /// There is deliberately **no `preferredDevice()` or `reconcile()`**. The decision is a pure function
 /// over a snapshot (`ActaKit`), and the policy that applies it is the reconciler; pushing either down
 /// here would put untestable judgement behind a HAL call.
-public protocol AudioDeviceDirectory: AnyObject, Sendable {
+/// Everything about the audio devices that can be **learned**, and nothing that changes them.
+///
+/// ⚠️ **The split is structural, not decorative.** A recording needs to know which microphones exist
+/// and which one the system prefers; it has no business moving the Mac's default input, and feature
+/// (B) is opt-in precisely because that write affects every other application on the machine. Handing
+/// a recording the full directory would make "a recording never enforces" a rule enforced by review
+/// alone — with this protocol the package graph refuses it instead. `MicrophoneManager` hands out this
+/// half; only the reconciler it owns holds the other.
+public protocol AudioDeviceReading: AnyObject, Sendable {
     /// Every input-capable device the OS currently lists.
     ///
     /// ⚠️ Hidden devices are **out of scope by design**: `kAudioDevicePropertyIsHidden`
@@ -111,12 +119,14 @@ public protocol AudioDeviceDirectory: AnyObject, Sendable {
     /// Read `kAudioHardwarePropertyDefaultInputDevice`.
     func currentDefaultInput() -> DefaultInputRead
 
+    /// Subscribe to changes. Independent of every other subscription — see the contract above.
+    func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome
+}
+
+public protocol AudioDeviceDirectory: AudioDeviceReading {
     /// Write `kAudioHardwarePropertyDefaultInputDevice`.
     ///
     /// ⚠️ The caller must re-read before writing and verify after: this call reports what the OS said
     /// about the *write*, and says nothing about what the property holds a moment later.
     func setDefaultInput(uid: String) -> DefaultInputWrite
-
-    /// Subscribe to changes. Independent of every other subscription — see the contract above.
-    func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome
 }

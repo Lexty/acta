@@ -160,6 +160,31 @@ factories because a `CaptureSource` is stateful and belongs to exactly one recor
 `RecordingSession` is the **composition root** (it hands the one `PermissionChecking` instance to
 both consumers, `AudioRecorder` and `SelfCheck`); it asks no permission questions itself.
 
+**Amendment: the rule above is about *per-recording* seams, and does not reach app-lifetime ones.**
+This is a widening of the rule, not a reading of it — the original wording says "new seams" with no
+lifetime qualifier, and every seam that existed when it was written had the same lifetime. The
+evidence that forced the change: `RecordingDependencies`' members are **factories**, and its own doc
+says why — "a source is stateful and belongs to exactly one recording, so `.live` must mint a fresh
+one per session". Microphone management is the first seam where that is exactly backwards. It must run
+**while nothing is recording** (feature B's promise is that the Mac's default input stays on your list
+while Acta is merely running) and **survive a recording ending**; putting it in
+`RecordingDependencies` would mint one enforcer per session — several alive at once during a watchdog
+restart, each writing `kAudioHardwarePropertyDefaultInputDevice`, which is Acta fighting itself.
+So: an **app-lifetime** seam gets its own owner with its own wiring value.
+`MicrophoneWiring.live` is that value and carries the same burden `RecordingDependencies.live` does
+(a claim about production a test can call back, which a default argument can never be); the
+difference is that `MicrophoneManager` calls each factory **once, in `init`**, and holds the result
+for the process. **`MicrophoneManager` is the composition root** for this, exactly as
+`RecordingSession` is for permissions: it builds the one `AudioDeviceDirectory` and hands it out —
+whole to the reconciler it owns, and as the read-only `AudioDeviceReading` to everyone else.
+⚠️ That protocol split is structural, not documentation: `AudioDeviceReading` has no
+`setDefaultInput`, so "a recording never enforces, and never constructs a reconciler" is a fact the
+package graph checks rather than a rule a reviewer has to remember. `MicrophoneManager.shared` inherits
+the `ControlAPI.shared` prohibition — it reaches the real CoreAudio, so **no test may touch it**; tests
+build their own over a fake directory. The scope of this exception is one owner per app-lifetime
+concern, injected explicitly at composition; it does **not** loosen the per-recording rule, and a new
+seam that belongs to one recording still goes into `RecordingDependencies`.
+
 **One seam is deliberately not in `RecordingDependencies`**, and the rule above does not cover it:
 `RecordingController.awaitRecovery()` (`RecordingController+Recovery.swift`) is a **completion** seam,
 not an injection point — it returns the verdict of the pass `onLaunch()` already started
