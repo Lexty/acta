@@ -69,7 +69,12 @@ public struct AudioInputDevice: Equatable, Sendable, Identifiable {
     public var canBeSystemDefault: DeviceCapability
     /// `kAudioDevicePropertyDeviceIsAlive`. A device can stop being usable without leaving the device
     /// list, which is why presence alone is not availability.
-    public var isAlive: Bool
+    ///
+    /// ⚠️ **Tri-state for the same reason `canBeSystemDefault` is.** A liveness read that *failed* must
+    /// not arrive as `yes`: consumers above treat "not alive" as a disconnect, so a transient read
+    /// failure reported as a definite answer would expire a temporary override or fail a recording over
+    /// nothing. Deciding to use an uncertain device is a policy; reporting it as *known* alive is a lie.
+    public var isAlive: DeviceCapability
     /// `kAudioDevicePropertyDeviceIsRunningSomewhere` — some process currently has it open. Reported
     /// for diagnosis; it never affects selection, because "in use" is not "unavailable" on macOS.
     public var isRunningSomewhere: Bool
@@ -79,7 +84,7 @@ public struct AudioInputDevice: Equatable, Sendable, Identifiable {
                 transport: AudioTransport,
                 inputChannels: Int,
                 canBeSystemDefault: DeviceCapability,
-                isAlive: Bool,
+                isAlive: DeviceCapability,
                 isRunningSomewhere: Bool) {
         self.uid = uid
         self.name = name
@@ -111,13 +116,18 @@ public struct AudioInputDevice: Equatable, Sendable, Identifiable {
         }
     }
 
-    /// Usable at all: present, alive, and actually carrying input channels.
+    /// Usable at all: present, not known-dead, and actually carrying input channels.
     ///
     /// ⚠️ **Presence is not availability**, which is why `isAlive` is consulted here. A device can stay
     /// in `kAudioHardwarePropertyDevices` after it has stopped working, and a directory that watches
     /// only the device *list* will never see that transition.
+    ///
+    /// ⚠️ **`unknown` liveness counts as available**, matching `isSystemDefaultCandidate`'s optimism and
+    /// for the same reason: a machine whose liveness property stops answering must not become a machine
+    /// with no microphones. The uncertainty is preserved in the value so a caller that needs to *report*
+    /// it still can — this property answers "may I use it", not "is it definitely there".
     public var isAvailable: Bool {
-        isAlive && inputChannels > 0
+        isAlive != .no && inputChannels > 0
     }
 
     /// Whether Acta may record from it. Availability alone — **`canBeSystemDefault` is not consulted**,

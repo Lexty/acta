@@ -60,7 +60,7 @@ func softwareEndpointsAreNotPhysicalEvenWhenTheyMayBeTheDefault() {
 func presenceIsNotAvailability() {
     // A device can stop being usable without leaving `kAudioHardwarePropertyDevices`, which is why the
     // directory carries `isAlive` and watches it separately from the device list.
-    let dead = AudioInputDevice.builtInMic(alive: false)
+    let dead = AudioInputDevice.builtInMic(alive: .no)
     #expect(dead.inputChannels > 0)
     #expect(!dead.isAvailable)
     #expect(!dead.isCaptureCandidate)
@@ -72,7 +72,7 @@ func presenceIsNotAvailability() {
 @Test
 func anEnumerationFailureIsNotAnEmptyDeviceList() {
     let directory = FakeAudioDeviceDirectory(devices: [])
-    #expect(directory.enumerateInputDevices() == .devices([]))
+    #expect(directory.enumerateInputDevices() == .devices([], uninspectable: []))
 
     directory.failEnumeration(reason: "OSStatus -4 ('who?')")
     guard case .failed = directory.enumerateInputDevices() else {
@@ -151,6 +151,109 @@ func aWriteThatFailsIsStillRecordedAsAttempted() {
     #expect(directory.currentDefaultInput() == .device(uid: "BuiltInMicrophoneDevice"))
 }
 
+@Test
+func aCancelledSubscriptionIsSilentEvenWhenTheBroadcastHasAlreadyBegun() {
+    // ⚠️ The regression test for the defect this file's own contract described and the first
+    // implementation did not deliver: `broadcast` copied the handlers under the lock and invoked them
+    // outside it, so a subscription cancelled *after* the copy — which is exactly what an earlier
+    // handler in the same broadcast does — was still called. Removal from a registry is not
+    // cancellation; the gate is.
+    //
+    // Delivery follows registration order, so `first` provably runs before `second`: without that this
+    // test could not know which ran first and would have to accept either outcome, which is how its
+    // first draft passed against the very bug it exists for.
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()])
+    let second = Recorder()
+    let victim = TokenBox()
+
+    guard case .observing(let firstToken) = directory.observe({ _ in victim.cancelAll() }),
+          case .observing(let secondToken) = directory.observe({ second.append($0) }) else {
+        Issue.record("expected both subscriptions"); return
+    }
+    victim.store([secondToken])
+
+    directory.emit(.deviceListChanged)
+
+    #expect(second.changes.isEmpty,
+            "the second subscription was cancelled by the first, mid-broadcast, and must not be called")
+
+    directory.emit(.defaultInputChanged)
+    #expect(second.changes.isEmpty, "a delivery arrived after cancel() returned")
+    firstToken.cancel()
+}
+
+@Test
+func cancellingFromInsideAHandlerDoesNotDeadlock() {
+    // Legal by the contract, and the drain must not wait for the delivery the caller is itself running.
+    let directory = FakeAudioDeviceDirectory(devices: [])
+    let tokens = TokenBox()
+    guard case .observing(let token) = directory.observe({ _ in tokens.cancelAll() }) else {
+        Issue.record("expected a subscription"); return
+    }
+    tokens.store([token])
+    directory.emit(.deviceListChanged)
+    #expect(directory.subscriberCount == 0)
+}
+
+@Test
+func aSubscriberArrivingAfterTheLastOneLeftStillReceivesEvents() {
+    // The listener lifecycle is torn down when the last subscriber goes and must be brought back for
+    // the next one. A directory that tore down *after* accepting the newcomer would report success and
+    // then deliver nothing — subscribed on paper, deaf in fact.
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()])
+    guard case .observing(let first) = directory.observe({ _ in }) else {
+        Issue.record("expected a subscription"); return
+    }
+    first.cancel()
+    #expect(directory.subscriberCount == 0)
+
+    let later = Recorder()
+    guard case .observing(let second) = directory.observe({ later.append($0) }) else {
+        Issue.record("expected the later subscription to be accepted"); return
+    }
+    directory.emit(.defaultInputChanged)
+    #expect(later.changes == [.defaultInputChanged])
+    second.cancel()
+}
+
+@Test
+func aDeviceTheOSWillNotDescribeIsNamedRatherThanQuietlyMissing() {
+    // ⚠️ Walking past a driver that will not answer is right; omitting it *silently* is not. Everything
+    // above reads a device leaving the snapshot as a disconnect — it expires a temporary override on
+    // that and fails a recording over it — so a transient read failure would masquerade as an unplugged
+    // microphone.
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()])
+    directory.setDevices([.builtInMic()], uninspectable: ["BrokenDriver_UID (stream configuration unreadable)"])
+
+    guard case .devices(let devices, let uninspectable) = directory.enumerateInputDevices() else {
+        Issue.record("expected a described enumeration"); return
+    }
+    #expect(devices.count == 1)
+    #expect(uninspectable.count == 1, "an incomplete snapshot must say so")
+}
+
+@Test
+func aFailedLivenessReadIsNotDeath() {
+    // Same principle as the eligibility query: "I could not ask" must stay distinguishable from "no".
+    // Deciding to use an uncertain device is a policy; reporting it as *known* alive — or known dead —
+    // is a lie, and the dead direction is the one that expires overrides and fails recordings.
+    let uncertain = AudioInputDevice.builtInMic(alive: .unknown)
+    #expect(uncertain.isAlive == .unknown)
+    #expect(uncertain.isAvailable, "an unanswered liveness query must not read as a disconnect")
+    #expect(!AudioInputDevice.builtInMic(alive: .no).isAvailable)
+}
+
+/// Holds subscription tokens a handler needs to cancel from inside itself.
+private final class TokenBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: [any AudioDeviceObservation] = []
+    func store(_ new: [any AudioDeviceObservation]) { lock.lock(); tokens = new; lock.unlock() }
+    func cancelAll() {
+        lock.lock(); let current = tokens; lock.unlock()
+        for token in current { token.cancel() }
+    }
+}
+
 /// Collects changes from a subscription. A class, because the handler is `@Sendable` and the assertions
 /// run after it.
 private final class Recorder: @unchecked Sendable {
@@ -167,9 +270,14 @@ func theCoreAudioAdapterEnumeratesThisMachine() {
     // Not a fixture: the real HAL. It cannot assert *which* devices exist, but it can assert that the
     // adapter got an answer at all, and that every device it reports is well formed.
     let directory = CoreAudioDeviceDirectory()
-    guard case .devices(let devices) = directory.enumerateInputDevices() else {
+    guard case .devices(let devices, let uninspectable) = directory.enumerateInputDevices() else {
         Issue.record("CoreAudio enumeration failed on this machine")
         return
+    }
+    // Not an assertion that it is empty — a machine may genuinely hold a driver that will not answer.
+    // The point is that such a device is *named* rather than silently missing from the list.
+    if !uninspectable.isEmpty {
+        Issue.record("devices this machine would not describe: \(uninspectable) (not a failure of the adapter; recorded so it is visible)")
     }
     for device in devices {
         #expect(!device.uid.isEmpty)
@@ -191,7 +299,7 @@ func theEligibilityQueryUsesTheScopeThatActuallyAnswers() {
     // `.unknown` is a legitimate value for any single device. It is only *universal* `.unknown` that
     // identifies the bug. Skipped visibly rather than silently when the machine lists no input device.
     let directory = CoreAudioDeviceDirectory()
-    guard case .devices(let devices) = directory.enumerateInputDevices(), !devices.isEmpty else {
+    guard case .devices(let devices, _) = directory.enumerateInputDevices(), !devices.isEmpty else {
         Issue.record("no input devices on this machine: eligibility scope unverified")
         return
     }

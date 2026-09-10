@@ -9,7 +9,15 @@ import Foundation
 /// then behaves as though it had *looked* and found nothing. That is the same class of error as the
 /// recovery scan's `unscannable`: "I could not look" is not "there was nothing to find".
 public enum DeviceEnumeration: Equatable, Sendable {
-    case devices([AudioInputDevice])
+    /// The devices that could be described, plus **what could not be**.
+    ///
+    /// ⚠️ `uninspectable` is not decoration. Walking past a driver that will not answer is the right
+    /// call — one broken virtual device must not blind the feature to every real microphone — but a
+    /// snapshot that omits it *silently* is indistinguishable from one where the device genuinely left.
+    /// Consumers above read a departure as a disconnect: they expire a temporary override on it and
+    /// fail a recording over it. So the omission is reported, and a consumer may decline to act
+    /// destructively on an incomplete snapshot.
+    case devices([AudioInputDevice], uninspectable: [String])
     case failed(reason: String)
 }
 
@@ -43,6 +51,14 @@ public enum DeviceChange: Equatable, Sendable {
     case deviceListChanged
     case defaultInputChanged
     case readinessChanged(uid: String)
+    /// Observation is **partially** working: the subscription is live, but some changes will not be
+    /// reported. Emitted when a per-device listener could not be installed.
+    ///
+    /// ⚠️ Without this case the degradation is invisible in the worst possible way: `observe` returned
+    /// success, events keep arriving for everything that *did* register, and the gap is exactly the
+    /// transition the missing listener existed to catch. A consumer that receives this should stop
+    /// trusting change notification alone and fall back to re-reading on its other triggers.
+    case observationDegraded(reason: String)
 }
 
 /// A live subscription. Cancelling one **must not** end any other subscription — see

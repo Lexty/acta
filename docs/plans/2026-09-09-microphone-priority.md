@@ -172,9 +172,17 @@ makes the hard cases (a temporary override expiring, no eligible device) reachab
       an error. It means *leave the system default untouched and keep watching*
 - [ ] Selection for the **system default** filters on `canBeSystemDefault`; selection for **Acta's
       capture** does not use that filter. Two call sites, one function, an explicit parameter
+- [ ] ⚠️ **An `.unknown`-eligibility candidate that the OS then refuses must not become a dead end.**
+      Task 1 decided that an unanswered eligibility query counts as eligible, so the policy will happily
+      pick such a device — but a rejected write is **not** the same as a reversal by a competitor, and
+      re-selecting the same uncertain top candidate forever would prevent ever trying a known-good
+      device below it. Selection must therefore be able to exclude a candidate the *write* refused, for
+      this reconciliation pass, and fall through to the next one. Test it: an uncertain first candidate
+      whose write is refused, and a known-good second candidate that is then selected
 - [ ] Tests from literals: order respected; an absent device skipped; a present-but-not-alive device
       skipped; the override winning; the override's device gone; an empty list; a list whose every
-      entry is absent; a device present but not default-eligible
+      entry is absent; a device present but not default-eligible; an incomplete snapshot (some devices
+      uninspectable) not being treated as proof that the missing device disconnected
 
 ### Task 3: The reconciler and its state machine
 
@@ -460,6 +468,11 @@ The seams end below all of this; the suite proves the decision logic and none of
   the next candidate actually producing audio rather than silence.
 - ***Use now* during a real recording** — that the switch happens, that the segments on both sides of it
   are valid, and that the assembled file is not broken by a format change.
+- **That the production HAL listeners actually fire.** The observation tests drive the *fake*; they
+  establish the contract's shape, not that `CoreAudioDeviceDirectory`'s registrations deliver. Only
+  plugging a device in and out on a real Mac shows that — and it is the same gap as
+  `SCKCaptureSource`'s: the seam is what makes everything above testable, and the seam's own floor is
+  not.
 - **That the fight-back policy is livable.** Whether enforcement feels correct or hostile when the user
   reaches for System Settings anyway — and whether the conflict budget suspends at the right point.
 - **Microphone release on stop, again.** Task 5 changes the stream configuration; Gotcha 4 in the
