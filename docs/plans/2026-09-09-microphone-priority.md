@@ -386,18 +386,23 @@ global enforcer **per recording session**.
 **Why.** Decision 5. The work is the version bump and the tests that keep the exact-version rule
 honest — not compatibility adapters.
 
-- [ ] `RecordingSettings` gains **both** new fields — the priority list **and** the enable flag — with
+- [x] `RecordingSettings` gains **both** new fields — the priority list **and** the enable flag — with
       `Field` cases and `merging(_:)` coverage, matching the existing anti-clobber pattern
-- [ ] `WireSettings` gains **both** fields as **required**; `ProtocolVersion.current = 2`,
+- [x] ⚠️ **A third field was added, and this is the stated reason.** `captureMicrophoneChoice` is not on
+      this checklist because it did not exist when the plan was written: Task 5 turned "use the system
+      default" into an explicit resolve-then-pin *choice*, and a choice that resets at every relaunch is
+      not a setting. Adding it in Task 7 instead would have meant a second required wire field and so a
+      second protocol bump, for a field that could ride this one
+- [x] `WireSettings` gains **both** fields as **required**; `ProtocolVersion.current = 2`,
       `supported = [2]`, and a test asserts exactly that
-- [ ] ⚠️ **Update the fixtures that use `2` as the deliberately unsupported version** — and know that
+- [x] ⚠️ **Update the fixtures that use `2` as the deliberately unsupported version** — and know that
       they do **not** all fail loudly. Verified: `aVersionMismatchIsReportedWithItsIDPreserved`
       (`ControlProtocolTests.swift:291`) and the **response** half of
       `aNonCurrentVersionIsRejectedOnBothResponseAndEvent` (line 354) start **failing**, so they cannot
       be missed. The **event** half (line 355) is quiet: its payload `{"event":{}}` still throws after
       the bump — for being an undecodable `WatchEvent`, not for its version — so it keeps passing while
       testing nothing it was written to test
-- [ ] ⚠️ **Two more tests go quiet, and they guard the sharper bug.**
+- [x] ⚠️ **Two more tests go quiet, and they guard the sharper bug.**
       `aResponseCarryingNeitherAResultNorAnErrorIsRejected` (line 330) and
       `aResponseCarryingBothAResultAndAnErrorIsRejectedRatherThanReadAsSuccess` (line 342) both pin
       `"version":1` and assert only that decoding throws. After the bump both throw at the **version
@@ -405,20 +410,20 @@ honest — not compatibility adapters.
       comment calls it "the one that actually bites", because reading `result` first renders a server's
       error as `ok`. **Move every payload-validation fixture to v2**; only the version-rejection tests
       keep a non-current version
-- [ ] ⚠️ **Version-rejection tests must use otherwise-valid payloads.** Flipping `{"event":{}}` to
+- [x] ⚠️ **Version-rejection tests must use otherwise-valid payloads.** Flipping `{"event":{}}` to
       another version leaves the test weak: delete the version check entirely and it still throws
-- [ ] ⚠️ **Test a v2 settings payload with a required microphone field missing** — that is what
+- [x] ⚠️ **Test a v2 settings payload with a required microphone field missing** — that is what
       "required" is supposed to mean, and nothing else asserts it
-- [ ] ⚠️ **`RecordingID`'s `"v1:"` prefix stays untouched** (`RecordingID.swift:17`). It is an
+- [x] ⚠️ **`RecordingID`'s `"v1:"` prefix stays untouched** (`RecordingID.swift:17`). It is an
       independent frozen encoding version, not the protocol version; renaming it would invalidate every
       stored id for no reason
-- [ ] ⚠️ **Phrase acceptance around the boundary that exists.** The codec returns `.versionMismatch`;
+- [x] ⚠️ **Phrase acceptance around the boundary that exists.** The codec returns `.versionMismatch`;
       no production caller constructs its wire reply today. Do not write acceptance that assumes
       response routing unless this plan deliberately adds it — it does not
-- [ ] ⚠️ **Persisted on-disk settings migration is separate from the wire version.** An old config
+- [x] ⚠️ **Persisted on-disk settings migration is separate from the wire version.** An old config
       decodes with the new fields defaulted; the wire fields stay required
-- [ ] `ControlDispatcher.settingsSet` still replaces whole settings — no new semantics
-- [ ] ⚠️ Adding a **case** to any response-direction enum is still a version bump, not an additive
+- [x] `ControlDispatcher.settingsSet` still replaces whole settings — no new semantics
+- [x] ⚠️ Adding a **case** to any response-direction enum is still a version bump, not an additive
       change. This task adds fields, not cases; keep it that way
 
 ### Task 7: The menu chooser and the states it must not blur

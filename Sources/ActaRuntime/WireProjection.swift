@@ -22,7 +22,10 @@ extension WireSettings {
     public init(_ settings: RecordingSettings) {
         self.init(archivePath: settings.archivePath,
                   segmentSeconds: settings.segmentSeconds,
-                  deleteSegmentsAfterAssembly: settings.deleteSegmentsAfterAssembly)
+                  deleteSegmentsAfterAssembly: settings.deleteSegmentsAfterAssembly,
+                  microphonePriority: settings.microphonePriority,
+                  managesSystemDefaultInput: settings.managesSystemDefaultInput,
+                  captureMicrophoneChoice: CaptureChoice(settings.captureMicrophoneChoice))
     }
 }
 
@@ -35,7 +38,29 @@ extension RecordingSettings {
     public init(_ wire: WireSettings) {
         self.init(archivePath: wire.archivePath,
                   segmentSeconds: wire.segmentSeconds,
-                  deleteSegmentsAfterAssembly: wire.deleteSegmentsAfterAssembly)
+                  deleteSegmentsAfterAssembly: wire.deleteSegmentsAfterAssembly,
+                  microphonePriority: wire.microphonePriority,
+                  managesSystemDefaultInput: wire.managesSystemDefaultInput,
+                  captureMicrophoneChoice: wire.captureMicrophoneChoice.runtimeValue)
+    }
+}
+
+/// ⚠️ **A projection, not a `Codable` conformance on the runtime enum.** Conforming
+/// `CaptureMicrophoneChoice` to the wire's encoding would let a rename in `ActaKit` silently rename a
+/// wire value — the same rule that keeps `ControlState` off the wire directly.
+extension WireSettings.CaptureChoice {
+    init(_ choice: CaptureMicrophoneChoice) {
+        switch choice {
+        case .followPriority: self = .followPriority
+        case .systemDefault: self = .systemDefault
+        }
+    }
+
+    var runtimeValue: CaptureMicrophoneChoice {
+        switch self {
+        case .followPriority: return .followPriority
+        case .systemDefault: return .systemDefault
+        }
     }
 }
 

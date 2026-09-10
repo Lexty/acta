@@ -187,8 +187,15 @@ public final class ControlAPI {
         set { controller.settings = newValue }
     }
 
-    /// Normalise and persist the settings.
-    public func saveSettings() { controller.saveSettings() }
+    /// Normalise and persist the settings — and hand the microphone half of them to the app-lifetime
+    /// owner, so an edit reaches the reconciler and the capture pin without the menu wiring each field
+    /// separately.
+    public func saveSettings() {
+        controller.saveSettings()
+        let settings = controller.settings
+        let microphone = microphone
+        Task { await microphone.apply(settings) }
+    }
 
     /// The saved recordings, newest first.
     public var recordings: [MeetingStore.Recording] { controller.recordings }

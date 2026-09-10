@@ -153,6 +153,26 @@ public final class MicrophoneManager {
         capturePreference.choice = choice
     }
 
+    /// Apply the persisted settings: the priority list, the capture choice, and whether feature (B) is
+    /// on.
+    ///
+    /// ⚠️ **Both halves move together and neither is derived from the other.** The list is shared; the
+    /// enable flag governs only the *system default*, so a user with (B) off still gets their recording
+    /// pinned to their preferred microphone. Applying one without the other is how the two promises
+    /// start sharing a switch, which the plan forbids.
+    public func apply(_ settings: RecordingSettings) async {
+        capturePreference.choice = settings.captureMicrophoneChoice
+        await reconciler.setOrder(settings.microphonePriority)
+        if settings.managesSystemDefaultInput {
+            if await !reconciler.isEnabled { await enableEnforcement() }
+        } else {
+            if await reconciler.isEnabled { await disableEnforcement() }
+        }
+        // `setOrder` alone would leave `capturePreference` a mirror-hop behind, and a recording started
+        // in that window would resolve against the previous list.
+        capturePreference.priority = await reconciler.priority
+    }
+
     public private(set) var inventory: MicrophoneInventory = .unknown
     public private(set) var enforcement: MicrophoneEnforcementState = .disabled
 

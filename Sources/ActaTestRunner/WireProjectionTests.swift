@@ -38,7 +38,10 @@ func wireSettingsProjectionDoesNotNormalise() {
     // Out of range on purpose: clamping is `saveSettings()`'s job, exactly as it is for the menu's
     // slider. A projection that silently clamped would make `settings_get` disagree with what
     // `settings_set` was told, with nothing in between having saved.
-    let wire = WireSettings(archivePath: "", segmentSeconds: 9_999, deleteSegmentsAfterAssembly: true)
+    let wire = WireSettings(archivePath: "", segmentSeconds: 9_999, deleteSegmentsAfterAssembly: true,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority)
     #expect(RecordingSettings(wire).segmentSeconds == 9_999)
     #expect(RecordingSettings(wire).normalized().segmentSeconds == RecordingSettings.maxSegmentSeconds)
 }

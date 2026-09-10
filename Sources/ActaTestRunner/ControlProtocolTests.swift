@@ -73,25 +73,25 @@ func recordingIDRejectsANonCanonicalEncodingOfANameItWouldOtherwiseResolve(alias
 func startCommandPinsItsDiscriminatorShape() throws {
     let req = WireRequest(id: "1", command: .start(title: "Standup"))
     #expect(try jsonString(req)
-        == #"{"command":{"title":"Standup","type":"start"},"id":"1","version":1}"#)
+        == #"{"command":{"title":"Standup","type":"start"},"id":"1","version":2}"#)
 }
 
 @Test
 func startWithoutATitleOmitsTheTitleKey() throws {
     #expect(try jsonString(WireRequest(id: "1", command: .start(title: nil)))
-        == #"{"command":{"type":"start"},"id":"1","version":1}"#)
+        == #"{"command":{"type":"start"},"id":"1","version":2}"#)
 }
 
 @Test
 func voidCommandPinsItsShape() throws {
     #expect(try jsonString(WireRequest(id: "x", command: .stopAndWait))
-        == #"{"command":{"type":"stop_and_wait"},"id":"x","version":1}"#)
+        == #"{"command":{"type":"stop_and_wait"},"id":"x","version":2}"#)
 }
 
 @Test
 func openInFinderCarriesTheOpaqueID() throws {
     #expect(try jsonString(WireRequest(id: "9", command: .openInFinder(id: "v1:AAAA")))
-        == #"{"command":{"id":"v1:AAAA","type":"open_in_finder"},"id":"9","version":1}"#)
+        == #"{"command":{"id":"v1:AAAA","type":"open_in_finder"},"id":"9","version":2}"#)
 }
 
 @Test
@@ -99,7 +99,10 @@ func everyCommandRoundTrips() throws {
     let commands: [Command] = [
         .status, .list, .watch, .start(title: "T"), .start(title: nil), .stop, .stopAndWait,
         .recover, .refresh, .openArchive, .openInFinder(id: "v1:AAAA"), .settingsGet,
-        .settingsSet(WireSettings(archivePath: "~/x", segmentSeconds: 30, deleteSegmentsAfterAssembly: false)),
+        .settingsSet(WireSettings(archivePath: "~/x", segmentSeconds: 30, deleteSegmentsAfterAssembly: false,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority)),
         .settingsSave, .titleGet, .titleSet("Hello"), .dismissRecoveryNotice
     ]
     for command in commands {
@@ -111,7 +114,7 @@ func everyCommandRoundTrips() throws {
 
 @Test
 func anUnknownCommandTypeDecodesToUnsupportedCommandNotAThrow() throws {
-    let data = Data(#"{"command":{"type":"teleport"},"id":"1","version":1}"#.utf8)
+    let data = Data(#"{"command":{"type":"teleport"},"id":"1","version":2}"#.utf8)
     let decoded = try ControlProtocolCodec.decode(WireRequest.self, from: data)
     #expect(decoded.command == .unsupportedCommand(raw: "teleport"))
 }
@@ -119,7 +122,7 @@ func anUnknownCommandTypeDecodesToUnsupportedCommandNotAThrow() throws {
 @Test
 func unknownKeysAreIgnored() throws {
     // An extra top-level key and an extra key inside the command are both dropped.
-    let data = Data(#"{"command":{"type":"stop","future":true},"id":"1","version":1,"extra":42}"#.utf8)
+    let data = Data(#"{"command":{"type":"stop","future":true},"id":"1","version":2,"extra":42}"#.utf8)
     let decoded = try ControlProtocolCodec.decode(WireRequest.self, from: data)
     #expect(decoded.command == .stop)
     #expect(decoded.id == "1")
@@ -130,25 +133,31 @@ func unknownKeysAreIgnored() throws {
 @Test
 func okResultPinsItsShape() throws {
     #expect(try jsonString(WireResponse.result(id: "1", .ok))
-        == #"{"id":"1","result":{"type":"ok"},"version":1}"#)
+        == #"{"id":"1","result":{"type":"ok"},"version":2}"#)
 }
 
 @Test
 func titleResultPinsItsShape() throws {
     #expect(try jsonString(WireResponse.result(id: "1", .title("Hi")))
-        == #"{"id":"1","result":{"title":"Hi","type":"title"},"version":1}"#)
+        == #"{"id":"1","result":{"title":"Hi","type":"title"},"version":2}"#)
 }
 
 @Test
 func everyResultRoundTrips() throws {
     let state = WireControlState(operation: .init(kind: .idle), title: "", suggestedTitle: "",
                                  settings: WireSettings(archivePath: "", segmentSeconds: 30,
-                                                        deleteSegmentsAfterAssembly: true),
+                                                        deleteSegmentsAfterAssembly: true,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority),
                                  recordings: [], canStart: true, canStop: false)
     let results: [CommandResult] = [
         .state(state),
         .recordings([RecordingSummary(id: "v1:AAAA", directoryName: "d", path: "/p", status: .unknown)]),
-        .settings(WireSettings(archivePath: "~/a", segmentSeconds: 20, deleteSegmentsAfterAssembly: false)),
+        .settings(WireSettings(archivePath: "~/a", segmentSeconds: 20, deleteSegmentsAfterAssembly: false,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority)),
         .title("t"),
         .ok
     ]
@@ -164,7 +173,7 @@ func everyResultRoundTrips() throws {
 @Test
 func commandRejectedErrorPinsItsCodeSpecificField() throws {
     #expect(try jsonString(WireResponse.error(id: "1", .commandRejected(reason: "busy")))
-        == #"{"error":{"code":"command_rejected","message":"The command was rejected: busy","reason":"busy"},"id":"1","version":1}"#)
+        == #"{"error":{"code":"command_rejected","message":"The command was rejected: busy","reason":"busy"},"id":"1","version":2}"#)
 }
 
 @Test
@@ -174,7 +183,7 @@ func everyDecodeOutcomeThatKeepsAnIDHasAnErrorCodeToAnswerItWith() throws {
     // the transport cannot be pushed into blaming the server (`internal`, which invites a retry loop on
     // a malformed request) or the recorder's guard (`command_rejected`, which never saw the command).
     let outcome = ControlProtocolCodec.decodeRequest(from: Data(#"""
-    {"version":1,"id":"7","command":{"type":"title_set"}}
+    {"version":2,"id":"7","command":{"type":"title_set"}}
     """#.utf8))
     guard case .undecodableCommand(let id, let reason) = outcome else {
         Issue.record("expected .undecodableCommand, got \(outcome)")
@@ -252,7 +261,10 @@ func wireControlStateRoundTripsWithFailuresAndNotices() throws {
         notice: nil,
         recoveryNotice: .init(code: "recovered", message: "Recovered 2."),
         title: "Sync", suggestedTitle: "Meeting",
-        settings: WireSettings(archivePath: "~/Acta", segmentSeconds: 30, deleteSegmentsAfterAssembly: true),
+        settings: WireSettings(archivePath: "~/Acta", segmentSeconds: 30, deleteSegmentsAfterAssembly: true,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority),
         recordings: [RecordingSummary(id: "v1:AAAA", directoryName: "d", path: "/p", status: .recovered)],
         canStart: false, canStop: false)
     let data = try ControlProtocolCodec.encode(state)
@@ -265,7 +277,10 @@ func wireControlStateRoundTripsWithFailuresAndNotices() throws {
 func watchEventEnvelopeCarriesSequenceAndState() throws {
     let state = WireControlState(operation: .init(kind: .idle), title: "", suggestedTitle: "",
                                  settings: WireSettings(archivePath: "", segmentSeconds: 30,
-                                                        deleteSegmentsAfterAssembly: true),
+                                                        deleteSegmentsAfterAssembly: true,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority),
                                  recordings: [], canStart: true, canStop: false)
     let event = WireEvent(id: "sub", event: WatchEvent(sequence: 7, state: state))
     let data = try ControlProtocolCodec.encode(event)
@@ -277,8 +292,8 @@ func watchEventEnvelopeCarriesSequenceAndState() throws {
 // MARK: - Version policy
 
 @Test
-func aV1RequestDecodesToRequest() {
-    let data = Data(#"{"command":{"type":"status"},"id":"1","version":1}"#.utf8)
+func aCurrentVersionRequestDecodesToRequest() {
+    let data = Data(#"{"command":{"type":"status"},"id":"1","version":2}"#.utf8)
     guard case .request(let req) = ControlProtocolCodec.decodeRequest(from: data) else {
         Issue.record("expected .request"); return
     }
@@ -287,9 +302,10 @@ func aV1RequestDecodesToRequest() {
 
 @Test
 func aVersionMismatchIsReportedWithItsIDPreserved() {
-    // Even a command shape newer than v1 must still yield the id, so the header is read first.
-    let data = Data(#"{"command":{"type":"future","payload":{}},"id":"abc","version":2}"#.utf8)
-    #expect(ControlProtocolCodec.decodeRequest(from: data) == .versionMismatch(id: "abc", requested: 2))
+    // Even a command shape newer than the current version must still yield the id, so the header is
+    // read first.
+    let data = Data(#"{"command":{"type":"future","payload":{}},"id":"abc","version":3}"#.utf8)
+    #expect(ControlProtocolCodec.decodeRequest(from: data) == .versionMismatch(id: "abc", requested: 3))
 }
 
 @Test
@@ -302,8 +318,8 @@ func nonEnvelopeBytesAreMalformed() {
 // A known command tag with a bad payload — the ordinary client bug. The envelope decoded, so the id is
 // in hand and the reply can be addressed; answering `.malformed` here would strand the request on a
 // socket carrying several at once.
-@Test(arguments: [#"{"command":{"type":"title_set"},"id":"7","version":1}"#,
-                  #"{"command":{"type":"open_in_finder"},"id":"7","version":1}"#])
+@Test(arguments: [#"{"command":{"type":"title_set"},"id":"7","version":2}"#,
+                  #"{"command":{"type":"open_in_finder"},"id":"7","version":2}"#])
 func aV1EnvelopeWithAnUndecodableCommandKeepsItsID(json: String) {
     guard case .undecodableCommand(let id, _) = ControlProtocolCodec.decodeRequest(from: Data(json.utf8))
     else {
@@ -314,7 +330,7 @@ func aV1EnvelopeWithAnUndecodableCommandKeepsItsID(json: String) {
 
 @Test
 func anUndecodableCommandReasonDoesNotLeakDecoderInternals() {
-    let data = Data(#"{"command":{"type":"title_set"},"id":"7","version":1}"#.utf8)
+    let data = Data(#"{"command":{"type":"title_set"},"id":"7","version":2}"#.utf8)
     guard case .undecodableCommand(_, let reason) = ControlProtocolCodec.decodeRequest(from: data) else {
         Issue.record("expected .undecodableCommand"); return
     }
@@ -329,7 +345,7 @@ func anUndecodableCommandReasonDoesNotLeakDecoderInternals() {
 @Test
 func aResponseCarryingNeitherAResultNorAnErrorIsRejected() {
     // The shape an older client meets when a server is broken — exactly when a clear error matters.
-    let data = Data(#"{"id":"1","version":1}"#.utf8)
+    let data = Data(#"{"id":"1","version":2}"#.utf8)
     #expect(throws: (any Error).self) {
         try ControlProtocolCodec.decode(WireResponse.self, from: data)
     }
@@ -341,20 +357,60 @@ func aResponseCarryingNeitherAResultNorAnErrorIsRejected() {
 @Test
 func aResponseCarryingBothAResultAndAnErrorIsRejectedRatherThanReadAsSuccess() {
     let data = Data(#"""
-    {"id":"1","version":1,"result":{"type":"ok"},"error":{"code":"internal","message":"boom"}}
+    {"id":"1","version":2,"result":{"type":"ok"},"error":{"code":"internal","message":"boom"}}
     """#.utf8)
     #expect(throws: (any Error).self) {
         try ControlProtocolCodec.decode(WireResponse.self, from: data)
     }
 }
 
-// The exact-version rule (see `ProtocolVersion`) holds on responses/events too, not just requests: both check `version` before the payload.
+// The exact-version rule (see `ProtocolVersion`) holds on responses/events too, not just requests: both
+// check `version` before the payload.
+//
+// ⚠️ **Both payloads are otherwise valid, and that is what makes this test mean anything.** The event
+// half used to carry `{"event":{}}`, which throws for being an undecodable `WatchEvent` whatever the
+// version says — delete the version check entirely and it still passed. A payload that would decode
+// cleanly at the current version isolates the rule under test.
 @Test
-func aNonCurrentVersionIsRejectedOnBothResponseAndEvent() {
-    let response = Data(#"{"id":"1","version":2,"result":{"type":"ok"}}"#.utf8)
-    let event = Data(#"{"id":"sub","version":2,"event":{}}"#.utf8)
-    #expect(throws: (any Error).self) { try ControlProtocolCodec.decode(WireResponse.self, from: response) }
-    #expect(throws: (any Error).self) { try ControlProtocolCodec.decode(WireEvent.self, from: event) }
+func aNonCurrentVersionIsRejectedOnBothResponseAndEvent() throws {
+    // Built by encoding real values, so "otherwise valid" is a fact rather than a claim about a
+    // hand-written string.
+    let response = try ControlProtocolCodec.encode(WireResponse(id: "1", payload: .result(.ok)))
+    let event = try ControlProtocolCodec.encode(
+        WireEvent(id: "sub", event: WatchEvent(sequence: 1, state: minimalWireState))
+    )
+
+    // Both decode at the current version — this is what stops the test from passing for the wrong
+    // reason. The event half used to carry `{"event":{}}`, which throws for being an undecodable
+    // `WatchEvent` whatever the version says: delete the version check entirely and it still passed.
+    #expect(throws: Never.self) { try ControlProtocolCodec.decode(WireResponse.self, from: response) }
+    #expect(throws: Never.self) { try ControlProtocolCodec.decode(WireEvent.self, from: event) }
+
+    // Now nothing differs but the version.
+    #expect(throws: (any Error).self) {
+        try ControlProtocolCodec.decode(WireResponse.self, from: withVersion(3, response))
+    }
+    #expect(throws: (any Error).self) {
+        try ControlProtocolCodec.decode(WireEvent.self, from: withVersion(3, event))
+    }
+}
+
+/// A `WireControlState` with nothing interesting in it — enough to make an envelope decodable.
+private let minimalWireState = WireControlState(
+    operation: .init(kind: .idle),
+    lifecycleFailure: nil, notice: nil, recoveryNotice: nil,
+    title: "", suggestedTitle: "",
+    settings: WireSettings(archivePath: "", segmentSeconds: 30, deleteSegmentsAfterAssembly: true,
+                           microphonePriority: [], managesSystemDefaultInput: false,
+                           captureMicrophoneChoice: .followPriority),
+    recordings: [], canStart: true, canStop: false)
+
+/// Rewrite only the `version` field of an encoded envelope.
+private func withVersion(_ version: Int, _ data: Data) -> Data {
+    let text = String(decoding: data, as: UTF8.self)
+        .replacingOccurrences(of: "\"version\":\(ProtocolVersion.current)",
+                              with: "\"version\":\(version)")
+    return Data(text.utf8)
 }
 
 // MARK: - The dependency confinement

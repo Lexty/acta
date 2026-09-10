@@ -9,20 +9,54 @@ import Foundation
 /// runtime representation, so the two are kept structurally distinct; the projection in `ActaRuntime`
 /// converts between them.
 public struct WireSettings: Codable, Equatable, Sendable {
+    /// How a recording chooses its microphone. A closed set on the wire, so an unknown value is a
+    /// decoding failure rather than a silent fallback to "the system default", which is the behaviour
+    /// this whole feature exists to end.
+    public enum CaptureChoice: String, Codable, Sendable {
+        case followPriority = "follow_priority"
+        case systemDefault = "system_default"
+    }
+
     public var archivePath: String
     public var segmentSeconds: Int
     public var deleteSegmentsAfterAssembly: Bool
+    /// The user's microphones, most preferred first, by UID.
+    public var microphonePriority: [String]
+    /// Whether Acta holds the **Mac's** default input on that list.
+    public var managesSystemDefaultInput: Bool
+    /// Whether a recording follows the list or starts from the system default.
+    public var captureMicrophoneChoice: CaptureChoice
 
-    public init(archivePath: String, segmentSeconds: Int, deleteSegmentsAfterAssembly: Bool) {
+    /// ⚠️ **The three microphone fields are required, not optional, and that is the point of the
+    /// version bump.** Every peer that speaks this schema ships in the same binary as the server —
+    /// `Package.swift` declares no CLI target and `actactl` appears nowhere under `Sources/` — so there
+    /// is no deployed v1 client to keep decoding. Optional fields would buy compatibility nobody needs
+    /// and cost the one guarantee worth having: a settings payload that forgets the microphone is
+    /// rejected instead of quietly meaning "no preference".
+    ///
+    /// ⚠️ **On-disk settings are the opposite case and stay optional** — see
+    /// `RecordingSettings.init(from:)`. A config written by an older build must still open.
+    public init(archivePath: String,
+                segmentSeconds: Int,
+                deleteSegmentsAfterAssembly: Bool,
+                microphonePriority: [String],
+                managesSystemDefaultInput: Bool,
+                captureMicrophoneChoice: CaptureChoice) {
         self.archivePath = archivePath
         self.segmentSeconds = segmentSeconds
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly
+        self.microphonePriority = microphonePriority
+        self.managesSystemDefaultInput = managesSystemDefaultInput
+        self.captureMicrophoneChoice = captureMicrophoneChoice
     }
 
     private enum CodingKeys: String, CodingKey {
         case archivePath = "archive_path"
         case segmentSeconds = "segment_seconds"
         case deleteSegmentsAfterAssembly = "delete_segments_after_assembly"
+        case microphonePriority = "microphone_priority"
+        case managesSystemDefaultInput = "manages_system_default_input"
+        case captureMicrophoneChoice = "capture_microphone_choice"
     }
 }
 

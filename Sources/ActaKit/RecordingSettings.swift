@@ -15,13 +15,41 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     public var segmentSeconds: Int
     /// Delete the segment directories after a successful assembly.
     public var deleteSegmentsAfterAssembly: Bool
+    /// The user's microphones, most preferred first, by **UID**.
+    ///
+    /// ⚠️ **One list, two consumers**, and that is deliberate: a user has one order of preference, and
+    /// two lists would let a menu showing one of them lie about the other. What differs is eligibility
+    /// (`canBeSystemDefault` filters the system default and not Acta's capture) and lifetime (a
+    /// recording pins at start; the system default is held continuously).
+    ///
+    /// ⚠️ Never the display name: two devices can share one, and a rename must not orphan an entry.
+    public var microphonePriority: [String]
+    /// Whether Acta holds the **Mac's** default input on that list — feature (B).
+    ///
+    /// ⚠️ **Opt-in, off by default**, because it changes state every other application on the machine
+    /// depends on. It is not a switch over Acta's own recording device: that keeps working either way,
+    /// and sharing one flag between the two promises is what the plan forbids.
+    public var managesSystemDefaultInput: Bool
+    /// Whether a recording follows `microphonePriority` or starts from the system default.
+    ///
+    /// ⚠️ **Persisted, and this is the field the plan's Task 6 checklist does not name.** It was added
+    /// here rather than in Task 7 for one reason worth stating: Task 5 made "use the system default" an
+    /// explicit resolve-then-pin *choice*, and a choice that resets at every relaunch is not a setting.
+    /// Adding it later would also mean a second protocol bump for a field that could ride this one.
+    public var captureMicrophoneChoice: CaptureMicrophoneChoice
 
     public init(archivePath: String = "",
                 segmentSeconds: Int = SegmentLayout.defaultSegmentSeconds,
-                deleteSegmentsAfterAssembly: Bool = true) {
+                deleteSegmentsAfterAssembly: Bool = true,
+                microphonePriority: [String] = [],
+                managesSystemDefaultInput: Bool = false,
+                captureMicrophoneChoice: CaptureMicrophoneChoice = .followPriority) {
         self.archivePath = archivePath
         self.segmentSeconds = segmentSeconds
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly
+        self.microphonePriority = microphonePriority
+        self.managesSystemDefaultInput = managesSystemDefaultInput
+        self.captureMicrophoneChoice = captureMicrophoneChoice
     }
 
     /// Default settings.
@@ -42,6 +70,17 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         segmentSeconds = try c.decodeIfPresent(Int.self, forKey: .segmentSeconds) ?? def.segmentSeconds
         deleteSegmentsAfterAssembly = try c.decodeIfPresent(Bool.self, forKey: .deleteSegmentsAfterAssembly)
             ?? def.deleteSegmentsAfterAssembly
+        // ⚠️ **On-disk migration is a separate concern from the wire version, and they must not be
+        // conflated.** A config written before these fields existed decodes with them defaulted — an
+        // empty list and feature (B) off, which is exactly the state a fresh install is in. The *wire*
+        // fields are required, because there every peer ships in this same binary.
+        microphonePriority = try c.decodeIfPresent([String].self, forKey: .microphonePriority)
+            ?? def.microphonePriority
+        managesSystemDefaultInput = try c.decodeIfPresent(Bool.self, forKey: .managesSystemDefaultInput)
+            ?? def.managesSystemDefaultInput
+        captureMicrophoneChoice = try c.decodeIfPresent(CaptureMicrophoneChoice.self,
+                                                        forKey: .captureMicrophoneChoice)
+            ?? def.captureMicrophoneChoice
     }
 
     /// Clamp the segment length to the allowed range.
@@ -55,6 +94,9 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         case archivePath(String)
         case segmentSeconds(Int)
         case deleteSegmentsAfterAssembly(Bool)
+        case microphonePriority([String])
+        case managesSystemDefaultInput(Bool)
+        case captureMicrophoneChoice(CaptureMicrophoneChoice)
     }
 
     /// A copy of `self` with one field replaced — the anti-clobber primitive for the two-way settings
@@ -68,6 +110,9 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         case .archivePath(let value): copy.archivePath = value
         case .segmentSeconds(let value): copy.segmentSeconds = value
         case .deleteSegmentsAfterAssembly(let value): copy.deleteSegmentsAfterAssembly = value
+        case .microphonePriority(let value): copy.microphonePriority = value
+        case .managesSystemDefaultInput(let value): copy.managesSystemDefaultInput = value
+        case .captureMicrophoneChoice(let value): copy.captureMicrophoneChoice = value
         }
         return copy
     }
