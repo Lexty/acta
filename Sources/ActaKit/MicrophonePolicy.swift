@@ -52,6 +52,18 @@ public enum MicrophoneSelection: Equatable, Sendable {
 
     /// Nothing on this machine can serve this purpose at all.
     case noEligibleDevice
+
+    /// Preferred devices **are** present and usable, and every one of them was refused by the OS during
+    /// this reconciliation pass.
+    ///
+    /// ⚠️ **A fourth case rather than a reuse of the two above, because those two are facts about
+    /// hardware and preferences and this is an operational failure.** Folding it into
+    /// `noPreferredDeviceAvailable` tells the user "waiting for your USB microphone to appear" while the
+    /// microphone is plugged in and the OS is rejecting it; folding it into `noEligibleDevice` claims
+    /// the machine has nothing usable while it visibly does. Either way the one status that should
+    /// raise an alarm would be indistinguishable from ordinary waiting — which is the failure mode this
+    /// whole feature is built to avoid.
+    case allPreferredCandidatesRefused([String])
 }
 
 /// Whether a device is on the machine — with the third answer that keeps a failed look from passing for
@@ -82,21 +94,32 @@ public enum MicrophonePolicy {
                               priority: MicrophonePriority,
                               purpose: SelectionPurpose,
                               refused: Set<String> = []) -> MicrophoneSelection {
-        let candidates = devices.filter { eligible($0, for: purpose) && !refused.contains($0.uid) }
-        guard !candidates.isEmpty else { return .noEligibleDevice }
+        // ⚠️ **The refusal set is applied last, not first, and the order is the whole point.** Filtering
+        // it out up front makes both non-selection answers lie: a machine holding the very device the OS
+        // just refused reports "nothing usable here", and a present-but-refused preferred device reports
+        // "still waiting for it to connect". Each outcome below is decided against what is *actually on
+        // the machine*, and only then is the refusal applied.
+        let eligibleDevices = devices.filter { eligible($0, for: purpose) }
+        guard !eligibleDevices.isEmpty else { return .noEligibleDevice }
 
         // The override outranks the list — but only while its device is actually usable. A `Use now`
         // whose device has gone selects nothing here; retiring the stale override is the reconciler's
         // job, and doing it here would make a pure function that edits its own input.
+        var preferred: [AudioInputDevice] = []
         if let override = priority.override,
-           let device = candidates.first(where: { $0.uid == override }) {
-            return .selected(device)
+           let device = eligibleDevices.first(where: { $0.uid == override }) {
+            preferred.append(device)
         }
-
         for uid in priority.order {
-            if let device = candidates.first(where: { $0.uid == uid }) { return .selected(device) }
+            if let device = eligibleDevices.first(where: { $0.uid == uid }),
+               !preferred.contains(where: { $0.uid == device.uid }) {
+                preferred.append(device)
+            }
         }
-        return .noPreferredDeviceAvailable
+        guard !preferred.isEmpty else { return .noPreferredDeviceAvailable }
+
+        if let device = preferred.first(where: { !refused.contains($0.uid) }) { return .selected(device) }
+        return .allPreferredCandidatesRefused(preferred.map(\.uid))
     }
 
     /// Whether `uid` is on the machine, given a snapshot that may be incomplete.

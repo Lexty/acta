@@ -128,6 +128,50 @@ func aCandidateTheOSRefusedIsSteppedOverRatherThanRetriedForever() {
 }
 
 @Test
+func aRefusedCandidateNeverDisguisesItselfAsMissingHardware() {
+    // ⚠️ The refusal set is applied **after** both non-selection outcomes are decided, and these two
+    // sequences are why. Filtering refusals out first made the policy answer "nothing on this machine
+    // can serve this purpose" about a machine holding exactly one working microphone, and "still
+    // waiting for your preferred device to appear" about a device that was plugged in and rejected.
+    // Both statuses are user-visible, and both would have turned an operational failure into ordinary
+    // waiting — the one thing this feature must never do.
+    let onlyUSB = devices(.usbMic())
+    let usbFirst = MicrophonePriority(order: ["USBAudioDevice_UID"])
+
+    #expect(MicrophonePolicy.select(from: onlyUSB, priority: usbFirst, purpose: .systemDefault,
+                                    refused: ["USBAudioDevice_UID"])
+            == .allPreferredCandidatesRefused(["USBAudioDevice_UID"]))
+
+    // And with a fallback present, the refusal must not read as "the preferred device is not here".
+    let both = devices(.usbMic(), .builtInMic())
+    #expect(MicrophonePolicy.select(from: both, priority: usbFirst, purpose: .systemDefault,
+                                    refused: ["USBAudioDevice_UID"])
+            == .allPreferredCandidatesRefused(["USBAudioDevice_UID"]))
+
+    // The honest answers are still reachable, and still mean what they say.
+    #expect(MicrophonePolicy.select(from: devices(.builtInMic()), priority: usbFirst,
+                                    purpose: .systemDefault) == .noPreferredDeviceAvailable)
+    #expect(MicrophonePolicy.select(from: [], priority: usbFirst,
+                                    purpose: .systemDefault) == .noEligibleDevice)
+}
+
+@Test
+func anOverrideThatWasRefusedFallsThroughToTheListRatherThanStalling() {
+    // The override is a preferred candidate like any other for refusal purposes: refused once, the
+    // list below it still gets its turn in the same pass.
+    let priority = MicrophonePriority(order: ["BuiltInMicrophoneDevice"], override: "00-00-5E-00-53-01:input")
+    let all = devices(.airPods(), .builtInMic())
+
+    #expect(MicrophonePolicy.select(from: all, priority: priority,
+                                    purpose: .systemDefault) == .selected(.airPods()))
+    #expect(MicrophonePolicy.select(from: all, priority: priority, purpose: .systemDefault,
+                                    refused: ["00-00-5E-00-53-01:input"]) == .selected(.builtInMic()))
+    #expect(MicrophonePolicy.select(from: all, priority: priority, purpose: .systemDefault,
+                                    refused: ["00-00-5E-00-53-01:input", "BuiltInMicrophoneDevice"])
+            == .allPreferredCandidatesRefused(["00-00-5E-00-53-01:input", "BuiltInMicrophoneDevice"]))
+}
+
+@Test
 func absenceFromAnIncompleteSnapshotIsNotADisconnect() {
     // ⚠️ Consumers act destructively on absence — an override expires, a recording fails over — so
     // concluding "gone" from a snapshot that admits it could not describe every device would turn one

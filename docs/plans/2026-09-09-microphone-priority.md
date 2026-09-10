@@ -200,6 +200,18 @@ be one that cannot loop.
       default-input change, readiness change, override expiry, **preference edit**, **Use now**
 - [ ] ⚠️ **Do not diff winners.** The winner can stay unchanged while the actual default moves; the
       comparison is always against the freshly read actual default
+- [ ] ⚠️ **A fallback selection is not evidence that the previous device left.** `MicrophonePolicy.select`
+      takes no snapshot-completeness input by design, so on a partial snapshot it will happily return a
+      lower-priority candidate. That must never be read as proof the override's or the current device
+      disappeared: expiry and failover go through `MicrophonePolicy.presence`, whose `.unknown` exists
+      for exactly this, and a pin is retired only on `.absent`. Pin the sequence here **and** at the
+      capture consumer in Task 5 — a helper only protects the caller that consults it
+- [ ] ⚠️ **A refused candidate must not reset the error or retry history.** `select` reports
+      `.allPreferredCandidatesRefused` rather than disguising a rejected write as ordinary waiting or as
+      missing hardware; the reconciler must carry that through to a visible operational status, not
+      fold it into "waiting for a preferred microphone". Pin both sequences: a rejected *last* preferred
+      candidate must not become success, must not become ordinary waiting, and must not become
+      no-hardware
 - [ ] ⚠️ **Coalescing must not eat the fact that a device left.** The sequence that breaks a naive
       coalescer: *override on X → X disappears → X reconnects with the same UID → coalescing delivers
       only the final snapshot, which contains X.* The override should have expired on the
