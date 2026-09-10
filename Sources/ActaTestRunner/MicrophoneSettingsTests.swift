@@ -185,6 +185,35 @@ struct MicrophoneSettingsTests {
         #expect(await manager.reconciler.isEnabled == false)
     }
 
+    /// ⚠️ **A save queued before Quit must not re-enable enforcement after the quit sequence began.**
+    /// Bumping a revision invalidates applications that are already *running*; it says nothing about
+    /// one still in the queue, which starts later, bumps the revision itself, and sees the manager
+    /// still started — quitting deliberately keeps read-only monitoring alive through the assembly.
+    /// Two saves requested before Quit were enough to write the system default after `stopEnforcement`
+    /// had returned, with no user action after Quit at all.
+    @Test("a settings application queued before the quit boundary cannot re-enable enforcement")
+    @MainActor
+    func aQueuedApplicationCannotReEnableAfterStopEnforcement() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(
+            devices: [.builtInMic(), .airPods()], defaultInput: "00-00-5E-00-53-01:input"
+        )
+        manager.start()
+        await manager.apply(RecordingSettings(microphonePriority: ["00-00-5E-00-53-01:input"],
+                                              managesSystemDefaultInput: true))
+
+        // The quit sequence starts, and a save requested before it lands afterwards.
+        await manager.stopEnforcement()
+        let writesAtStop = directory.attemptedWrites
+        await manager.apply(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                              managesSystemDefaultInput: true))
+
+        #expect(directory.attemptedWrites == writesAtStop,
+                "a queued save wrote the system default after the quit boundary")
+        #expect(await manager.reconciler.isEnabled == false)
+        // ⚠️ The list still applies — the recording that is still finishing resolves against it.
+        #expect(manager.capturePreference.priority.order == ["BuiltInMicrophoneDevice"])
+    }
+
     /// ⚠️ **Feature (B) off must not disable Acta's own capture selection**: different promises, and the
     /// plan forbids them sharing a switch.
     @Test("feature (B) off still leaves the capture list applied")

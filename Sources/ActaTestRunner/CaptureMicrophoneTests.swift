@@ -254,8 +254,8 @@ struct CaptureMicrophoneTests {
                 .pinned(.builtInMic(), alternatives: []), in: directory
             )
             // One buffer per side: the property under test needs a buffer on each side of the switch.
-            // `FakeCaptureSource.framesPerBuffer` is one second at 48 kHz, so each side is one second
-            // of audio *as delivered* — a 24 kHz buffer of the same frame count is half a second.
+            // `FakeCaptureSource.framesPerBuffer` is one second at 48 kHz; the same frame count at
+            // 24 kHz is **two** seconds of audio, not half.
             source.setEmitOnStart(false)
             try await recorder.start()
             source.enqueueBatch(count: 1)
@@ -277,19 +277,23 @@ struct CaptureMicrophoneTests {
             let assembled = try SegmentAssembler().assemble(in: directory, deleteSegments: false)
 
             #expect(assembled.segmentCount == 2, "a segment on each side of the switch must assemble")
-            let mic = try #require(assembled.micWAV, "the microphone track did not assemble")
-            #expect(FileManager.default.fileExists(atPath: mic.path))
 
-            // ⚠️ **Duration conservation is the assertion that catches the real failure mode**: a new
-            // source format whose buffers cannot be written leaves a segment that opens and holds
-            // nothing, and `source.start()` returning is not evidence the new track can be written.
-            // The pre-switch second plus the post-switch buffer, which is `framesPerBuffer` at the new
-            // rate.
+            // ⚠️ **Each track measured separately, and this is the blind spot the first version had.**
+            // `Result.segmentCount` and `Result.durationSeconds` are both **maxima across the tracks**,
+            // so a microphone that stopped being written after the switch is completely hidden by a
+            // healthy system track — a control that dropped only the mic buffers passed all four cases.
+            // `micWAV` existing proves only that its pre-switch second survived.
+            //
+            // The pre-switch second plus the post-switch buffer, which is `framesPerBuffer` frames at
+            // the **new** rate — two seconds at 24 kHz, one at 48 kHz.
             let postSwitch = Double(FakeCaptureSource.framesPerBuffer) / format.rate
             let expected = 1.0 + postSwitch
-            let duration = try #require(assembled.durationSeconds, "the assembled file has no duration")
-            #expect(abs(duration - expected) < 0.05,
-                    "assembled \(duration)s, expected \(expected)s — audio was lost across the switch")
+            for (track, url) in [("mic", assembled.micWAV), ("system", assembled.systemWAV)] {
+                let file = try #require(url, "the \(track) track did not assemble")
+                let duration = try #require(durationOfWAV(at: file), "\(track) has no readable duration")
+                #expect(abs(duration - expected) < 0.05,
+                        "\(track): assembled \(duration)s, expected \(expected)s — audio lost across the switch")
+            }
         }
     }
 
@@ -362,6 +366,29 @@ struct CaptureMicrophoneTests {
 
             #expect(adopted.pairs.count == 1)
             #expect(adopted.pairs.first?.1 == .usbMic())
+            await recorder.stop()
+        }
+    }
+
+    /// ⚠️ **An explicit switch is not a hardware failure.** Every device-changing restart used to be
+    /// announced as "<previous> stopped working" — so choosing a USB microphone over a perfectly
+    /// healthy built-in one said the built-in had failed, and then the caller that asked for the switch
+    /// reported it a second time.
+    @Test("an explicit switch is not announced as a failure")
+    @available(macOS 15.0, *)
+    func anExplicitSwitchIsNotAnnouncedAsFailure() async throws {
+        try await withTemporaryDirectoryAsync { directory in
+            let (_, resolver, recorder) = self.recorder(.pinned(.builtInMic(), alternatives: []),
+                                                        in: directory)
+            let adopted = ReportedDevices()
+            recorder.onDeviceAdopted = { previous, now in adopted.record(previous, now) }
+            try await recorder.start()
+
+            resolver.set(.pinned(.usbMic(), alternatives: []))
+            try await recorder.restart(reason: .userSwitch)
+
+            #expect(recorder.pinnedMicrophone == .usbMic())
+            #expect(adopted.pairs.isEmpty, "a deliberate switch was announced as a failure")
             await recorder.stop()
         }
     }
@@ -607,6 +634,32 @@ struct RecordingMicrophoneLossTests {
             #expect(reported.messages.count == messagesAtStop,
                     "a message arrived after the recording had stopped")
             #expect(source.isStreaming == false)
+        }
+    }
+
+    /// ⚠️ **A returning device is not evidence the capture recovered.** Deliver "the headset is gone"
+    /// and then "the headset is back" before the handler runs, and keeping only the newest snapshot
+    /// throws the proved departure away: no restart is issued and the capture goes on pointing at a
+    /// stream that was torn down when the device left.
+    @Test("a departure observed before a return is not cancelled by the return")
+    @available(macOS 15.0, *)
+    func aDepartureIsNotCancelledByAReturn() async throws {
+        try await withLossHarness { devices, source, resolver, session, _ in
+            resolver.set(.pinned(.builtInMic(), alternatives: []))
+            let startsBefore = source.startedMicrophoneIDs.count
+
+            // ⚠️ **Both delivered in one actor entry.** Emitting twice through the directory lets the
+            // driver run in between, and the test then passes against the very bug it is written for.
+            await session.deliverForTesting([
+                .devices([.builtInMic()], uninspectable: []),
+                .devices([.airPods(), .builtInMic()], uninspectable: []),
+            ])
+
+            let restarted = await awaitCondition {
+                source.startedMicrophoneIDs.count > startsBefore
+            }
+            #expect(restarted, "the proved departure was cancelled by the device returning")
+            _ = devices
         }
     }
 

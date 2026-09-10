@@ -266,16 +266,32 @@ public final class AudioRecorder: @unchecked Sendable {
     /// advance; and advancing them before the new capture exists means nothing can be appended into
     /// a segment that is being finalized. It ends in `self.start()`, not `source.start()`, because
     /// that is what re-checks the permissions.
-    public func restart() async throws {
-        try await serialized { try await self.performRestart() }
+    /// - Parameter reason: who asked, and therefore who reports the outcome. The default is the
+    ///   watchdog, which is the caller that cannot pass one — `SelfCheck` knows nothing of this.
+    public func restart(reason: RestartReason = .watchdog) async throws {
+        try await serialized { try await self.performRestart(reason: reason) }
     }
 
-    /// Called after a restart changed the device without anyone asking — a watchdog recovery that
-    /// re-resolved onto a different microphone. ⚠️ **Reported, never silent**: the audio changes source
-    /// mid-meeting and a user who cannot tell why has been handed a mystery.
+    /// Why a restart is happening. ⚠️ **Carried so that exactly one owner reports it, with the true
+    /// reason.** Without it every device-changing restart looked identical, so an explicit *Use now*
+    /// from a perfectly healthy built-in microphone to a USB one was announced as "MacBook Pro
+    /// Microphone stopped working" — and then announced a second time, correctly, by the caller that
+    /// had asked for it.
+    public enum RestartReason: Equatable, Sendable {
+        /// Self-healing: the stream stalled or did not come up. Nobody else is reporting this one.
+        case watchdog
+        /// The user asked for this device. The caller that took the request reports the outcome.
+        case userSwitch
+        /// The pinned device became unusable. The loss watch reports what it landed on.
+        case deviceLoss
+    }
+
+    /// Called after a **watchdog** restart re-resolved onto a different microphone — the one case with
+    /// no other owner. ⚠️ Reported, never silent: the audio changes source mid-meeting and a user who
+    /// cannot tell why has been handed a mystery.
     public var onDeviceAdopted: (@Sendable (AudioInputDevice, AudioInputDevice) -> Void)?
 
-    private func performRestart() async throws {
+    private func performRestart(reason: RestartReason) async throws {
         // ⚠️ Checked at **admission**, before the source is torn down, so a late switch cannot even
         // interrupt a finished recording — never mind reopen one.
         guard !isStopped else {
@@ -296,7 +312,9 @@ public final class AudioRecorder: @unchecked Sendable {
         // microphone, which is why a *Use now* and a priority edit both take effect here and why every
         // device switch is a restart rather than a second lifecycle owner.
         try await performStart(restoring: before)
-        if let before, let after = pinnedMicrophone, before.uid != after.uid {
+        // ⚠️ Only the watchdog's own recovery is announced here; the other two have callers that report
+        // the outcome themselves, and announcing both produced two notices for one event.
+        if reason == .watchdog, let before, let after = pinnedMicrophone, before.uid != after.uid {
             onDeviceAdopted?(before, after)
         }
     }

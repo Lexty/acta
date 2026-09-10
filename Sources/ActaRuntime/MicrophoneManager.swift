@@ -176,8 +176,10 @@ public final class MicrophoneManager {
         // still enabled — so switching the feature off wrote the Mac's default input on its way out.
         // It also gave a stale application a second step to run late and re-enable enforcement after a
         // newer one had settled.
+        // ⚠️ Enforcement is admitted, not merely current. A queued save that starts after the quit
+        // sequence began applies its list and leaves the feature off.
         await reconciler.configure(order: settings.microphonePriority,
-                                   enabled: settings.managesSystemDefaultInput)
+                                   enabled: settings.managesSystemDefaultInput && enforcementAdmitted)
 
         // ⚠️ **Checked after the await, not only before it.** A newer application may have settled while
         // this one was suspended, and an older one must not have the last word.
@@ -274,6 +276,7 @@ public final class MicrophoneManager {
     public func start() {
         guard !started else { return }
         started = true
+        enforcementAdmitted = true
         subscribe()
         refreshInventory()
         mirrorEnforcement()
@@ -314,10 +317,23 @@ public final class MicrophoneManager {
     /// monitoring is still wanted while a recording finishes: what must stop first is the half that
     /// changes state other applications depend on.
     public func stopEnforcement() async {
-        // ⚠️ Invalidates any application still in flight: after this, none of them may enable anything.
+        // ⚠️ **A latch, not a revision bump, and that distinction is the defect.** Bumping the revision
+        // invalidates applications that are already *running*; it says nothing about one still sitting
+        // in the queue, which starts later, bumps the revision itself, sees the manager still started —
+        // quitting keeps read-only monitoring alive through the assembly — and enables enforcement
+        // again. Two saves requested before Quit are enough: the second one wrote the system default
+        // after `stopEnforcement` had returned, with no user action after Quit at all.
+        enforcementAdmitted = false
         settingsRevision &+= 1
         await reconciler.disable()
     }
+
+    /// Whether a settings application may still turn enforcement **on**.
+    ///
+    /// Closed at the first quit boundary and never reopened by an application — only by `start()`.
+    /// Read-only monitoring is deliberately unaffected: the recording still needs the device inventory
+    /// while it finishes assembling.
+    private var enforcementAdmitted = true
 
     /// Stop this app's consumers of the directory, and **wait until that is true**.
     ///

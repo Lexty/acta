@@ -198,6 +198,12 @@ public final class RecordingSession: @unchecked Sendable {
     /// Clean stop: stop the capture, assemble the segments, mark the marker as `done`. Deleting the
     /// segments after the assembly comes from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
+    /// Deliver observations to the loss watch without going through the directory — test-facing, and
+    /// the only way to pin an ordering the scheduler would otherwise choose.
+    func deliverForTesting(_ snapshots: [DeviceEnumeration]) async {
+        await lossWatch.observe(snapshots)
+    }
+
     /// Watch for the pinned microphone becoming unusable.
     ///
     /// ⚠️ **The watchdog is not a substitute, and assuming it was is what left this missing.**
@@ -251,7 +257,7 @@ public final class RecordingSession: @unchecked Sendable {
     /// must not show a device as active before capture succeeded on it.
     public func switchMicrophone(to requested: String) async -> MicrophoneSwitchResult {
         do {
-            try await recorder.restart()
+            try await recorder.restart(reason: .userSwitch)
         } catch {
             log.error("Microphone switch failed: \(error.localizedDescription, privacy: .public)")
             // ⚠️ Same rule as a lost device: an explicit switch that leaves **nothing** recording is a
@@ -384,10 +390,14 @@ actor MicrophoneLossWatch {
     private var report: (@Sendable (ControllerMessage) -> Void)?
     private var fatal: (@Sendable (StartupFailure) -> Void)?
     private var stopped = false
-    /// The newest observation not yet acted on. ⚠️ **Coalesced, never dropped**: an in-flight flag that
-    /// discarded whatever arrived while a restart was running would throw away the very snapshot that
-    /// says the fallback has gone too.
-    private var latest: DeviceEnumeration?
+    /// A loss **proved by some observation**, whether or not the newest one still shows it.
+    ///
+    /// ⚠️ **The fact is kept, not the snapshot, and my previous comment here overstated what keeping
+    /// the newest snapshot achieved.** Deliver "built-in only" and then "AirPods back" before the
+    /// driver runs, and the healthy snapshot replaces the other: the proved departure is gone, no
+    /// restart is issued, and the capture goes on pointing at a device that left. A device returning is
+    /// not evidence that the *existing* capture recovered — the stream was torn down when it left.
+    private var lossProved = false
     private var driver: Task<Void, Never>?
 
     init(recorder: AudioRecorder) { self.recorder = recorder }
@@ -398,47 +408,59 @@ actor MicrophoneLossWatch {
         self.fatal = fatal
     }
 
+    /// Deliver several observations **in one actor entry**, so the driver cannot run between them.
+    ///
+    /// ⚠️ Test-facing. It exists because the property under test is precisely what happens when two
+    /// deliveries are queued ahead of the driver: calling `observe` twice from a test gives the driver a
+    /// chance to run in between, and the test then passes against the bug it was written for.
+    func observe(_ snapshots: [DeviceEnumeration]) {
+        for snapshot in snapshots { observe(snapshot) }
+    }
+
     func observe(_ snapshot: DeviceEnumeration) {
         guard !stopped else { return }
-        latest = snapshot
-        guard driver == nil else { return }
+        // ⚠️ Evaluated **here**, against the snapshot that was delivered, rather than later against
+        // whichever one happens to be newest.
+        if let pinned = recorder.pinnedMicrophone, Self.isProvedUnusable(pinned, in: snapshot) {
+            lossProved = true
+        }
+        guard lossProved, driver == nil else { return }
         driver = Task { await self.drain() }
+    }
+
+    /// Whether this snapshot **proves** the device cannot be recorded from.
+    ///
+    /// Unusable is not only absent: a device can stay listed and stop being alive, or lose its input
+    /// channels. And absence is proved, never inferred — missing from a snapshot that could not
+    /// describe every driver is `.unknown`, and acting on an unknown is acting on a guess.
+    private static func isProvedUnusable(_ pinned: AudioInputDevice, in snapshot: DeviceEnumeration) -> Bool {
+        guard case .devices(let devices, let uninspectable) = snapshot else { return false }
+        if let listed = devices.first(where: { $0.uid == pinned.uid }) { return !listed.isCaptureCandidate }
+        return uninspectable.isEmpty
     }
 
     /// Latch, then **join**. A recording that has stopped owns nothing still running.
     func stop() async {
         stopped = true
-        latest = nil
+        lossProved = false
         let running = driver
         await running?.value
         driver = nil
     }
 
     private func drain() async {
-        while !stopped, let snapshot = latest {
-            latest = nil
-            await handle(snapshot)
+        while !stopped, lossProved {
+            lossProved = false
+            await handle()
         }
         driver = nil
     }
 
-    private func handle(_ snapshot: DeviceEnumeration) async {
+    private func handle() async {
         guard let pinned = recorder.pinnedMicrophone else { return }
-        guard case .devices(let devices, let uninspectable) = snapshot else { return }
-
-        // ⚠️ **Unusable is not only absent.** A device can stay listed and stop being alive, or lose its
-        // input channels; an observer that only asks "is it in the list" never learns. And absence is
-        // **proved**, never inferred: missing from a snapshot that could not describe every driver is
-        // `.unknown`, and failing a recording over on an unknown acts on a guess.
-        let listed = devices.first { $0.uid == pinned.uid }
-        switch (listed, uninspectable.isEmpty) {
-        case (let device?, _) where device.isCaptureCandidate: return
-        case (nil, false): return
-        default: break
-        }
 
         do {
-            try await recorder.restart()
+            try await recorder.restart(reason: .deviceLoss)
         } catch {
             // ⚠️ Checked **after** the await: the recording may have stopped while this was running, and
             // a stopped recording must not be handed a fatal failure it did not experience.
