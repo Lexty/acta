@@ -303,11 +303,51 @@ struct MicrophoneManagerTests {
         directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
         center.post(name: NSWorkspace.didWakeNotification, object: nil)
 
-        let corrected = await awaitEnforcement(manager) {
-            $0.status == .enforcing(uid: "BuiltInMicrophoneDevice")
-        }
-        #expect(corrected != nil, "the wake handler never reconciled")
-        #expect(directory.attemptedWrites == ["BuiltInMicrophoneDevice"])
+        // ⚠️ Waiting for `enforcing(built-in)` would prove nothing on its own: that is already the
+        // state, and a stream replays it immediately. The evidence of *fresh* reconciliation is the
+        // write that did not exist a moment ago.
+        let corrected = await awaitCondition { directory.attemptedWrites == ["BuiltInMicrophoneDevice"] }
+        #expect(corrected, "the wake handler never reconciled")
+        #expect(manager.enforcement.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
+    }
+
+    /// ⚠️ **The drain is not redundant with `verify()`'s per-iteration guard, and this is what tells
+    /// them apart.** The guard stops the next property *read* when verification resumes; the drain
+    /// waits for the owned pass to actually **finish**. Both leave the read count unchanged across
+    /// shutdown, which is why the read-count tests cannot distinguish them — and why I had wrongly
+    /// recorded the drain as untested-and-probably-redundant. Holding the sleep makes the difference
+    /// observable: without the drain, shutdown returns while its own pass is still suspended.
+    @Test("shutdown waits for the pass it owns, not merely for its next read")
+    func shutdownWaitsForTheOwnedPass() async {
+        let directory = FakeAudioDeviceDirectory(devices: [.builtInMic(), .airPods()],
+                                                 defaultInput: "00-00-5E-00-53-01:input")
+        let clock = GatedClock()
+        let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                                 makeClock: { clock },
+                                                                 makeWakeCenter: { NotificationCenter() }))
+        // Accepted, never takes effect: the verification sleeps, and the gate parks it there.
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+
+        let enabling = Task { await manager.enableEnforcement() }
+        let parked = await awaitCondition { clock.isHoldingSleeper }
+        #expect(parked, "the verification never reached a sleep to be held at")
+
+        // ⚠️ Bounded release, so a **repaired** implementation — which waits for this pass — finishes
+        // instead of hanging the suite. A test whose correct path deadlocks is not a test.
+        let releaser = Task { try? await Task.sleep(for: .milliseconds(300)); clock.release() }
+
+        await manager.shutdown()
+        let stillSuspended = clock.isHoldingSleeper
+
+        releaser.cancel()
+        clock.release()
+        await enabling.value
+
+        #expect(stillSuspended == false,
+                "shutdown returned while the pass it owns was still suspended")
     }
 
     /// ⚠️ Removing the observer stops *future* notifications and does nothing about a Task this one has

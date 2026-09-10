@@ -164,3 +164,67 @@ final class IntBox: @unchecked Sendable {
     func set(_ value: Int) { lock.lock(); stored = value; lock.unlock() }
     var value: Int? { lock.lock(); defer { lock.unlock() }; return stored }
 }
+
+/// A clock whose sleeps can be **held**, so a test can stand a consumer still inside one.
+///
+/// ⚠️ **`TestClock` cannot express this and that is why the drain looked untestable.** Its sleep costs
+/// a fixed 200 µs of real time, so "is the owned pass still suspended right now?" is a race there — and
+/// with only that clock, removing `shutdown()`'s drain fails nothing: the guard inside `verify()`
+/// already prevents the *read*, which is all the read-count tests can see. Holding the sleep separates
+/// the two properties: the guard stops the next read, the drain waits for the pass to actually finish.
+final class GatedClock: SelfCheckClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seconds = 0.0
+    private var held = false
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    var now: Double { lock.lock(); defer { lock.unlock() }; return seconds }
+
+    /// Park every sleep from now on instead of returning from it.
+    func hold() { lock.lock(); held = true; lock.unlock() }
+
+    /// Let everything parked go, and stop parking.
+    func release() {
+        lock.lock()
+        held = false
+        let waiting = parked
+        parked.removeAll()
+        lock.unlock()
+        for continuation in waiting { continuation.resume() }
+    }
+
+    /// Whether a sleeper is parked right now.
+    var isHoldingSleeper: Bool { lock.lock(); defer { lock.unlock() }; return !parked.isEmpty }
+
+    func sleep(for duration: Double) async {
+        let shouldPark: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            seconds += duration
+            return held
+        }()
+        guard shouldPark else { return }
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if held {
+                parked.append(continuation)
+                lock.unlock()
+            } else {
+                lock.unlock()
+                continuation.resume()
+            }
+        }
+    }
+}
+
+/// Wait until `condition` holds, or give up. Bounded so a regression fails instead of hanging.
+@MainActor
+func awaitCondition(timeoutMilliseconds: Int = 2000,
+                    _ condition: @escaping @Sendable () -> Bool) async -> Bool {
+    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        if condition() { return true }
+        await Task.yield()
+    }
+    return condition()
+}

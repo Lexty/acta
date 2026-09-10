@@ -238,12 +238,13 @@ public final class MicrophoneManager {
         lifetimeEpoch &+= 1
         started = false
         await stopEnforcement()
-        // ⚠️ **A second bound, and honestly a redundant one today.** What actually stops the in-flight
-        // verification from going on reading the directory is `verify()`'s own per-iteration guard
-        // (`MicrophoneReconciler.verify`), which is what the suite pins; by the time this line runs the
-        // pass has usually already ended. It stays because it is the only thing that covers a suspension
-        // the guard does not sit on, and because it costs nothing — but no test distinguishes its
-        // presence from its absence, and that is stated here rather than implied by its existence.
+        // ⚠️ **Not redundant with `verify()`'s per-iteration guard — they stop different things.** The
+        // guard prevents the next property *read* when verification resumes; this waits for the owned
+        // pass to actually **finish**. Both leave the read count unchanged across shutdown, which is
+        // why read-count assertions cannot tell them apart, and why I first recorded this line as
+        // probably-redundant. `shutdownWaitsForTheOwnedPass` distinguishes them by holding the sleep:
+        // without this line, shutdown returns while its own pass is still suspended. It is not free
+        // either — it can wait out a remaining poll — and that is the cost of finishing what you own.
         //
         // It is legitimate at all only because `disable()` was awaited above: draining is meaningful
         // once no new work can be scheduled. The earlier mistake was reaching for it to wait on a
