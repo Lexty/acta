@@ -247,7 +247,7 @@ func aFailedLivenessReadIsNotDeath() {
 }
 
 /// Holds subscription tokens a handler needs to cancel from inside itself.
-private final class TokenBox: @unchecked Sendable {
+final class TokenBox: @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: [any AudioDeviceObservation] = []
     func store(_ new: [any AudioDeviceObservation]) { lock.lock(); tokens = new; lock.unlock() }
@@ -259,7 +259,7 @@ private final class TokenBox: @unchecked Sendable {
 
 /// Collects changes from a subscription. A class, because the handler is `@Sendable` and the assertions
 /// run after it.
-private final class Recorder: @unchecked Sendable {
+final class Recorder: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [DeviceChange] = []
     func append(_ change: DeviceChange) { lock.lock(); storage.append(change); lock.unlock() }

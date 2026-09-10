@@ -53,29 +53,20 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     /// standing on a *different* directory's queue, which silently skips this one's serialization.
     private let coordinatorKey = DispatchSpecificKey<ObjectIdentifier>()
 
+    /// The lifecycle seam. Property *reading* stays inline below — it has no bookkeeping to get wrong —
+    /// but registration does, and against the real HAL a refusal is unreachable on demand.
+    private let hal: any AudioHALListening
+
     private var subscribers: [UInt64: Subscriber] = [:]
     private var nextToken: UInt64 = 1
-    private var systemBlocks: SystemBlocks?
+    private var systemRegistrations: [any HALRegistration] = []
     private var readinessListeners: [AudioObjectID: ReadinessListener] = [:]
 
     private struct HALError: Error { let reason: String }
 
-    private struct SystemBlocks {
-        let deviceList: AudioObjectPropertyListenerBlock
-        let defaultInput: AudioObjectPropertyListenerBlock
-    }
-
-    private final class ReadinessListener {
+    private struct ReadinessListener {
         let uid: String
-        let alive: AudioObjectPropertyListenerBlock
-        let streams: AudioObjectPropertyListenerBlock
-        init(uid: String,
-             alive: @escaping AudioObjectPropertyListenerBlock,
-             streams: @escaping AudioObjectPropertyListenerBlock) {
-            self.uid = uid
-            self.alive = alive
-            self.streams = streams
-        }
+        let registrations: [any HALRegistration]
     }
 
     /// One subscription's handler behind its gate. Only ever touched on `coordinatorQueue`, so the gate
@@ -103,7 +94,14 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         deinit { cancel() }
     }
 
-    public init() {
+    /// The shipped wiring, written once: the real CoreAudio HAL.
+    public convenience init() { self.init(hal: CoreAudioHAL()) }
+
+    /// ⚠️ **Not a default argument.** `.live`-style wiring belongs in a value a test can point at; a
+    /// default argument is the same claim in a form nothing can reach, because you cannot ask a
+    /// function what it *would* have passed. The public initializer above is that claim.
+    init(hal: any AudioHALListening) {
+        self.hal = hal
         coordinatorQueue.setSpecific(key: coordinatorKey, value: ObjectIdentifier(self))
     }
 
@@ -119,8 +117,10 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         // object. There is therefore no concurrent reader left to race. Scheduling the removal instead
         // would be worse, not better: a queued job capturing `self` weakly would find nothing and skip
         // it, leaving registered blocks with no cleanup path at all.
-        if let systemBlocks { Self.removeSystemListeners(systemBlocks, on: halQueue) }
-        for (id, listener) in readinessListeners { Self.removeReadiness(listener, from: id, on: halQueue) }
+        for registration in systemRegistrations { hal.remove(registration) }
+        for listener in readinessListeners.values {
+            for registration in listener.registrations { hal.remove(registration) }
+        }
     }
 
     /// Run `body` on the coordinator. Inline when already there, which is what makes cancelling from
@@ -130,19 +130,29 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         return coordinatorQueue.sync(execute: body)
     }
 
+    /// Block until everything already handed to the coordinator has run.
+    ///
+    /// ⚠️ **A test affordance, and deliberately not a public one.** HAL callbacks hop onto the
+    /// coordinator asynchronously by design — the HAL thread must never wait on our work — so a test
+    /// that fires a callback and asserts immediately is asserting against a queue that has not run yet.
+    /// The alternative is polling with a deadline, which turns a deterministic question into a flaky
+    /// one; this suite has already paid for that lesson once. It adds no behaviour: production never
+    /// calls it, and it cannot make a delivery happen that was not already scheduled.
+    func waitForPendingDeliveries() { coordinatorQueue.sync {} }
+
     // MARK: - Observation
 
     public func observe(_ handler: @escaping @Sendable (DeviceChange) -> Void) -> ObservationOutcome {
         onCoordinator {
-            if systemBlocks == nil {
+            if systemRegistrations.isEmpty {
                 switch installSystemListeners() {
                 case .failure(let error):
                     // Reported to this caller rather than remembered: a directory that failed to
                     // subscribe is indistinguishable from a quiet machine, and the caller has to be
                     // able to tell.
                     return .failed(reason: error.reason)
-                case .success(let blocks):
-                    systemBlocks = blocks
+                case .success(let registrations):
+                    systemRegistrations = registrations
                 }
             }
             let token = nextToken
@@ -182,34 +192,35 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
 
     // MARK: - Listener lifecycle (coordinator only)
 
-    private func installSystemListeners() -> Result<SystemBlocks, HALError> {
-        var deviceListAddress = Self.address(kAudioHardwarePropertyDevices)
-        let deviceListBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+    private func installSystemListeners() -> Result<[any HALRegistration], HALRegistrationFailure> {
+        let deviceList = hal.add(.deviceList, on: halQueue) { [weak self] in
             self?.onHALCallback { directory in
                 directory.refreshReadinessListeners()
                 directory.broadcast(.deviceListChanged)
             }
         }
-        let listStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                            &deviceListAddress, halQueue, deviceListBlock)
-        guard listStatus == noErr else {
-            return .failure(HALError(reason: "device-list listener: \(Self.describe(status: listStatus))"))
+        guard case .success(let listRegistration) = deviceList else {
+            if case .failure(let error) = deviceList {
+                return .failure(HALRegistrationFailure(reason: "device-list listener: \(error.reason)"))
+            }
+            return .failure(HALRegistrationFailure(reason: "device-list listener: unknown"))
         }
 
-        var defaultAddress = Self.address(kAudioHardwarePropertyDefaultInputDevice)
-        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        let defaultInput = hal.add(.defaultInput, on: halQueue) { [weak self] in
             self?.onHALCallback { $0.broadcast(.defaultInputChanged) }
         }
-        let defaultStatus = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                               &defaultAddress, halQueue, defaultBlock)
-        guard defaultStatus == noErr else {
-            // Do not leave half a subscription installed: a directory reporting device-list changes but
-            // never default-input changes is exactly the "unchanged winner, moved default" blind spot.
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                   &deviceListAddress, halQueue, deviceListBlock)
-            return .failure(HALError(reason: "default-input listener: \(Self.describe(status: defaultStatus))"))
+        guard case .success(let defaultRegistration) = defaultInput else {
+            // ⚠️ **Do not leave half a subscription installed.** A directory reporting device-list
+            // changes but never default-input changes is exactly the "unchanged winner, moved default"
+            // blind spot the reconciler cannot see past — and it would look like a working
+            // subscription. Removing the half that succeeded is the only honest outcome.
+            hal.remove(listRegistration)
+            if case .failure(let error) = defaultInput {
+                return .failure(HALRegistrationFailure(reason: "default-input listener: \(error.reason)"))
+            }
+            return .failure(HALRegistrationFailure(reason: "default-input listener: unknown"))
         }
-        return .success(SystemBlocks(deviceList: deviceListBlock, defaultInput: defaultBlock))
+        return .success([listRegistration, defaultRegistration])
     }
 
     /// Keep listeners on each present device for the transitions the device *list* cannot report.
@@ -222,9 +233,9 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     /// re-enumeration every other trigger already performs. That is the defined refresh fallback, and
     /// naming it is the point — an unstated gap is the thing that bites.
     private func refreshReadinessListeners() {
-        let ids: [AudioObjectID]
-        switch systemDeviceIDs() {
-        case .success(let value): ids = value
+        let listed: [(id: UInt32, uid: String?)]
+        switch hal.listDevices() {
+        case .success(let value): listed = value
         case .failure(let error):
             // ⚠️ Not a silent return. Returning quietly leaves the caller believing readiness is
             // watched; worse, an earlier version treated an unreadable list as "every device left" and
@@ -234,24 +245,21 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
 
         var present: [AudioObjectID: String] = [:]
-        var unreadable: [AudioObjectID] = []
-        for id in ids {
-            switch stringProperty(id, kAudioDevicePropertyDeviceUID) {
-            case .success(let uid): present[id] = uid
-            case .failure: unreadable.append(id)
-            }
+        var unidentified: [AudioObjectID] = []
+        for entry in listed {
+            if let uid = entry.uid { present[entry.id] = uid } else { unidentified.append(entry.id) }
         }
 
         // ⚠️ A device whose UID would not read is **kept**, not removed. "I could not identify it" is
         // not "it is gone", and dropping its listener on that basis is how a transient read failure
         // becomes a permanently unwatched device.
-        let keep = Set(present.keys).union(unreadable)
+        let keep = Set(present.keys).union(unidentified)
         for (id, listener) in readinessListeners where !keep.contains(id) {
             readinessListeners.removeValue(forKey: id)
-            Self.removeReadiness(listener, from: id, on: halQueue)
+            for registration in listener.registrations { hal.remove(registration) }
         }
-        if !unreadable.isEmpty {
-            reportDegradation("\(unreadable.count) device(s) could not be identified; their readiness state is uncertain")
+        if !unidentified.isEmpty {
+            reportDegradation("\(unidentified.count) device(s) could not be identified; their readiness state is uncertain")
         }
 
         for (id, uid) in present where readinessListeners[id] == nil {
@@ -261,48 +269,29 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
     }
 
     private func installReadiness(for id: AudioObjectID, uid: String) -> ReadinessListener? {
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        let alive = hal.add(.deviceAlive(id), on: halQueue) { [weak self] in
             self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
         }
-        var aliveAddress = Self.address(kAudioDevicePropertyDeviceIsAlive,
-                                        scope: kAudioObjectPropertyScopeInput)
-        let aliveStatus = AudioObjectAddPropertyListenerBlock(id, &aliveAddress, halQueue, block)
-        guard aliveStatus == noErr else {
-            reportDegradation("no liveness listener for \(uid): \(Self.describe(status: aliveStatus))")
+        guard case .success(let aliveRegistration) = alive else {
+            if case .failure(let error) = alive {
+                reportDegradation("no liveness listener for \(uid): \(error.reason)")
+            }
             return nil
         }
 
-        let streamsBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        let streams = hal.add(.deviceStreams(id), on: halQueue) { [weak self] in
             self?.onHALCallback { $0.broadcast(.readinessChanged(uid: uid)) }
         }
-        var streamsAddress = Self.address(kAudioDevicePropertyStreamConfiguration,
-                                          scope: kAudioObjectPropertyScopeInput)
-        let streamsStatus = AudioObjectAddPropertyListenerBlock(id, &streamsAddress, halQueue, streamsBlock)
-        guard streamsStatus == noErr else {
-            AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, halQueue, block)
-            reportDegradation("no stream-configuration listener for \(uid): \(Self.describe(status: streamsStatus))")
+        guard case .success(let streamsRegistration) = streams else {
+            // Roll back the half that took: a device watched for liveness but not for its stream
+            // configuration is watched for the wrong half of "still a usable microphone".
+            hal.remove(aliveRegistration)
+            if case .failure(let error) = streams {
+                reportDegradation("no stream-configuration listener for \(uid): \(error.reason)")
+            }
             return nil
         }
-        return ReadinessListener(uid: uid, alive: block, streams: streamsBlock)
-    }
-
-    private static func removeReadiness(_ listener: ReadinessListener,
-                                        from id: AudioObjectID,
-                                        on queue: DispatchQueue) {
-        var aliveAddress = address(kAudioDevicePropertyDeviceIsAlive, scope: kAudioObjectPropertyScopeInput)
-        AudioObjectRemovePropertyListenerBlock(id, &aliveAddress, queue, listener.alive)
-        var streamsAddress = address(kAudioDevicePropertyStreamConfiguration,
-                                     scope: kAudioObjectPropertyScopeInput)
-        AudioObjectRemovePropertyListenerBlock(id, &streamsAddress, queue, listener.streams)
-    }
-
-    private static func removeSystemListeners(_ blocks: SystemBlocks, on queue: DispatchQueue) {
-        var deviceListAddress = address(kAudioHardwarePropertyDevices)
-        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                               &deviceListAddress, queue, blocks.deviceList)
-        var defaultAddress = address(kAudioHardwarePropertyDefaultInputDevice)
-        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                               &defaultAddress, queue, blocks.defaultInput)
+        return ReadinessListener(uid: uid, registrations: [aliveRegistration, streamsRegistration])
     }
 
     /// ⚠️ A per-device listener that would not install used to be **logged and nothing else**, while
@@ -553,7 +542,7 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
         }
     }
 
-    private static func address(_ selector: AudioObjectPropertySelector,
+    fileprivate static func address(_ selector: AudioObjectPropertySelector,
                                 scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal)
     -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(mSelector: selector,
@@ -563,12 +552,104 @@ public final class CoreAudioDeviceDirectory: AudioDeviceDirectory, @unchecked Se
 
     /// A readable `OSStatus`. Most HAL errors are four-CCs, unreadable as decimal — the scope bug above
     /// surfaced as `2003332927`, which is `'who?'`.
-    private static func describe(status: OSStatus) -> String {
+    /// The device's UID, or `nil` when the query failed. ⚠️ `nil` means "could not identify", never
+    /// "has no identity" — the readiness refresh keeps such a device rather than treating it as gone.
+    fileprivate static func deviceUID(_ id: AudioObjectID) -> String? {
+        var addr = address(kAudioDevicePropertyDeviceUID)
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var value: CFString?
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(id, &addr, 0, nil, &size, $0)
+        }
+        guard status == noErr else { return nil }
+        return value as String?
+    }
+
+    fileprivate static func describe(status: OSStatus) -> String {
         let raw = UInt32(bitPattern: status)
         let bytes = withUnsafeBytes(of: raw.bigEndian) { Array($0) }
         if bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }), let fourCC = String(bytes: bytes, encoding: .ascii) {
             return "OSStatus \(status) ('\(fourCC)')"
         }
         return "OSStatus \(status)"
+    }
+}
+
+/// The real HAL behind `AudioHALListening`. Still inside this file, so the confinement holds: every
+/// `AudioObject*` call in the target lives here.
+final class CoreAudioHAL: AudioHALListening, @unchecked Sendable {
+    /// A live registration: everything `AudioObjectRemovePropertyListenerBlock` needs, kept together so
+    /// removal cannot be attempted with a mismatched address or block. CoreAudio keeps calling a block
+    /// until a **matching** removal, so "close enough" leaks a listener that fires forever.
+    final class Registration: HALRegistration, @unchecked Sendable {
+        let object: AudioObjectID
+        var address: AudioObjectPropertyAddress
+        let queue: DispatchQueue
+        let block: AudioObjectPropertyListenerBlock
+
+        init(object: AudioObjectID,
+             address: AudioObjectPropertyAddress,
+             queue: DispatchQueue,
+             block: @escaping AudioObjectPropertyListenerBlock) {
+            self.object = object
+            self.address = address
+            self.queue = queue
+            self.block = block
+        }
+    }
+
+    func add(_ watch: HALWatch,
+             on queue: DispatchQueue,
+             fire: @escaping @Sendable () -> Void) -> Result<any HALRegistration, HALRegistrationFailure> {
+        let object: AudioObjectID
+        var address: AudioObjectPropertyAddress
+        switch watch {
+        case .deviceList:
+            object = AudioObjectID(kAudioObjectSystemObject)
+            address = CoreAudioDeviceDirectory.address(kAudioHardwarePropertyDevices)
+        case .defaultInput:
+            object = AudioObjectID(kAudioObjectSystemObject)
+            address = CoreAudioDeviceDirectory.address(kAudioHardwarePropertyDefaultInputDevice)
+        case .deviceAlive(let id):
+            object = AudioObjectID(id)
+            address = CoreAudioDeviceDirectory.address(kAudioDevicePropertyDeviceIsAlive,
+                                                       scope: kAudioObjectPropertyScopeInput)
+        case .deviceStreams(let id):
+            object = AudioObjectID(id)
+            address = CoreAudioDeviceDirectory.address(kAudioDevicePropertyStreamConfiguration,
+                                                       scope: kAudioObjectPropertyScopeInput)
+        }
+
+        let block: AudioObjectPropertyListenerBlock = { _, _ in fire() }
+        let status = AudioObjectAddPropertyListenerBlock(object, &address, queue, block)
+        guard status == noErr else {
+            return .failure(HALRegistrationFailure(reason: CoreAudioDeviceDirectory.describe(status: status)))
+        }
+        return .success(Registration(object: object, address: address, queue: queue, block: block))
+    }
+
+    func remove(_ registration: any HALRegistration) {
+        guard let registration = registration as? Registration else { return }
+        AudioObjectRemovePropertyListenerBlock(registration.object, &registration.address,
+                                               registration.queue, registration.block)
+    }
+
+    func listDevices() -> Result<[(id: UInt32, uid: String?)], HALRegistrationFailure> {
+        var address = CoreAudioDeviceDirectory.address(kAudioHardwarePropertyDevices)
+        var size: UInt32 = 0
+        let sizeStatus = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
+                                                        &address, 0, nil, &size)
+        guard sizeStatus == noErr else {
+            return .failure(HALRegistrationFailure(reason: CoreAudioDeviceDirectory.describe(status: sizeStatus)))
+        }
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        guard count > 0 else { return .success([]) }
+        var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                                &address, 0, nil, &size, &ids)
+        guard status == noErr else {
+            return .failure(HALRegistrationFailure(reason: CoreAudioDeviceDirectory.describe(status: status)))
+        }
+        return .success(ids.map { (id: UInt32($0), uid: CoreAudioDeviceDirectory.deviceUID($0)) })
     }
 }
