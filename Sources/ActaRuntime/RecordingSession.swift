@@ -58,9 +58,14 @@ public final class RecordingSession: @unchecked Sendable {
     ///   same `PermissionChecking` instance goes to both consumers below — `AudioRecorder`, which
     ///   rejects a start without a permission, and `SelfCheck`, which diagnoses one that is missing or
     ///   was revoked mid-recording. The session itself asks no permission questions.
+    /// - Parameter microphone: which device this recording is pinned to, re-asked at every start and
+    ///   restart. It is **not** in `RecordingDependencies`: the reader behind it belongs to the app,
+    ///   not to one recording, and is handed down by `liveSessionFactory` from `MicrophoneManager` —
+    ///   the app-lifetime owner. See the seam amendment in `CLAUDE.md`.
     public init(directory: URL,
                 settings: RecordingSettings = .default,
                 wakeLock: DisplayWakeLock = DisplayWakeLock(),
+                microphone: any CaptureMicrophoneResolving,
                 dependencies: RecordingDependencies = .live) {
         self.directory = directory
         self.wakeLock = wakeLock
@@ -71,7 +76,8 @@ public final class RecordingSession: @unchecked Sendable {
         let recorder = AudioRecorder(directory: directory,
                                      segmentSeconds: Double(settings.segmentSeconds),
                                      source: dependencies.makeSource(),
-                                     permissions: permissions)
+                                     permissions: permissions,
+                                     microphone: microphone)
         self.recorder = recorder
         self.selfCheck = SelfCheck(recorder: recorder, permissions: permissions,
                                    clock: dependencies.makeClock())
@@ -134,6 +140,40 @@ public final class RecordingSession: @unchecked Sendable {
     /// Clean stop: stop the capture, assemble the segments, mark the marker as `done`. Deleting the
     /// segments after the assembly comes from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
+    /// Re-resolve the microphone and bring the capture back up on it — a *Use now* landing on a
+    /// recording that is already running, or a priority edit the user wants applied now.
+    ///
+    /// ⚠️ **It goes through `AudioRecorder.restart()` and nowhere else.** That is the one owner of
+    /// `stop() → finishAndAdvance() → start()`, whose order its own doc calls "the whole point"; a
+    /// second path would race the watchdog and Stop. `restart()` re-resolves, so the restore after a
+    /// failed switch is the *same* call — the alternatives it falls through to are the user's list,
+    /// which is where the previous device still is.
+    ///
+    /// ⚠️ **The result is read from what actually came up**, never from what was asked for: the menu
+    /// must not show a device as active before capture succeeded on it.
+    public func switchMicrophone(to requested: String) async -> MicrophoneSwitchResult {
+        do {
+            try await recorder.restart()
+        } catch {
+            log.error("Microphone switch failed: \(error.localizedDescription, privacy: .public)")
+            return .failed(requested: requested)
+        }
+        guard let pinned = recorder.pinnedMicrophone else { return .failed(requested: requested) }
+        return pinned.uid == requested ? .switched(to: pinned) : .fellBack(to: pinned)
+    }
+
+    /// What a microphone switch actually did.
+    public enum MicrophoneSwitchResult: Equatable, Sendable {
+        /// Capture came up on the requested device.
+        case switched(to: AudioInputDevice)
+        /// The requested device did not come up and a configured alternative did — the recording never
+        /// stopped, and the user is told which microphone they are on now.
+        case fellBack(to: AudioInputDevice)
+        /// Nothing came up. ⚠️ The recording's failure policy owns what happens next; this only reports
+        /// that the switch did not happen.
+        case failed(requested: String)
+    }
+
     public func stop() async -> SegmentAssembler.Result? {
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
         // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments

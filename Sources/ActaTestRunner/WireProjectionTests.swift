@@ -186,6 +186,7 @@ private let failureCodes: [(ControlFailure.Category, String)] = [
     (.startup(.streamNotStarted), "startup_stream_not_started"),
     (.startup(.diskWriteFailed), "startup_disk_write_failed"),
     (.startup(.noData), "startup_no_data"),
+    (.startup(.microphoneUnavailable), "startup_microphone_unavailable"),
     (.startFailed, "start_failed"),
     (.assemblyFailed(ffmpegMissing: false), "assembly_failed"),
     (.assemblyFailed(ffmpegMissing: true), "assembly_failed_ffmpeg_missing"),

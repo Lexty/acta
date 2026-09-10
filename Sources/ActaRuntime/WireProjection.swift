@@ -118,6 +118,10 @@ extension WireControlState.Message {
         switch notice.category {
         case .archiveOpenFailed:
             self.init(code: WireMessageCode.archiveOpenFailed, message: notice.displayMessage)
+        case .microphoneSwitched:
+            self.init(code: WireMessageCode.microphoneSwitched, message: notice.displayMessage)
+        case .microphoneSwitchFailed:
+            self.init(code: WireMessageCode.microphoneSwitchFailed, message: notice.displayMessage)
         }
     }
 
@@ -136,6 +140,7 @@ extension WireControlState.Message {
             case .streamNotStarted: return WireMessageCode.startupStreamNotStarted
             case .diskWriteFailed: return WireMessageCode.startupDiskWriteFailed
             case .noData: return WireMessageCode.startupNoData
+            case .microphoneUnavailable: return WireMessageCode.startupMicrophoneUnavailable
             }
         case .startFailed:
             return WireMessageCode.startFailed

@@ -33,9 +33,18 @@ public protocol CaptureSource: AnyObject, Sendable {
     /// synchronously on the track's own serial queue.
     func setBufferHandler(_ handler: @escaping @Sendable (Track, CMSampleBuffer) -> Void)
 
-    /// Bring the capture up. Failures inside capture creation surface as
-    /// `StartupFailure.streamNotStarted`, which is what lets `SelfCheck` spend its restart attempts.
-    func start() async throws
+    /// Bring the capture up, recording from **this** microphone.
+    ///
+    /// ⚠️ **The parameter is not optional, and that is the fix.** `SCStream.h` documents an
+    /// unspecified `microphoneCaptureDeviceID` as "System Default Microphone", so an optional here
+    /// would let `nil` mean "follow whatever macOS most recently decided" — which is precisely the
+    /// silent inheritance that made Acta record from a headset nobody chose. A non-optional parameter
+    /// makes "never pass nil" a fact about the type instead of a rule in a comment; "use the system
+    /// default" is resolved to a concrete uid by the caller and pinned like any other choice.
+    ///
+    /// Failures inside capture creation surface as `StartupFailure.streamNotStarted`, which is what
+    /// lets `SelfCheck` spend its restart attempts.
+    func start(microphoneDeviceID: String) async throws
 
     /// Tear the capture down: stop delivering, and do not return until the callback already in
     /// flight has finished. After an awaited `stop()` the handler must not be called again.

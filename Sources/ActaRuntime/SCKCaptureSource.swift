@@ -144,10 +144,17 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// merging into it, so the mic-off variant must be this same complete object with one field
     /// flipped — a bare `SCStreamConfiguration()` with only `captureMicrophone = false` would silently
     /// drop the sample rate, the channel count and the audio capture itself.
-    private func makeConfiguration(captureMicrophone: Bool) -> SCStreamConfiguration {
+    private func makeConfiguration(captureMicrophone: Bool,
+                                   microphoneDeviceID: String?) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.captureMicrophone = captureMicrophone
+        // ⚠️ **The line this whole feature exists for.** Left unset, `SCStream.h` documents this as
+        // "System Default Microphone" — so Acta recorded from whatever macOS had most recently decided
+        // was the default, which a Bluetooth headset silently becomes on connect. The uid is an
+        // `AVCaptureDevice.uniqueID`; that it is byte-identical to the CoreAudio device UID is
+        // **measured on this machine, not documented by Apple** — Task 9's probe is what guards it.
+        config.microphoneCaptureDeviceID = microphoneDeviceID
         config.excludesCurrentProcessAudio = true
         config.sampleRate = 48_000
         config.channelCount = 2
@@ -161,7 +168,7 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// Bring the stream up. Raw ScreenCaptureKit errors are not let out: without `.streamNotStarted`
     /// the caller cannot tell "the stream did not come up" (healed by a restart) from other failures,
     /// and the self-healing (`SelfCheck`) would not spend its attempts (Task 4).
-    public func start() async throws {
+    public func start(microphoneDeviceID: String) async throws {
         // Declared outside the `do`, so the catch can still reach a stream that `startCapture()`
         // brought partway up before throwing. Assigning `activeStream` only after a successful start
         // would otherwise orphan it: `stop()` finds `nil` and never calls `stopCapture()` on it.
@@ -173,7 +180,8 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let stream = SCStream(filter: filter,
-                                  configuration: makeConfiguration(captureMicrophone: true),
+                                  configuration: makeConfiguration(captureMicrophone: true,
+                                                                   microphoneDeviceID: microphoneDeviceID),
                                   delegate: self)
             created = stream
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
@@ -226,7 +234,10 @@ public final class SCKCaptureSource: NSObject, SCStreamDelegate, SCStreamOutput,
     /// caller says whether a failure would be surprising; it changes nothing else.
     private func disableMicrophone(on stream: SCStream, level: OSLogType = .error) async {
         do {
-            try await stream.updateConfiguration(makeConfiguration(captureMicrophone: false))
+            // ⚠️ The device id goes too: `updateConfiguration` **replaces** the configuration, and the
+            // mic-off variant must otherwise be identical — see the note on `makeConfiguration`.
+            try await stream.updateConfiguration(makeConfiguration(captureMicrophone: false,
+                                                                   microphoneDeviceID: nil))
         } catch {
             log.log(level: level,
                     "Disabling the microphone failed: \(error.localizedDescription, privacy: .public)")

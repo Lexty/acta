@@ -228,3 +228,33 @@ func awaitCondition(timeoutMilliseconds: Int = 2000,
     }
     return condition()
 }
+
+/// A scripted `CaptureMicrophoneResolving`.
+///
+/// ⚠️ **What it cannot prove, stated here rather than discovered later.** It hands back a uid and the
+/// fake source accepts any string; whether ScreenCaptureKit accepts a given
+/// `microphoneCaptureDeviceID` — or records from the device it names — is unverified in-process, for
+/// exactly the reason `SCKCaptureSource`'s teardown is. That gap is in the plan's manual section.
+final class FakeCaptureMicrophoneResolver: CaptureMicrophoneResolving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var resolution: CaptureMicrophoneResolution
+    private var calls = 0
+
+    init(_ resolution: CaptureMicrophoneResolution = .pinned(.builtInMic(), alternatives: [])) {
+        self.resolution = resolution
+    }
+
+    /// Change what the *next* resolve answers — a priority edit, a `Use now`, a device disappearing.
+    func set(_ next: CaptureMicrophoneResolution) { lock.lock(); resolution = next; lock.unlock() }
+
+    /// How many times it was asked. A recorder that resolves once and reuses the answer across a
+    /// restart is a recorder no priority change can ever reach.
+    var resolveCount: Int { lock.lock(); defer { lock.unlock() }; return calls }
+
+    func resolve() -> CaptureMicrophoneResolution {
+        lock.lock()
+        defer { lock.unlock() }
+        calls += 1
+        return resolution
+    }
+}

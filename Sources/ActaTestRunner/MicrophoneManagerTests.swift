@@ -308,7 +308,12 @@ struct MicrophoneManagerTests {
         // write that did not exist a moment ago.
         let corrected = await awaitCondition { directory.attemptedWrites == ["BuiltInMicrophoneDevice"] }
         #expect(corrected, "the wake handler never reconciled")
-        #expect(manager.enforcement.status == .enforcing(uid: "BuiltInMicrophoneDevice"))
+        // The mirror is one hop behind the reconciler by construction, so this waits too rather than
+        // sampling the instant the write lands.
+        let mirrored = await awaitCondition {
+            MainActor.assumeIsolated { manager.enforcement.status } == .enforcing(uid: "BuiltInMicrophoneDevice")
+        }
+        #expect(mirrored, "the enforcement mirror never caught up")
     }
 
     /// ⚠️ **The drain is not redundant with `verify()`'s per-iteration guard, and this is what tells

@@ -28,7 +28,8 @@ private func withTemporaryDirectory(_ body: (URL) throws -> Void) rethrows {
 func recordingSessionIsReachableFromTests() {
     withTemporaryDirectory { directory in
         let session = RecordingSession(directory: directory,
-                                       settings: RecordingSettings.default)
+                                       settings: RecordingSettings.default,
+                                       microphone: FakeCaptureMicrophoneResolver())
         #expect(session.directory == directory)
     }
 }
@@ -40,7 +41,8 @@ func audioRecorderIsReachableFromTests() {
         // The fakes, not the real capture: this asserts what `init` does to the file system, and a
         // real `SCKCaptureSource` would only make that non-deterministic.
         let recorder = AudioRecorder(directory: directory, segmentSeconds: 15,
-                                     source: FakeCaptureSource(), permissions: FakePermissions())
+                                     source: FakeCaptureSource(), permissions: FakePermissions(),
+                                     microphone: FakeCaptureMicrophoneResolver())
         // Constructed but never started: no stream, no buffers, no segments yet.
         #expect(!recorder.isStreaming)
         #expect(recorder.receivedBufferCounts == (system: 0, mic: 0))

@@ -29,6 +29,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: activity.makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -64,6 +65,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: activity.makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -95,6 +97,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -122,6 +125,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: activity.makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -163,6 +167,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -206,6 +211,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -257,6 +263,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -304,6 +311,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -345,6 +353,7 @@ struct RecordingPipelineFailureTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))

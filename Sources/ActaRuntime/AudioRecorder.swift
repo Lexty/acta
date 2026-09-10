@@ -26,6 +26,10 @@ public final class AudioRecorder: @unchecked Sendable {
 
     private let source: CaptureSource
     private let permissions: PermissionChecking
+    private let microphone: any CaptureMicrophoneResolving
+    private let lifecycle = CaptureLifecycle()
+    private let lifecycleLock = NSLock()
+    private var pinned: AudioInputDevice?
 
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
@@ -108,13 +112,17 @@ public final class AudioRecorder: @unchecked Sendable {
     /// Neither has a default: what production passes is claimed once, in `RecordingDependencies.live`,
     /// where a test can assert it. A default argument here would restate that claim in a form no test
     /// can reach — you cannot ask a function what it *would* have passed.
+    /// - Parameter microphone: who decides which device to record from, asked again at every start
+    ///   and restart. ⚠️ No default, for the reason the other two have none.
     public init(directory: URL,
                 segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds),
                 source: CaptureSource,
-                permissions: PermissionChecking) {
+                permissions: PermissionChecking,
+                microphone: any CaptureMicrophoneResolving) {
         self.directory = directory
         self.source = source
         self.permissions = permissions
+        self.microphone = microphone
         self.systemWriter = SegmentWriter(
             directory: directory.appendingPathComponent(SegmentLayout.systemDirName),
             segmentSeconds: segmentSeconds
@@ -134,16 +142,54 @@ public final class AudioRecorder: @unchecked Sendable {
     /// reason a start produced no recording is what the user must see, not an "error 1" from
     /// `localizedDescription`.
     public func start() async throws {
+        try await serialized { try await self.performStart() }
+    }
+
+    /// The device this recording is currently pinned to, once a start has succeeded.
+    ///
+    /// ⚠️ Set only **after** capture actually comes up. The menu must never show a requested device as
+    /// active before it is — that is the difference between reporting a switch and promising one.
+    public var pinnedMicrophone: AudioInputDevice? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return pinned
+    }
+
+    private func performStart() async throws {
         try await requestPermissionsIfNeeded()
-        do {
-            try await source.start()
-        } catch {
-            // Raw capture errors are not let out: without `.streamNotStarted` the caller cannot tell
-            // "the stream did not come up" (healed by a restart) from other failures, and the
-            // self-healing (`SelfCheck`) would not spend its attempts (Task 4).
-            log.error("Stream did not come up: \(error.localizedDescription, privacy: .public)")
-            throw StartupFailure.streamNotStarted
+
+        let candidates: [AudioInputDevice]
+        switch microphone.resolve() {
+        case .pinned(let device, let alternatives):
+            // ⚠️ Bounded by construction: the resolver returns a finite ranked list and every candidate
+            // is tried at most once, so "no candidate succeeded" terminates instead of retrying a dead
+            // machine forever. The watchdog's own attempt budget sits above this.
+            candidates = [device] + alternatives
+        case .unavailable(let failure):
+            log.error("No microphone to record from: \(String(describing: failure), privacy: .public)")
+            throw StartupFailure.microphoneUnavailable
         }
+
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                try await source.start(microphoneDeviceID: candidate.uid)
+                setPinned(candidate)
+                log.info("Recording from \(candidate.name, privacy: .public)")
+                return
+            } catch {
+                // ⚠️ Enumerating is not starting. A device the OS lists happily can still refuse to
+                // open, so the next configured alternative is tried rather than failing the recording.
+                lastError = error
+                log.error("Microphone \(candidate.name, privacy: .public) did not start: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        // Raw capture errors are not let out: without `.streamNotStarted` the caller cannot tell
+        // "the stream did not come up" (healed by a restart) from other failures, and the
+        // self-healing (`SelfCheck`) would not spend its attempts (Task 4).
+        log.error("Stream did not come up: \(lastError?.localizedDescription ?? "no candidate", privacy: .public)")
+        throw StartupFailure.streamNotStarted
     }
 
     /// Show the system TCC dialogs if the permissions have not been granted yet, and make sure they
@@ -185,21 +231,83 @@ public final class AudioRecorder: @unchecked Sendable {
     /// a segment that is being finalized. It ends in `self.start()`, not `source.start()`, because
     /// that is what re-checks the permissions.
     public func restart() async throws {
+        try await serialized { try await self.performRestart() }
+    }
+
+    private func performRestart() async throws {
         await source.stop()
         systemWriter.finishAndAdvance()
         micWriter.finishAndAdvance()
         log.info("Restarting stream")
-        try await start()
+        // ⚠️ `performStart()`, not `start()`: the serialization is already held. It also re-resolves the
+        // microphone, which is why a *Use now* and a priority edit both take effect here and why every
+        // device switch is a restart rather than a second lifecycle owner.
+        try await performStart()
     }
 
     /// Stop the capture and finalize the current segments of both tracks. Safe by the same argument
     /// as `restart()`: after an awaited `stop()` the source delivers nothing more, so no buffer can
     /// land in a writer that is being finalized — which would delete the very tail being closed.
     public func stop() async {
-        await source.stop()
-        systemWriter.finish()
-        micWriter.finish()
-        log.info("Capture stopped")
+        try? await serialized {
+            await self.source.stop()
+            self.systemWriter.finish()
+            self.micWriter.finish()
+            self.setPinned(nil)
+            self.log.info("Capture stopped")
+        }
+    }
+
+    // MARK: - One serialized capture lifecycle
+
+    /// ⚠️ **Start, restart and stop are one queue, and Task 5 is what forced it.** Until now there were
+    /// two callers — the watchdog's `restart()` and the session's `stop()` — and `RecordingSession`
+    /// kept them apart by cancelling the watchdog and awaiting it before stopping. A microphone switch
+    /// is a third caller arriving from the menu, on the main actor, with no such arrangement: it would
+    /// tear a stream down while the watchdog was building one. The `restart()` doc comment's order
+    /// ("the whole point, and must not be rearranged") is only meaningful if two of them cannot be
+    /// interleaved in the first place.
+    private func serialized<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        let box = LifecycleResult<T>()
+        await lifecycle.serialize {
+            do { box.store(.success(try await body())) } catch { box.store(.failure(error)) }
+        }
+        return try box.take()
+    }
+
+    /// ⚠️ A plain `NSLock` cannot be taken across an `await`, and the pin is written from one. The
+    /// write is a whole-value swap under the lock in a non-async helper, which is all it needs.
+    private func setPinned(_ device: AudioInputDevice?) {
+        lifecycleLock.lock()
+        pinned = device
+        lifecycleLock.unlock()
+    }
+
+    private actor CaptureLifecycle {
+        private var tail: Task<Void, Never>?
+
+        /// Run `body` after everything already queued, and never beside it.
+        func serialize(_ body: @escaping @Sendable () async -> Void) async {
+            let previous = tail
+            let task = Task {
+                await previous?.value
+                await body()
+            }
+            tail = task
+            await task.value
+        }
+    }
+
+    private final class LifecycleResult<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Result<T, Error>?
+        func store(_ result: Result<T, Error>) { lock.lock(); value = result; lock.unlock() }
+        func take() throws -> T {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let value else { throw StartupFailure.streamNotStarted }
+            return try value.get()
+        }
     }
 
     /// The number of finalized segments to publish in `session.json`. The arithmetic over the two

@@ -106,6 +106,16 @@ public struct Notice: Equatable, Sendable {
     public enum Category: Equatable, Sendable {
         /// `openArchive()` could not reveal the archive root.
         case archiveOpenFailed
+        /// The recording's microphone changed mid-recording, and why.
+        ///
+        /// ⚠️ **A notice and not a `lifecycleFailure`, deliberately.** Nothing about the recording has
+        /// failed — it is still capturing, to the same files, from a different device — and routing it
+        /// through `lifecycleFailure` would park `phase` in `.error` and no-op `stop()`'s guard, which
+        /// is the trap the archive-open failure already documents.
+        case microphoneSwitched
+        /// An explicit *Use now* did not come up; the previous microphone is still recording. Also a
+        /// notice: the switch failed, the recording did not.
+        case microphoneSwitchFailed
     }
 
     public var category: Category

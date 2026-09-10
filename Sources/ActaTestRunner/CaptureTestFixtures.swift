@@ -178,13 +178,51 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
         withLock { self.handler = handler }
     }
 
-    func start() async throws {
+    /// Every device id `start` was asked for, in order — including the ones scripted to fail, because
+    /// "it tried this microphone and it refused" and "it never tried" are different bugs.
+    var startedMicrophoneIDs: [String] { lock.lock(); defer { lock.unlock() }; return startedIDs }
+    private var startedIDs: [String] = []
+    /// Non-async, so the lock is never taken across an `await`.
+    private func recordStart(_ uid: String) { lock.lock(); startedIDs.append(uid); lock.unlock() }
+
+    /// Device ids whose `start` must throw — a microphone the OS lists happily and will not open.
+    func failStart(forDeviceIDs ids: [String]) {
+        lock.lock(); refusedIDs = Set(ids); lock.unlock()
+    }
+    private var refusedIDs: Set<String> = []
+    private func isRefused(_ uid: String) -> Bool { lock.lock(); defer { lock.unlock() }; return refusedIDs.contains(uid) }
+
+    /// The high-water mark of lifecycle operations running at once.
+    ///
+    /// ⚠️ **The only thing that can prove serialization from outside.** Counting completed restarts says
+    /// nothing about whether two of them overlapped, and `restart()`'s documented order is only
+    /// meaningful if it cannot be interleaved with another one.
+    var maximumConcurrentLifecycleOperations: Int {
+        lock.lock(); defer { lock.unlock() }; return maxConcurrent
+    }
+    private var inFlight = 0
+    private var maxConcurrent = 0
+    private func enterLifecycle() {
+        lock.lock()
+        inFlight += 1
+        maxConcurrent = max(maxConcurrent, inFlight)
+        lock.unlock()
+    }
+    private func leaveLifecycle() { lock.lock(); inFlight -= 1; lock.unlock() }
+
+    func start(microphoneDeviceID: String) async throws {
+        enterLifecycle()
+        defer { leaveLifecycle() }
+        recordStart(microphoneDeviceID)
+        // A yield, so an interleaving really has the chance to happen: a serialization test that never
+        // suspends inside the operation it is checking cannot observe an overlap even where one exists.
+        await Task.yield()
         // The gate stays shut on a failed start, which is what `SCKCaptureSource` guarantees too —
         // it opens its own gate before `startCapture()` and closes it again if that throws.
         let shouldFail: Bool = withLock {
             starts += 1
             return failEveryStart
-        }
+        } || isRefused(microphoneDeviceID)
         if shouldFail {
             withLock { isStopped = true }
             throw StartupFailure.streamNotStarted
@@ -200,6 +238,9 @@ final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     }
 
     func stop() async {
+        enterLifecycle()
+        defer { leaveLifecycle() }
+        await Task.yield()
         withLock {
             stops += 1
             streaming = false

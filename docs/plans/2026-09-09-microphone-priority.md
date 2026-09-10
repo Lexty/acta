@@ -308,35 +308,35 @@ global enforcer **per recording session**.
 
 **Why.** Feature (A). Setting the device at start is one line; the work is every transition after it.
 
-- [ ] `SCKCaptureSource` sets `microphoneCaptureDeviceID` from the resolved UID
-- [ ] ⚠️ **Never pass `nil` as a fallback.** `SCStream.h` makes `nil` mean "system default", which is
+- [x] `SCKCaptureSource` sets `microphoneCaptureDeviceID` from the resolved UID
+- [x] ⚠️ **Never pass `nil` as a fallback.** `SCStream.h` makes `nil` mean "system default", which is
       exactly the silent inheritance this feature exists to end. Before recording, require either an
       available choice or an explicit **"Use system default"** action
-- [ ] ⚠️ **Define "Use system default" as resolve-then-pin**: read the current default, resolve it to a
+- [x] ⚠️ **Define "Use system default" as resolve-then-pin**: read the current default, resolve it to a
       concrete UID, and pin *that*. Anything else contradicts the no-`nil` rule one line above
-- [ ] ⚠️ **The mid-recording rule, stated once and precisely: capture resolves its device when it
+- [x] ⚠️ **The mid-recording rule, stated once and precisely: capture resolves its device when it
       starts or restarts, and a healthy capture is never preempted except by an explicit *Use now*.**
       So of the four transitions that could move it — a higher-priority device arriving, a *Use now*, a
       priority-list edit, and a watchdog restart — only *Use now* and the restart change a healthy
       capture in progress. This is a decision, not an omission, and it is the answer to "a checklist
       that only covers disappearance can be satisfied by an implementation that keeps the original mic
       forever"
-- [ ] ⚠️ **"Takes effect at the next recording" describes Acta's capture ONLY — never the preference
+- [x] ⚠️ **"Takes effect at the next recording" describes Acta's capture ONLY — never the preference
       change as a whole.** With feature (B) enabled, connecting that USB mic or editing the list
       reconciles the **system default immediately**, while Acta keeps its pinned recording device.
       Conflating the two would make the menu lie about (B)
-- [ ] ⚠️ **"Next recording" is not strictly true either, and the plan must not claim it is.** A
+- [x] ⚠️ **"Next recording" is not strictly true either, and the plan must not claim it is.** A
       watchdog restart re-resolves, so a priority change made mid-recording **can** take effect during
       that same recording once recovery happens to fire. That is acceptable — a restart is already
       paying the cost — but it must be **reported**, not silent: the user has to be able to tell why
       the device changed
-- [ ] ⚠️ **The rationale is about capture teardown, not about segment boundaries.** A segment boundary
+- [x] ⚠️ **The rationale is about capture teardown, not about segment boundaries.** A segment boundary
       is routine here and sacrifices no crash safety; invoking "crash safety beats speed" for it would
       be wrong. The real cost of preempting a healthy capture is tearing one down and rebuilding it:
       it can leave an audio gap, it can fail outright, and it can come back with a different source
       format. That is what makes automatic preemption a bad trade, and it is the reason to write in
       the code
-- [ ] ⚠️ **Every device switch and every recovery goes through `AudioRecorder.restart()`
+- [x] ⚠️ **Every device switch and every recovery goes through `AudioRecorder.restart()`
       (`AudioRecorder.swift:187`) — never a second restart owner.** It already owns
       `stop() → finishAndAdvance() → start()`, and its doc comment says the order "is the whole point
       and must not be rearranged": an awaited `stop()` delivers nothing further, so no callback can
@@ -344,7 +344,14 @@ global enforcer **per recording session**.
       loss, and the restoration after a failed *Use now* — not just one of them. A competing restart
       path would race the watchdog and Stop. One serialized capture lifecycle, shared with watchdog
       recovery and Stop
-- [ ] ⚠️ ***Use now* is ONE user action with TWO effects, and the plan says so rather than leaving the
+- [x] **Decided, as this task requires**: the capture pin does **not** outlive the recording it was
+      issued during — it is resolved per start, and per restart. What outlives it is the *override
+      itself*, which lives in `MicrophonePriority` until the reconciler expires it on that device's
+      disconnect or on an explicit resume; so the next recording uses it too, which is the same
+      "temporary until the device goes" promise the system default gets. A recording **ending** does
+      nothing to the system-default override: ending a recording is not a statement about which
+      microphone the Mac should prefer.
+- [x] ⚠️ ***Use now* is ONE user action with TWO effects, and the plan says so rather than leaving the
       executor to guess.** It is (i) a temporary override of the **system-default** priority, held by
       `MicrophonePriority` and expired by the reconciler on that device's disconnect (Tasks 2-3), and
       (ii) an immediate switch of the **live capture** device, if a recording is running (this task).
@@ -353,22 +360,26 @@ global enforcer **per recording session**.
       requires the menu to show. Decide and state here: whether the capture pin outlives the recording
       it was issued during, and what a recording ending does to the system-default override. Neither
       is derivable from the rest of the plan
-- [ ] ⚠️ **An explicit *Use now* that fails while the old microphone is still usable needs a defined
+- [x] ⚠️ **An explicit *Use now* that fails while the old microphone is still usable needs a defined
       outcome.** Attempt to restore the previous device through the **same serialized recovery path**,
       report that the requested switch failed, and **never show the requested device as active before
       capture actually succeeds**. Bound the attempts
-- [ ] During a recording, losing the pinned microphone is a **recording failure surfaced immediately**
+- [x] During a recording, losing the pinned microphone is a **recording failure surfaced immediately**
       through the existing failure policy — not a quiet menu note. Try the configured alternatives
       first; if none work, report loss
-- [ ] Any new message the controller writes into `errorMessage` goes into **`ControllerMessage`**, not
+- [x] Any new message the controller writes into `errorMessage` goes into **`ControllerMessage`**, not
       hand-typed (the reverse lookup in `ControlState+Mapping` reads it)
-- [ ] ⚠️ The `CaptureSource` contract test must state what the fake does **not** prove here: the fake
+- [x] ⚠️ The `CaptureSource` contract test must state what the fake does **not** prove here: the fake
       accepts any UID, and `SCKCaptureSource`'s acceptance of one is unverified in-process. Skip
       visibly with `.enabled(if:)` where the real source needs a live `SCStream` — never a bare `return`
-- [ ] Tests through the scripted pipeline: a mic switch **racing** a watchdog restart, and one racing a
+- [x] Tests through the scripted pipeline: a mic switch **racing** a watchdog restart, and one racing a
       user Stop; the first candidate enumerating but **failing to start** while the next succeeds; **no
-      candidate succeeding**, with recovery terminating within a defined bound; and a switch between
-      devices of **different source formats** leaving every segment valid and consistently formatted
+      candidate succeeding**, with recovery terminating within a defined bound
+- [ ] ⚠️ **NOT done, and not ticked**: a switch between devices of **different source formats** leaving
+      every segment valid and consistently formatted. It needs `FakeCaptureSource` to emit buffers in a
+      second format and the assembly driven across the boundary, which is a fixture this task did not
+      build. Ticking it because "the switch works" would be exactly the vacuous pass this plan keeps
+      catching
 
 ### Task 6: Protocol v2 and the settings fields
 

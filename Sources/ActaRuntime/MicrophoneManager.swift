@@ -130,6 +130,29 @@ public final class MicrophoneManager {
     /// out of reach, not the intent.
     public var deviceReader: any AudioDeviceReading { directory }
 
+    /// What Acta's **own recording** resolves against, readable without an actor hop.
+    ///
+    /// ⚠️ **Kept in step with the reconciler's priority, and separate from it.** The list is the same
+    /// list — a user has one order of preference — but the two selections differ in eligibility
+    /// (`canBeSystemDefault` filters the system default and not capture) and in lifetime (a recording
+    /// pins at start, the system default is held continuously). Sharing the *value* and separating the
+    /// *decision* is what keeps a menu that shows one order from lying about the other.
+    public let capturePreference = CaptureMicrophonePreference()
+
+    /// A resolver over the app's one reader. Handed to each recording by `liveSessionFactory`.
+    public var captureResolver: any CaptureMicrophoneResolving {
+        LiveCaptureMicrophoneResolver(reader: directory, preference: capturePreference)
+    }
+
+    /// Whether recordings follow the priority list or start from the system default.
+    ///
+    /// ⚠️ **Independent of feature (B).** Pausing or disabling enforcement of the *system* default must
+    /// not change what Acta records from: they are different promises and the plan forbids sharing a
+    /// switch between them.
+    public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
+        capturePreference.choice = choice
+    }
+
     public private(set) var inventory: MicrophoneInventory = .unknown
     public private(set) var enforcement: MicrophoneEnforcementState = .disabled
 
@@ -355,6 +378,9 @@ public final class MicrophoneManager {
                 // whatever it is holding. The check is here so an old mirror can never publish into a
                 // *restarted* manager's streams, which joining alone does not prevent.
                 guard let self, self.lifetimeEpoch == epoch else { return }
+                // The reconciler owns the priority — it expires a stale override — so capture reads it
+                // back from there rather than keeping a second copy that drifts.
+                capturePreference.priority = await reconciler.priority
                 enforcement = state
                 for continuation in enforcementContinuations.values { continuation.yield(state) }
             }

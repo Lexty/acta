@@ -20,6 +20,14 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
     case diskWriteFailed
     /// The stream came up, but no buffers arrive (no audio device / silence at the device input).
     case noData
+    /// There is no microphone to record from: nothing is configured, or nothing configured is present.
+    ///
+    /// ⚠️ **Distinct from `.noMicrophonePermission` and from `.streamNotStarted`, and it must stay
+    /// distinct.** Permission is granted, the machine may be full of microphones, and no stream was
+    /// even attempted — the recording did not start because Acta will not silently record from
+    /// "whatever the system default happens to be". The fix is a choice, not a retry, which is also
+    /// why it is not worth a restart attempt below.
+    case microphoneUnavailable
 
     /// User-facing text with a path to a fix — for display in the menu bar (Task 6).
     public var userMessage: String {
@@ -37,6 +45,8 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
                 + "to the archive folder in Settings."
         case .noData:
             return "Not recording: no audio is arriving. Check your audio device and the audio source."
+        case .microphoneUnavailable:
+            return "No microphone selected. Choose one in Acta's menu, or pick \"Use system default\"."
         }
     }
 }
@@ -234,6 +244,11 @@ public enum SelfDiagnosis {
             // A restart recreates both the stream and the segment — it heals a stalled stream as well
             // as a one-off write failure.
             return restartAttemptsLeft > 0 ? .restartStream : .reportError(failure)
+        case .microphoneUnavailable:
+            // ⚠️ **Never a restart.** Restarting re-resolves and reaches the same answer, so spending
+            // the budget here would burn the attempts that a genuinely stalled stream needs, and delay
+            // by the whole watchdog window a message the user could have acted on immediately.
+            return .reportError(failure)
         }
     }
 }

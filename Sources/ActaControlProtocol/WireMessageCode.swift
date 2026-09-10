@@ -24,6 +24,16 @@ public enum WireMessageCode {
     public static let startupDiskWriteFailed = "startup_disk_write_failed"
     /// Capture came up, but no audio arrives.
     public static let startupNoData = "startup_no_data"
+    /// No microphone to record from: nothing configured, or nothing configured is present.
+    ///
+    /// ⚠️ Additive: these are string constants, not enum cases, so a client that does not know this
+    /// code falls through its default rather than failing to decode the response. Adding a **case** to
+    /// a response-direction enum would be a version bump; adding a code is not.
+    public static let startupMicrophoneUnavailable = "startup_microphone_unavailable"
+    /// The recording's microphone changed mid-recording.
+    public static let microphoneSwitched = "microphone_switched"
+    /// An explicit microphone switch did not come up; the previous device is still recording.
+    public static let microphoneSwitchFailed = "microphone_switch_failed"
     /// A start that failed with something other than a known startup failure.
     public static let startFailed = "start_failed"
     /// Capture stopped, but the segments did not become the final file.
