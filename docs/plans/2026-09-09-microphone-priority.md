@@ -366,7 +366,10 @@ global enforcer **per recording session**.
       capture actually succeeds**. Bound the attempts
 - [x] During a recording, losing the pinned microphone is a **recording failure surfaced immediately**
       through the existing failure policy — not a quiet menu note. Try the configured alternatives
-      first; if none work, report loss
+      first; if none work, report loss. ⚠️ **The watchdog is not this**, and assuming it was is why the
+      recording-owned observation was missing at first: `TrackWatchdog` reads a track's count not
+      increasing as ordinary source silence, and the system track keeps advancing when only the
+      microphone goes, so a lost headset produced no stall at all
 - [x] Any new message the controller writes into `errorMessage` goes into **`ControllerMessage`**, not
       hand-typed (the reverse lookup in `ControlState+Mapping` reads it)
 - [x] ⚠️ The `CaptureSource` contract test must state what the fake does **not** prove here: the fake

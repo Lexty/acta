@@ -30,6 +30,26 @@ public final class RecordingSession: @unchecked Sendable {
     private let selfCheck: SelfCheck
     private let store = SessionManifestStore()
     private var watchdogTask: Task<Void, Never>?
+
+    /// The recording's **own** view of the audio devices — read-only, and owned by this session for
+    /// exactly its lifetime.
+    ///
+    /// ⚠️ **Owned here rather than registered with `MicrophoneManager`, and that was settled
+    /// deliberately.** The lifetime is the recording, including its capture restarts; the session owns
+    /// the token *and* the work its handler queues, and a manager-side registry could not acquire the
+    /// stronger guarantee — cancelling a token fences the directory callback, it does not cancel Tasks
+    /// that callback already started. The app gets the whole-app guarantee by awaiting both owners in
+    /// the quit sequence.
+    private let deviceReader: (any AudioDeviceReading)?
+    private var deviceObservation: (any AudioDeviceObservation)?
+    /// Bumped by `stop()`. Queued handler work checks it, because cancelling the token does not undo a
+    /// hop that has already been scheduled.
+    private var deviceEpoch: UInt64 = 0
+    private var lossHandling = false
+
+    /// Called when the pinned microphone is **proved** to have gone and the capture was re-resolved.
+    /// Not called on the main actor.
+    public var onMicrophoneChanged: (@Sendable (ControllerMessage) -> Void)?
     /// Held for exactly the span of a recording: the display going idle takes ScreenCaptureKit's
     /// display away and kills the capture (Task 10). Taken in `start`, released on every exit path —
     /// a failed start, a clean stop, and the watchdog's give-up, which reaches `stop()` too.
@@ -66,8 +86,10 @@ public final class RecordingSession: @unchecked Sendable {
                 settings: RecordingSettings = .default,
                 wakeLock: DisplayWakeLock = DisplayWakeLock(),
                 microphone: any CaptureMicrophoneResolving,
+                deviceReader: (any AudioDeviceReading)? = nil,
                 dependencies: RecordingDependencies = .live) {
         self.directory = directory
+        self.deviceReader = deviceReader
         self.wakeLock = wakeLock
         let settings = settings.normalized()
         self.settings = settings
@@ -128,6 +150,7 @@ public final class RecordingSession: @unchecked Sendable {
 
         confirmed = true
         didStart = true
+        observeDeviceLoss()
         watchdogTask = Task { [selfCheck] in
             await selfCheck.runWatchdog(onStall: onStall)
         }
@@ -140,6 +163,56 @@ public final class RecordingSession: @unchecked Sendable {
     /// Clean stop: stop the capture, assemble the segments, mark the marker as `done`. Deleting the
     /// segments after the assembly comes from the settings (`deleteSegmentsAfterAssembly`).
     @discardableResult
+    /// Watch for the pinned microphone disappearing.
+    ///
+    /// ⚠️ **The watchdog is not a substitute, and assuming it was is what left this missing.**
+    /// `TrackWatchdog` deliberately reads a track's count not increasing as ordinary source silence,
+    /// and the system track keeps advancing when only the microphone goes — so a lost headset produced
+    /// no stall at all. Even where the whole stream dies, the watchdog answers after its six-second
+    /// window, and the plan's requirement is that losing the pinned microphone is surfaced
+    /// **immediately**.
+    private func observeDeviceLoss() {
+        guard let deviceReader, deviceObservation == nil else { return }
+        let epoch = deviceEpoch
+        switch deviceReader.observe({ [weak self] change in
+            guard case .deviceListChanged = change else { return }
+            // Read where the change was delivered: by the time the hop lands the device may be back.
+            let snapshot = deviceReader.enumerateInputDevices()
+            Task { @MainActor [weak self] in
+                guard let self, deviceEpoch == epoch else { return }
+                await handlePossibleLoss(snapshot)
+            }
+        }) {
+        case .observing(let subscription): deviceObservation = subscription
+        case .failed: deviceObservation = nil
+        }
+    }
+
+    private func handlePossibleLoss(_ snapshot: DeviceEnumeration) async {
+        guard !lossHandling, let pinned = recorder.pinnedMicrophone else { return }
+        guard case .devices(let devices, let uninspectable) = snapshot else { return }
+
+        // ⚠️ Absence is **proved**, never inferred. A snapshot that could not describe every driver is
+        // not evidence the pinned microphone left, and failing a recording over on it would be acting
+        // on an unknown.
+        guard MicrophonePolicy.presence(of: pinned.uid, in: devices,
+                                        snapshotComplete: uninspectable.isEmpty) == .absent else { return }
+
+        lossHandling = true
+        defer { lossHandling = false }
+        do {
+            try await recorder.restart()
+            if let now = recorder.pinnedMicrophone, now.uid != pinned.uid {
+                onMicrophoneChanged?(.microphoneSwitched(device: now.name,
+                                                         reason: "\(pinned.name) disconnected"))
+            }
+        } catch {
+            // The failure policy above owns what happens next; this only reports that the configured
+            // alternatives did not come up.
+            onMicrophoneChanged?(.microphoneSwitchFailed(device: pinned.name))
+        }
+    }
+
     /// Re-resolve the microphone and bring the capture back up on it — a *Use now* landing on a
     /// recording that is already running, or a priority edit the user wants applied now.
     ///
@@ -178,6 +251,11 @@ public final class RecordingSession: @unchecked Sendable {
         // Wait for the watchdog to finish before stopping the recorder: otherwise its `restart()`
         // could run after `recorder.stop()` and bring up a new `SCStream` that would write segments
         // after the assembly (a race over `stream`). Cancel + await serializes the transitions.
+        // Stop scheduling before anything else: a queued loss hop must not start a restart while the
+        // recorder is being torn down.
+        deviceEpoch &+= 1
+        deviceObservation?.cancel()
+        deviceObservation = nil
         watchdogTask?.cancel()
         await watchdogTask?.value
         watchdogTask = nil

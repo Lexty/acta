@@ -72,6 +72,17 @@ public extension MicrophonePolicy {
         let candidates = devices.filter(\.isCaptureCandidate)
         guard !candidates.isEmpty else { return .unavailable(.noEligibleDevice) }
 
+        // ⚠️ **A *Use now* outranks the choice, not just the list.** `.systemDefault` is a standing
+        // policy — "start from what the OS prefers" — and the override is the user pointing at a
+        // microphone right now. With the policy consulted first, clicking a device while
+        // `.systemDefault` was set silently did nothing, which makes the one explicit action in this
+        // whole feature the one that cannot be relied on.
+        if let override = priority.override,
+           let device = candidates.first(where: { $0.uid == override }) {
+            return .pinned(device, alternatives: preferred(in: candidates, priority: priority)
+                .filter { $0.uid != device.uid })
+        }
+
         switch choice {
         case .systemDefault:
             guard let systemDefault else { return .unavailable(.noEligibleDevice) }

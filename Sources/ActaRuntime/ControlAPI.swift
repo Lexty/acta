@@ -187,6 +187,23 @@ public final class ControlAPI {
         set { controller.settings = newValue }
     }
 
+    /// *Use now*: point Acta at this microphone.
+    ///
+    /// ⚠️ **One user action with two effects, and they are not the same promise.** It sets the
+    /// temporary override — which the reconciler expires when that device disconnects, and which Acta's
+    /// own capture resolves against — and, if a recording is running, switches its live capture through
+    /// the one serialized lifecycle. The two can legitimately disagree: capture does not filter on
+    /// `canBeSystemDefault` and the system default does, so a click can land on one and not the other.
+    public func useMicrophoneNow(uid: String) async {
+        await microphone.useNow(uid: uid)
+        await controller.switchMicrophone(to: uid)
+    }
+
+    /// Retire the temporary override and go back to the priority list.
+    public func resumeAutomaticMicrophoneSelection() async {
+        await microphone.resumeAutomaticSelection()
+    }
+
     /// Normalise and persist the settings — and hand the microphone half of them to the app-lifetime
     /// owner, so an edit reaches the reconciler and the capture pin without the menu wiring each field
     /// separately.

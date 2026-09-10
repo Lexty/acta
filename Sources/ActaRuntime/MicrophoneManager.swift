@@ -348,6 +348,15 @@ public final class MicrophoneManager {
         guard started, observation == nil else { return }
         let epoch = lifetimeEpoch
         switch directory.observe({ [weak self] change in
+            // ⚠️ **Taken here, in the delivery, for the reason the reconciler's inbox is.** The main
+            // actor may be busy for an arbitrary interval, and a device that leaves and returns inside
+            // it is simply present again by the time this refresh runs — so a departure the OS really
+            // did report becomes invisible, and a *Use now* the user is no longer wearing survives.
+            // With feature (B) off the reconciler is unsubscribed by design, so this is the **only**
+            // observer, and the capture promise cannot depend on permission to enforce globally.
+            let observed: DeviceEnumeration? = change == .deviceListChanged
+                ? self?.directory.enumerateInputDevices()
+                : nil
             Task { @MainActor in
                 guard let self, self.lifetimeEpoch == epoch, self.started else { return }
                 // ⚠️ **`observationDegraded` is not just another reason to re-read.** It says the
@@ -356,7 +365,8 @@ public final class MicrophoneManager {
                 // Treating it as a plain refresh request republishes a clean inventory and the one
                 // failure that announces itself in no other way disappears.
                 if case .observationDegraded(let reason) = change { self.observationDegraded = reason }
-                self.refreshInventory()
+                await self.expireCaptureOverrideIfDeparted(observed: observed)
+                self.refreshInventory(observed: observed)
             }
         }) {
         case .observing(let subscription):
@@ -372,7 +382,12 @@ public final class MicrophoneManager {
     // MARK: - Inventory
 
     /// Re-read the world. Every change notification lands here, and so does `start()`.
-    public func refreshInventory() {
+    public func refreshInventory() { refreshInventory(observed: nil) }
+
+    /// - Parameter observed: the device list as it looked when a change was **delivered**, when there
+    ///   was one. Consulted for departures before the fresh read below, which may already have missed
+    ///   them.
+    public func refreshInventory(observed: DeviceEnumeration?) {
         // ⚠️ Retried here, not only at `start()`. A registration that failed once must not leave the
         // manager permanently blind — the reconciler retries on every pass for the same reason.
         subscribe()
@@ -399,6 +414,28 @@ public final class MicrophoneManager {
         guard next != inventory else { return }
         inventory = next
         publishInventory()
+    }
+
+    /// Retire a *Use now* whose device has been **proved** to have left.
+    ///
+    /// ⚠️ **Here and not only in the reconciler**, because with feature (B) off the reconciler is
+    /// unsubscribed and its pass returns before expiry ever runs — so a capture override outlived its
+    /// headset forever, and Acta went on trying to record from a device that had gone. Acta's own
+    /// capture selection is a different promise from managing the Mac's default input, and the plan
+    /// forbids it depending on that permission.
+    ///
+    /// ⚠️ **It clears the override on the reconciler, not just in the capture box, and clearing only
+    /// one of them is a bug I wrote and the test caught.** The reconciler owns the priority; every sync
+    /// copies it back. Expiring the capture copy alone meant the very next status change restored the
+    /// override from the reconciler that still held it — the override came back from the dead.
+    ///
+    /// Absence is proved, never inferred: an incomplete snapshot leaves the override alone.
+    private func expireCaptureOverrideIfDeparted(observed: DeviceEnumeration?) async {
+        guard let override = capturePreference.priority.override else { return }
+        guard case .devices(let devices, let uninspectable) = observed, uninspectable.isEmpty else { return }
+        guard !devices.contains(where: { $0.uid == override }) else { return }
+        await reconciler.resumeAutomaticSelection()
+        await syncCapturePreference()
     }
 
     public func inventories() -> AsyncStream<MicrophoneInventory> {

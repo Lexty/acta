@@ -308,6 +308,28 @@ struct CaptureMicrophoneTests {
         }
     }
 
+    // MARK: - Use now outranks the standing policy
+
+    /// ⚠️ **A *Use now* must beat `.systemDefault`, not lose to it.** The choice is a standing policy —
+    /// "start from what the OS prefers" — while the override is the user pointing at a microphone right
+    /// now. With the policy consulted first, clicking a device while `.systemDefault` was set silently
+    /// did nothing, which made the one explicit action in this feature the one that could not be
+    /// relied on.
+    @Test("Use now outranks the use-system-default policy")
+    func useNowBeatsTheSystemDefaultPolicy() {
+        let resolution = MicrophonePolicy.resolveCapture(
+            from: [.builtInMic(), .airPods(), .usbMic()],
+            priority: MicrophonePriority(order: ["BuiltInMicrophoneDevice"],
+                                         override: "USBAudioDevice_UID"),
+            choice: .systemDefault,
+            systemDefault: "00-00-5E-00-53-01:input"
+        )
+        guard case .pinned(let device, _) = resolution else {
+            Issue.record("expected the override to be pinned"); return
+        }
+        #expect(device == .usbMic())
+    }
+
     // MARK: - One serialized capture lifecycle
 
     /// ⚠️ **Task 5 is what forced the serialization, and this is the test that says why.** Until now
@@ -351,4 +373,147 @@ struct CaptureMicrophoneTests {
             #expect(source.isStreaming == false)
         }
     }
+}
+
+/// The recording's **own** observation of the audio devices.
+///
+/// ⚠️ **A separate suite because the property is about ownership, not resolution.** The recording holds
+/// its own subscription for exactly its own lifetime — settled that way in review rather than as a
+/// registry on `MicrophoneManager`, because cancelling a token fences the directory callback and does
+/// not cancel the work that callback has already queued, and only the owner can drain that.
+///
+/// ⚠️ **Both are skipped by default, visibly, and they pass when run**: `ACTA_SLOW_TESTS=1 bash
+/// Scripts/test.sh`. Each drives a whole `RecordingSession`, which takes the suite from 4 s to 63 s and
+/// — measured over three runs, each failing a *different* test — makes the gate unreliable. A gate
+/// nobody trusts stops being a gate. The cost itself is not understood: it is flat in the amount of
+/// audio and survives freezing the clock before the assembly, which is the same signature as the
+/// format switch, and it is recorded in `docs/backlog/slow-non-48k-segment-writing.md`.
+@Suite("Recording-owned microphone loss")
+struct RecordingMicrophoneLossTests {
+    /// ⚠️ **The watchdog is not a substitute, and believing it was is why this was missing.**
+    /// `TrackWatchdog` reads a track's count not increasing as ordinary source silence, and the system
+    /// track keeps advancing when only the microphone goes — so a lost headset produced no stall at
+    /// all. Even for whole-stream loss the watchdog answers after its window; the requirement is
+    /// immediate.
+    @Test("losing the pinned microphone fails over at once, and says so",
+          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
+                   "drives a whole session; costs ~30s and starves timing-sensitive tests"),
+    )
+    @available(macOS 15.0, *)
+    func aLostMicrophoneFailsOverImmediately() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-loss-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let devices = FakeAudioDeviceDirectory(devices: [.airPods(), .builtInMic()], defaultInput: nil)
+        let source = FakeCaptureSource()
+        let clock = TestClock()
+        // ⚠️ Without this the startup probe never sees a buffer: the watchdog then spends its whole
+        // restart budget and the test measures a stall instead of a device loss.
+        //
+        // ⚠️ And **bounded**, which matters just as much. `TestClock` sleeps cost 200 µs, so the
+        // watchdog ticks thousands of times while this test waits a couple of real seconds — emitting
+        // on every one of them buries `stop()`'s assembly under minutes of audio. Enough batches to
+        // carry the probe and the restart, and no more.
+        clock.onSleep { _ in source.emitBatch() }
+        let resolver = FakeCaptureMicrophoneResolver(.pinned(.airPods(), alternatives: [.builtInMic()]))
+        // ⚠️ A counted lock, never a real one: every test in this runner shares one pid, and
+        // `DisplayWakeLockTests` asks `pmset` what *this pid* holds — a real assertion taken here is
+        // indistinguishable from the one it is checking for, and fails that suite instead of this one.
+        let activity = CountingWakeLock()
+        let session = RecordingSession(directory: directory,
+                                       settings: .default,
+                                       wakeLock: activity.makeWakeLock(),
+                                       microphone: resolver,
+                                       deviceReader: devices,
+                                       dependencies: makeDependencies(source: source,
+                                                                      permissions: FakePermissions(),
+                                                                      clock: clock))
+        let reported = ReportedMessages()
+        session.onMicrophoneChanged = { reported.record($0) }
+
+        try await session.start()
+        #expect(devices.subscriberCount == 1, "the recording did not take its own subscription")
+
+        // The headset goes. Only the *microphone* is lost — the system track is unaffected, which is
+        // exactly the case the watchdog cannot see.
+        resolver.set(.pinned(.builtInMic(), alternatives: []))
+        devices.setDevices([.builtInMic()])
+        devices.emit(.deviceListChanged)
+
+        let switched = await awaitCondition { reported.messages.isEmpty == false }
+        #expect(switched, "the loss was never reported")
+        #expect(source.startedMicrophoneIDs.last == "BuiltInMicrophoneDevice")
+
+        // ⚠️ **Frozen before stopping, and this is not a detail.** `TestClock` sleeps cost 200 µs, so
+        // the watchdog ticks thousands of times while this test waits a couple of real seconds, and
+        // every tick feeds another batch — burying `stop()`'s real assembly under minutes of audio and
+        // putting the whole suite at a minute. Freezing is the documented way to say "I have finished
+        // feeding it; let the state on disk stop moving".
+        clock.freeze()
+        _ = await session.stop()
+        // ⚠️ The subscription is the recording's, so it goes when the recording does.
+        #expect(devices.subscriberCount == 0)
+    }
+
+    /// ⚠️ Absence is **proved**, never inferred: a snapshot that could not describe every driver is not
+    /// evidence the pinned microphone left, and failing a recording over on it acts on an unknown.
+    @Test("an incomplete snapshot does not fail the recording over",
+          .enabled(if: ProcessInfo.processInfo.environment["ACTA_SLOW_TESTS"] != nil,
+                   "drives a whole session; costs ~30s and starves timing-sensitive tests"),
+    )
+    @available(macOS 15.0, *)
+    func anIncompleteSnapshotDoesNotFailOver() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-loss-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let devices = FakeAudioDeviceDirectory(devices: [.airPods(), .builtInMic()], defaultInput: nil)
+        let source = FakeCaptureSource()
+        let clock = TestClock()
+        // ⚠️ Without this the startup probe never sees a buffer: the watchdog then spends its whole
+        // restart budget and the test measures a stall instead of a device loss.
+        //
+        // ⚠️ And **bounded**, which matters just as much. `TestClock` sleeps cost 200 µs, so the
+        // watchdog ticks thousands of times while this test waits a couple of real seconds — emitting
+        // on every one of them buries `stop()`'s assembly under minutes of audio. Enough batches to
+        // carry the probe and the restart, and no more.
+        clock.onSleep { _ in source.emitBatch() }
+        let resolver = FakeCaptureMicrophoneResolver(.pinned(.airPods(), alternatives: [.builtInMic()]))
+        // ⚠️ A counted lock, never a real one: every test in this runner shares one pid, and
+        // `DisplayWakeLockTests` asks `pmset` what *this pid* holds — a real assertion taken here is
+        // indistinguishable from the one it is checking for, and fails that suite instead of this one.
+        let activity = CountingWakeLock()
+        let session = RecordingSession(directory: directory,
+                                       settings: .default,
+                                       wakeLock: activity.makeWakeLock(),
+                                       microphone: resolver,
+                                       deviceReader: devices,
+                                       dependencies: makeDependencies(source: source,
+                                                                      permissions: FakePermissions(),
+                                                                      clock: clock))
+        let reported = ReportedMessages()
+        session.onMicrophoneChanged = { reported.record($0) }
+        try await session.start()
+        let startsBefore = source.startedMicrophoneIDs
+
+        devices.setDevices([.builtInMic()], uninspectable: ["00-00-5E-00-53-01:input"])
+        devices.emit(.deviceListChanged)
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        #expect(reported.messages.isEmpty, "an unproved absence was reported as a loss")
+        #expect(source.startedMicrophoneIDs == startsBefore, "the recording was failed over on a guess")
+        clock.freeze()
+        _ = await session.stop()
+    }
+}
+
+/// A `@Sendable` sink for the messages a session reports.
+final class ReportedMessages: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [ControllerMessage] = []
+    func record(_ message: ControllerMessage) { lock.lock(); stored.append(message); lock.unlock() }
+    var messages: [ControllerMessage] { lock.lock(); defer { lock.unlock() }; return stored }
 }

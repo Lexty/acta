@@ -38,6 +38,9 @@ extension RecordingController {
     public static let liveSessionFactory: SessionFactory = { directory, settings in
         RecordingSession(directory: directory,
                          settings: settings,
-                         microphone: MicrophoneManager.shared.captureResolver)
+                         microphone: MicrophoneManager.shared.captureResolver,
+                         // The app's one reader, handed down — the recording owns its own subscription
+                         // to it for exactly its own lifetime.
+                         deviceReader: MicrophoneManager.shared.deviceReader)
     }
 }

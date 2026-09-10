@@ -192,6 +192,63 @@ struct MicrophoneManagerTests {
         #expect(directory.subscriberCount == 1)
     }
 
+    /// ⚠️ **The capture promise must not depend on permission to enforce globally.** With feature (B)
+    /// off the reconciler is unsubscribed by design and its pass returns before expiry ever runs, so a
+    /// *Use now* outlived its headset forever and Acta went on trying to record from a device that had
+    /// gone. The inventory is the only observer in that state, so it owns this.
+    @Test("a capture override expires on a proved departure even with feature (B) off")
+    func theCaptureOverrideExpiresWithFeatureBOff() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+                                                                   defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        await manager.useNow(uid: "00-00-5E-00-53-01:input")
+        #expect(manager.capturePreference.priority.override == "00-00-5E-00-53-01:input")
+        #expect(await manager.reconciler.isEnabled == false)
+
+        directory.setDevices([.builtInMic()])
+        directory.emit(.deviceListChanged)
+        // ⚠️ Waiting on the **published inventory**, not spinning on the override. The expiry happens
+        // inside the same `refreshInventory` call that publishes, so this is ordered rather than
+        // sampled — polling the override with `Task.yield()` made the test itself flaky, which is the
+        // one thing a test may not be.
+        let delivered = await awaitInventory(manager) { $0.devices.count == 1 }
+        #expect(delivered != nil, "the departure was never delivered")
+
+        #expect(manager.capturePreference.priority.override == nil, "the override outlived its device")
+    }
+
+    /// ⚠️ The other half: an **incomplete** snapshot proves nothing, and must leave the override alone.
+    @Test("an incomplete snapshot does not expire a capture override")
+    func anIncompleteSnapshotKeepsTheCaptureOverride() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
+                                                                   defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        await manager.useNow(uid: "00-00-5E-00-53-01:input")
+
+        directory.setDevices([.builtInMic()], uninspectable: ["00-00-5E-00-53-01:input"])
+        directory.emit(.deviceListChanged)
+        await awaitInventory(manager) { $0.uninspectable.isEmpty == false }
+
+        #expect(manager.capturePreference.priority.override == "00-00-5E-00-53-01:input")
+    }
+
+    /// ⚠️ **The hole that made a list edit unreachable.** The capture preference used to be copied only
+    /// by the deduplicated enforcement-status mirror, so with feature (B) off an edit republished the
+    /// same `.disabled` state, emitted nothing, and never arrived — permanently.
+    @Test("a list edit reaches capture with feature (B) off")
+    func aListEditReachesCaptureWithFeatureBOff() async {
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .usbMic()],
+                                                           defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        #expect(await manager.reconciler.isEnabled == false)
+
+        await manager.setPriorityOrder(["USBAudioDevice_UID"])
+
+        // Asserted on the command's completion, not after a wait: the command finishing is what has to
+        // mean the capture resolver can see the change.
+        #expect(manager.capturePreference.priority.order == ["USBAudioDevice_UID"])
+    }
+
     // MARK: - Shutdown
 
     /// ⚠️ **The name says "this app's consumers", not "the HAL listeners", because the second would be

@@ -40,6 +40,39 @@ public final class RecordingController: ObservableObject {
 
     // Active session state.
     private var session: RecordingSession?
+
+    /// Switch the running recording's microphone, and report what actually happened.
+    ///
+    /// ⚠️ **The production caller Task 5 was missing.** The switch itself has always gone through
+    /// `AudioRecorder.restart()`; what did not exist was anything calling it, so *Use now* moved the
+    /// preference and the live recording kept its old device until something else happened to restart
+    /// it. Returns `false` when there is no recording to switch — the caller still changes the
+    /// preference, which is what the next recording resolves against.
+    @discardableResult
+    public func switchMicrophone(to uid: String) async -> Bool {
+        guard let session else { return false }
+        switch await session.switchMicrophone(to: uid) {
+        case .switched(let device):
+            reportMicrophoneChange(.microphoneSwitched(device: device.name, reason: "you chose it"))
+            return true
+        case .fellBack(let device):
+            // ⚠️ Reported as the switch it *is*, not as the one that was asked for: the menu must never
+            // show a requested device as active before capture succeeded on it.
+            reportMicrophoneChange(.microphoneSwitched(device: device.name,
+                                                       reason: "the one you chose did not start"))
+            return false
+        case .failed:
+            reportMicrophoneChange(.microphoneSwitchFailed(device: uid))
+            return false
+        }
+    }
+
+    /// Publish a microphone notice through the controller's one untyped `errorMessage`, which
+    /// `ControlState` classifies back into a `Notice`. ⚠️ It does **not** touch `phase`: nothing about
+    /// the recording has failed, and parking `phase` in `.error` would no-op `stop()`'s guard.
+    private func reportMicrophoneChange(_ message: ControllerMessage) {
+        errorMessage = message.text
+    }
     private var currentDirectory: URL?
     private var currentTitle: String = ""
     private var currentSource: String = ""
@@ -208,6 +241,11 @@ public final class RecordingController: ObservableObject {
                             durationSeconds: 0, status: .recording),
                 to: directory)
 
+            // ⚠️ Installed **before** `start()`, so a device lost during the startup probe is reported
+            // rather than dropped for want of a listener.
+            session.onMicrophoneChanged = { [weak self] message in
+                Task { @MainActor in self?.reportMicrophoneChange(message) }
+            }
             try await session.start(onStall: { [weak self] failure in
                 Task { @MainActor in self?.handleFatalStall(failure) }
             })
