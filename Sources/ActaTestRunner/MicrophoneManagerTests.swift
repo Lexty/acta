@@ -570,3 +570,38 @@ struct MicrophoneManagerTests {
         #expect(manager.inventory.observationDegraded == nil)
     }
 }
+
+/// ⚠️ **A synchronous mirror that only some paths update is a mirror that lies on the others.**
+/// `managementEnabled` exists so a settings write can read the enablement without suspending; a review
+/// found `stopEnforcement()` leaving it `true` while the reconciler was disabled, which is exactly the
+/// stale answer the mirror was introduced to replace.
+@Test("a stopped manager does not claim enforcement is still enabled")
+@MainActor
+@available(macOS 15.0, *)
+func aStoppedManagerDoesNotClaimEnforcementEnabled() async {
+    let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                       defaultInput: "BuiltInMicrophoneDevice")
+    manager.start()
+    _ = await manager.enableManagement()
+    #expect(manager.managementEnabled, "the test never got management on")
+
+    await manager.stopEnforcement()
+
+    #expect(await manager.reconciler.isEnabled == false)
+    #expect(manager.managementEnabled == false,
+            "the mirror still claimed enforcement was on after the manager had stopped it")
+}
+
+/// The same for the two direct switches, which also never assigned it.
+@Test("the direct enforcement switches keep the mirror honest")
+@MainActor
+@available(macOS 15.0, *)
+func theDirectEnforcementSwitchesUpdateTheMirror() async {
+    let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                       defaultInput: "BuiltInMicrophoneDevice")
+    manager.start()
+    await manager.enableEnforcement()
+    #expect(manager.managementEnabled)
+    await manager.disableEnforcement()
+    #expect(manager.managementEnabled == false)
+}

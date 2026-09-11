@@ -169,6 +169,13 @@ public final class MicrophoneManager {
 
     /// Whether feature (B) is in force, readable **synchronously on the main actor**.
     ///
+    /// ⚠️ **A mirror, and named as one.** It is assigned from the reconciler at the end of every
+    /// operation here that can change enablement — and the honest caveat is that "every" is a claim
+    /// about this file that only review keeps true. An earlier version left it `true` after
+    /// `stopEnforcement()` had disabled the reconciler; the paths are enumerated rather than derived, so
+    /// a new one that forgets is a silent lie. It is **not** a substitute for `reconciler.isEnabled`
+    /// where the answer must be authoritative rather than synchronous.
+    ///
     /// ⚠️ **Synchronous is the requirement, not a convenience.** Its one consumer writes it into a
     /// `RecordingSettings` value that it has just read and is about to write back; an `await` in the
     /// middle of that read-modify-write is a window in which another main-actor edit lands and is then
@@ -182,7 +189,13 @@ public final class MicrophoneManager {
     public private(set) var managementEnabled = false
 
     public func disableManagement() async {
-        await reconciler.configure(order: capturePreference.priority.order, enabled: false)
+        // ⚠️ **No order is supplied, and that is the fix.** Passing `capturePreference.priority.order`
+        // made switching the feature off a *writer* of the list: a priority edit that reached the
+        // reconciler while this copy was in hand was replaced by the stale one, losing the user's
+        // microphone 20 times out of 20. Switching enforcement off has no business replacing the list,
+        // and the reconciler already owns it — the same lesson as `enable(seedingWith:)`, from the other
+        // direction.
+        await reconciler.disable()
         managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
     }
@@ -371,6 +384,7 @@ public final class MicrophoneManager {
         enforcementAdmitted = false
         settingsRevision &+= 1
         await reconciler.disable()
+        managementEnabled = await reconciler.isEnabled
     }
 
     /// Whether a settings application may still turn enforcement **on**.
@@ -596,8 +610,18 @@ public final class MicrophoneManager {
 
     /// Feature (B) on. ⚠️ Opt-in and off by default: it changes state every other application depends
     /// on.
-    public func enableEnforcement() async { await reconciler.enable() }
-    public func disableEnforcement() async { await reconciler.disable() }
+    // ⚠️ These assign `managementEnabled` for the same reason `enableManagement` does: a mirror that
+    // only some of the paths that change enablement update is a mirror that lies on the others. A
+    // review found `stopEnforcement()` leaving it `true` while the reconciler was disabled.
+    public func enableEnforcement() async {
+        await reconciler.enable()
+        managementEnabled = await reconciler.isEnabled
+    }
+
+    public func disableEnforcement() async {
+        await reconciler.disable()
+        managementEnabled = await reconciler.isEnabled
+    }
 
     /// ⚠️ Pause suspends **global enforcement only**. Acta's own capture selection is a different
     /// promise and must not share this switch.

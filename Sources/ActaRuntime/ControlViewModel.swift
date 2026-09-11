@@ -133,11 +133,19 @@ public final class ControlViewModel: ObservableObject {
         case priority
     }
 
+    /// - Parameter withdrawingPermission: whether this command **takes back** permission to hold the
+    ///   Mac's input, cancelling grants issued before it.
+    ///   ⚠️ **Being on the revocation queue is not the same thing, and conflating them was a defect I
+    ///   introduced.** Pause must be admitted immediately — that is what the queue is for — but it
+    ///   *presupposes* enforcement: cancelling an Enable behind it left the feature **off** rather than
+    ///   paused, persisted off, and made the following Resume resume nothing. Only switching the feature
+    ///   off withdraws permission.
     private func enqueue(_ queue: CommandQueue,
+                         withdrawingPermission: Bool = false,
                          _ body: @escaping @Sendable @MainActor () async -> Void) {
         // Bumped synchronously, at the moment the user acts — not when the command runs, which is the
         // whole point: the grant it cancels may not have started.
-        if queue == .revocation { revocations &+= 1 }
+        if withdrawingPermission { revocations &+= 1 }
         let issuedAfter = revocations
         let previous = chains[queue]
         chains[queue] = Task { @MainActor [weak self] in
@@ -225,24 +233,33 @@ public final class ControlViewModel: ObservableObject {
     }
 
     public func setManagingSystemInput(_ on: Bool) {
-        // ⚠️ On and off are not the same kind of decision: switching the feature **off** withdraws
-        // permission to write the Mac's input and must be admitted immediately, while switching it on
-        // may queue behind other grants.
-        enqueue(on ? .grant : .revocation) { [weak self] in
+        if !on {
+            // ⚠️ **The revocation lands in the settings synchronously, at the moment the user acts.**
+            // A queue is not enough, because a settings *save* is another granting path: an unrelated
+            // command — a capture choice, a priority edit — merges its own field into a value that still
+            // says `managesSystemDefaultInput = true`, and saving re-applies the whole value, which
+            // re-enables the reconciler while the Off is still completing. Measured 20 runs in 20 by a
+            // review. Writing the field here, before anything is enqueued, means every later merge
+            // carries the withdrawal with it.
+            persist(.managesSystemDefaultInput(false))
+        }
+        enqueue(on ? .grant : .revocation, withdrawingPermission: !on) { [weak self] in
             guard let self else { return }
-            if on { await api.enableMicrophoneManagement() } else { await api.disableMicrophoneManagement() }
-            // ⚠️ **Read back rather than replayed from the captured flag** — what was actually applied
-            // is what gets persisted, which is what makes an enable refused during shutdown persist as
-            // off. ⚠️ And read back from the **reconciler**, not from `microphoneStatus`: that field
-            // comes from a published mirror which lags the `configure` that just returned, so it
-            // answered with the *previous* value. Since saving re-applies the settings, an Off was
-            // persisted as On and the save then switched management back on — the user's decision
-            // undone by its own write. `persist` is where that read lives now, for every save.
-            // ⚠️ Both fields, and each merged on its own: the enable owns the switch, and the order it
-            // returns is the authoritative one the reconciler settled on (it may have seeded an empty
-            // list). Writing them as one whole value is what let one queue stamp another's field.
-            persist(.managesSystemDefaultInput(api.isMicrophoneManagementEnabled))
-            persist(.microphonePriority(api.microphoneStatus.priority))
+            if on {
+                await api.enableMicrophoneManagement()
+                // ⚠️ Read back rather than replayed from the captured flag: an enable refused during
+                // shutdown must persist as off, which a captured `true` could never express.
+                persist(.managesSystemDefaultInput(api.isMicrophoneManagementEnabled))
+                // The reconciler may have seeded an empty list; that order is the authoritative one.
+                persist(.microphonePriority(api.microphoneStatus.priority))
+            } else {
+                await api.disableMicrophoneManagement()
+                // ⚠️ **Not read back**, and the asymmetry is the point: disabling cannot be refused, so
+                // there is nothing to learn from the mirror — while reading it is exactly how a
+                // concurrent settings application that had re-enabled enforcement got written back as
+                // though it were the user's decision. Off writes off.
+                persist(.managesSystemDefaultInput(false))
+            }
         }
     }
 

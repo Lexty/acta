@@ -183,6 +183,170 @@ struct ControlViewModelMicrophoneTests {
         }
     }
 
+    /// ⚠️ **The other half of separating the queues: a grant that has not started yet.** Once
+    /// revocations stop waiting for grants, an Enable sitting behind a parked Resume is still pending
+    /// when the user switches the feature off — and would run afterwards, switching it back on. Ordering
+    /// cannot fix that, because the two are deliberately no longer ordered against each other. Hence the
+    /// one asymmetric rule: **a revocation cancels grants issued before it; a grant never cancels a
+    /// revocation.**
+    @Test("an Enable still queued when the user switches the feature off never runs")
+    @available(macOS 15.0, *)
+    func aQueuedEnableDoesNotSurviveAnOff() async {
+        let (directory, clock, manager, api, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "BuiltInMicrophoneDevice")
+        _ = await manager.enableManagement()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        await manager.pauseEnforcement()
+        model.refreshMicrophone()
+
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+
+        // A grant that parks, and a second grant queued behind it that has not begun.
+        model.resumeMicrophoneManagement()
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the Resume never reached the reconciler — nothing was queued behind it")
+        model.setManagingSystemInput(true)
+
+        model.setManagingSystemInput(false)
+        let revoked = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+        #expect(revoked, "the Off did not withdraw permission")
+
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+
+        // ⚠️ **A bounded wait for the *bad* outcome, not a yield count.** The queued Enable would run a
+        // whole pass, so "yield sixty times and look" measured my patience rather than the fence — with
+        // the fence deleted that version still passed. This waits a full second for enforcement to come
+        // back on and requires that it does not.
+        let reenabled = await awaitAsyncCondition(timeoutMilliseconds: 1000) {
+            await manager.reconciler.isEnabled
+        }
+        #expect(reenabled == false,
+                "an Enable queued before the Off ran after it and switched management back on")
+        #expect(api.settings.managesSystemDefaultInput == false,
+                "the queued Enable persisted the feature as on after the user had switched it off")
+    }
+
+    /// ⚠️ **A settings save is a granting path too, and the queue fence does not reach it.** Any
+    /// command that merges its own field into `RecordingSettings` carries whatever
+    /// `managesSystemDefaultInput` currently says, and saving re-applies the **whole** value — so a
+    /// capture choice picked in the same turn as an Off replayed a stale `true` and re-enabled the
+    /// reconciler while the Off was still completing. Measured by review at 20 runs in 20. The
+    /// withdrawal is now written into the settings synchronously, before anything is enqueued.
+    @Test("an unrelated settings save in the same turn cannot undo an Off")
+    @available(macOS 15.0, *)
+    func anotherSettingsSaveDoesNotCancelOff() async {
+        let controller = ControllerHarness(label: "menu-off-save")
+        defer { controller.tearDown() }
+
+        for iteration in 0 ..< 20 {
+            let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                       defaultInput: "BuiltInMicrophoneDevice")
+            manager.start()
+            let api = ControlAPI(controller: controller.controller, microphone: manager)
+            defer { api.finish() }
+            let model = ControlViewModel(api: api)
+            directory.setDevices([.builtInMic(), .usbMic()])
+            manager.refreshInventory()
+            _ = await manager.enableManagement()
+            var on = api.settings
+            on.managesSystemDefaultInput = true
+            on.captureMicrophoneChoice = .followPriority
+            api.settings = on
+            api.saveSettings()
+            model.refreshMicrophone()
+
+            // Something else takes the input, so any corrective write after the Off is observable.
+            directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+            let writesAtOff = directory.attemptedWrites
+
+            model.setManagingSystemInput(false)
+            model.setCaptureChoice(.systemDefault)
+
+            let settled = await awaitCondition {
+                MainActor.assumeIsolated { api.settings.captureMicrophoneChoice } == .systemDefault
+            }
+            #expect(settled, "the capture choice never landed (iteration \(iteration))")
+            let off = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+            #expect(off, "an unrelated save re-enabled enforcement after the Off (iteration \(iteration))")
+
+            let stayedOff = await awaitAsyncCondition(timeoutMilliseconds: 100) {
+                await manager.reconciler.isEnabled
+            }
+            #expect(stayedOff == false, "enforcement came back on after the Off (iteration \(iteration))")
+            #expect(api.settings.managesSystemDefaultInput == false,
+                    "the Off was persisted as on (iteration \(iteration))")
+            let wrote = "the Mac's input was written after the user switched management off "
+                + "(iteration \(iteration))"
+            #expect(directory.attemptedWrites == writesAtOff, "\(wrote)")
+        }
+    }
+
+    /// ⚠️ **Switching the feature off has no business replacing the priority list.** `disableManagement`
+    /// passed a cached copy of the order into `configure`, so an edit that reached the reconciler while
+    /// that copy was in hand was overwritten — the user's microphone gone from the persisted list, 20
+    /// runs in 20. The atomic seed fixed the *enable* side; this is the same competing writer on the
+    /// other side, and the answer is that Off supplies no order at all.
+    @Test("switching management off does not overwrite a priority edit issued with it")
+    @available(macOS 15.0, *)
+    func offDoesNotOverwriteAPriorityEdit() async {
+        let controller = ControllerHarness(label: "menu-off-edit")
+        defer { controller.tearDown() }
+
+        for iteration in 0 ..< 20 {
+            let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                       defaultInput: "BuiltInMicrophoneDevice")
+            manager.start()
+            let api = ControlAPI(controller: controller.controller, microphone: manager)
+            defer { api.finish() }
+            let model = ControlViewModel(api: api)
+            directory.setDevices([.builtInMic(), .usbMic()])
+            manager.refreshInventory()
+            await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+            _ = await manager.enableManagement()
+            var on = api.settings
+            on.managesSystemDefaultInput = true
+            on.microphonePriority = ["BuiltInMicrophoneDevice"]
+            api.settings = on
+            api.saveSettings()
+            model.refreshMicrophone()
+
+            model.togglePreferred("USBAudioDevice_UID")
+            model.setManagingSystemInput(false)
+
+            let settled = await awaitCondition {
+                MainActor.assumeIsolated { api.settings.managesSystemDefaultInput } == false
+                    && MainActor.assumeIsolated { api.settings.microphonePriority }.count == 2
+            }
+            let persisted = api.settings.microphonePriority
+            #expect(settled, "the two decisions never settled (iteration \(iteration)): \(persisted)")
+            let complaint = "switching management off discarded the priority edit "
+                + "(iteration \(iteration)): \(persisted)"
+            #expect(persisted.contains("USBAudioDevice_UID"), "\(complaint)")
+        }
+    }
+
+    /// ⚠️ **Pause is not Off, and the revocation fence must not treat it as one.** A revocation cancels
+    /// grants issued before it — an Enable still queued when the user switches the feature off must not
+    /// run afterwards. But Pause *presupposes* enforcement: cancelling the Enable behind it leaves a
+    /// machine that is disabled rather than paused, and the Resume that follows resumes nothing.
+    @Test("pausing does not cancel the Enable it was clicked on top of")
+    @available(macOS 15.0, *)
+    func pausingDoesNotCancelAQueuedEnable() async {
+        let (_, manager, api, model) = harness()
+        model.setManagingSystemInput(true)
+        model.pauseMicrophoneManagement()
+
+        let paused = await awaitEnforcement(manager) { $0.status == .paused }
+        #expect(paused != nil, "the pause never took effect")
+        let enabled = await awaitAsyncCondition { await manager.reconciler.isEnabled }
+        #expect(enabled, "pausing cancelled the Enable behind it, leaving the feature off, not paused")
+        #expect(api.settings.managesSystemDefaultInput,
+                "the feature was persisted as off after a pause, not as on and paused")
+    }
+
     /// ⚠️ **Independent queues cannot make two writers of the same state safe**, and this is the
     /// sequence that proves it. Enabling management seeded its list from a *cached* copy of the priority
     /// and wrote the result back, so an explicit edit that reached the reconciler during that gap was
