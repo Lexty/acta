@@ -810,3 +810,54 @@ func aRealSeedClaimsTheOrder() async {
     #expect(replaced == false,
             "a request captured before a real seed overwrote the list that seed had just chosen")
 }
+
+/// ⚠️ **The acknowledgement-versus-command distinction again, now in the return from seeding.** The
+/// order authority used to be claimed *after* the reconciliation the Enable awaited, so a request
+/// submitted once the seed had already changed the list — but before the manager heard back — was
+/// invalidated by that older intent finishing late. The claim now happens in the same synchronous turn
+/// as the decision that justifies it.
+@Test("a request submitted after a seed changed the list is not cancelled by the seed finishing late")
+@MainActor
+@available(macOS 15.0, *)
+func aDelayedSeedAcknowledgementDoesNotCancelANewerOrder() async {
+    let (directory, clock, manager) = makeGatedManager(devices: [.builtInMic(), .usbMic()],
+                                                       defaultInput: "00-00-5E-00-53-01:input")
+    directory.setWritesTakeEffect(false)
+    clock.hold()
+
+    // The Enable is left running: it seeds, then parks on its verification deadline.
+    let enable = Task { @MainActor in await manager.enableManagement() }
+    let seeded = await awaitAsyncCondition { await manager.reconciler.priority.order.isEmpty == false }
+    #expect(seeded, "the seed never reached the list, so there was nothing to submit after it")
+    #expect(await manager.reconciler.isEnabled)
+
+    // ⚠️ **Both of these happen in one main-actor turn, and that is the whole test.** Releasing the
+    // clock lets the Enable finish, but its acknowledgement needs the main actor — which this turn is
+    // holding — so the request below is submitted while that acknowledgement is pending. Submitting it
+    // first and releasing later lets the request simply finish before the acknowledgement, which proves
+    // nothing: written that way, the test passed against the defect.
+    clock.release()
+    // ⚠️ **Wait for the reconciler to finish without giving up the main actor.** Releasing and
+    // submitting in one turn is not enough: which of the two pending main-actor continuations runs
+    // first then decides the outcome, and written that way the test passed against the defect. Blocking
+    // here — bounded — leaves the Enable's acknowledgement *ready* to run and held back only by this
+    // turn, so the request below is unambiguously submitted while it is still pending.
+    let quiescent = DispatchSemaphore(value: 0)
+    let reconciler = manager.reconciler
+    Task.detached { await reconciler.waitForQuiescence(); quiescent.signal() }
+    #expect(blockUntilSignalled(quiescent),
+            "the reconciler never settled, so nothing was pending when the request was submitted")
+
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: true,
+                                            captureMicrophoneChoice: .systemDefault))
+
+    _ = await enable.value
+
+    let applied = await awaitAsyncCondition {
+        await manager.reconciler.priority.order == ["USBAudioDevice_UID"]
+    }
+    #expect(applied, "the Enable's late acknowledgement cancelled a request submitted after its seed")
+    // The choice landing proves the request reached its final publication rather than being dropped.
+    #expect(manager.capturePreference.snapshot.choice == .systemDefault)
+}

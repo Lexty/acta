@@ -242,6 +242,20 @@ func awaitAsyncCondition(timeoutMilliseconds: Int = 2000,
     return await condition()
 }
 
+/// Block the calling thread until `semaphore` is signalled, bounded.
+///
+/// ⚠️ **Deliberately blocking, and deliberately not `async`.** `DispatchSemaphore.wait` is unavailable
+/// from an async context for good reasons, and this wrapper exists for the one situation where blocking
+/// is the point: a test that must let an actor finish its work while **holding the main actor**, so that
+/// a continuation waiting for the main actor is provably pending rather than merely unscheduled. Every
+/// `await` would hand the main actor over and destroy the very state being arranged.
+///
+/// Only safe when the work being waited on does not itself need the main actor — check that before
+/// reaching for this — and always bounded, so a mistake fails the test instead of hanging the suite.
+func blockUntilSignalled(_ semaphore: DispatchSemaphore, seconds: Double = 2) -> Bool {
+    semaphore.wait(timeout: .now() + seconds) == .success
+}
+
 /// A scripted `CaptureMicrophoneResolving`.
 ///
 /// ⚠️ **What it cannot prove, stated here rather than discovered later.** It hands back a uid and the

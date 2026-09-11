@@ -156,18 +156,28 @@ public final class MicrophoneManager {
         // that arrived in between.
         let proposal = MicrophoneSeeding.proposal(from: inventory.devices,
                                                   systemDefault: inventory.observedDefault.uid)
+        // ⚠️ Decided and claimed here, before any suspension: seeding replaces only an empty list, so
+        // whether this command speaks for the order is knowable now — and a claim made now cannot
+        // invalidate a request submitted after the list had already changed.
+        let willSeed = knownOrder.isEmpty && !proposal.isEmpty
+        if willSeed {
+            authority.order &+= 1
+            knownOrder = proposal
+        }
         guard enforcementAdmitted else {
             await reconciler.configure(order: await reconciler.priority.order, enabled: false)
             managementEnabled = await reconciler.isEnabled
             await syncCapturePreference()
             return await reconciler.priority.order
         }
-        let outcome = await reconciler.enable(seedingWith: proposal)
-        // ⚠️ **Only a seed that actually changed the list speaks for the order.** Bumping this on every
-        // enable meant a command that seeded *nothing* — the ordinary case, an existing list — withdrew
-        // an explicit priority change it had not replaced. "Seeding can change the list" is not "it
-        // did"; a no-op enable expresses no replacement priority.
-        if outcome.seeded { authority.order &+= 1 }
+        // ⚠️ The proposal is handed over **only** when this turn decided to seed. Passing it regardless
+        // and letting the reconciler decide is what put the decision on the far side of a suspension.
+        let outcome = await reconciler.enable(seedingWith: willSeed ? proposal : [])
+        // ⚠️ Corrected **only when this command is the one that wrote the list**. `outcome.order` was
+        // read before the reconciliation this call awaited, so assigning it unconditionally would let a
+        // late completion put a stale value back into the mirror — the same shape as the defect above,
+        // one field over.
+        if willSeed, outcome.seeded { knownOrder = outcome.order }
         let seeded = outcome.order
         managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
@@ -253,9 +263,11 @@ public final class MicrophoneManager {
         let mayManage = issuedAt.management == authority.management
         let mayOrder = issuedAt.order == authority.order
         if mayManage, mayOrder {
+            knownOrder = settings.microphonePriority
             await reconciler.configure(order: settings.microphonePriority,
                                        enabled: settings.managesSystemDefaultInput && enforcementAdmitted)
         } else if mayOrder {
+            knownOrder = settings.microphonePriority
             await reconciler.setOrder(settings.microphonePriority)
         } else if mayManage {
             if settings.managesSystemDefaultInput, enforcementAdmitted {
@@ -287,6 +299,7 @@ public final class MicrophoneManager {
         let enabled = await reconciler.isEnabled
         guard revision == settingsRevision, epoch == lifetimeEpoch, started else { return }
         managementEnabled = enabled
+        knownOrder = priority.order
         // ⚠️ **Re-checked here, after the suspensions above.** The choice is published last, so it is the
         // field most exposed to a newer intent landing mid-application — and republishing a stale one
         // means a recording resolves under a policy the user did not choose and did save.
@@ -332,6 +345,20 @@ public final class MicrophoneManager {
     }
 
     private var authority = Authority()
+
+    /// The priority list as this owner last **asked for it**, mirrored on the main actor.
+    ///
+    /// ⚠️ **It exists so a seed's decision and its authority claim happen in one synchronous turn**, and
+    /// that is the only thing it is for. Claiming the order authority *after* awaiting the reconciler
+    /// meant an older Enable, finishing late, invalidated a request submitted after its seed had already
+    /// changed the list — an acknowledgement acting as a command again, one level further down. Deciding
+    /// "will this seed replace anything?" from a value readable without suspending puts the claim at the
+    /// same boundary as the change.
+    ///
+    /// ⚠️ It is **not** a second source of truth for the list, and nothing selects a microphone from it.
+    /// The reconciler owns the order; every writer here updates this mirror synchronously *before* it
+    /// suspends, and corrects it from the reconciler's own answer afterwards.
+    private var knownOrder: [String] = []
 
     /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every
     /// continuation can tell whether it is still the current intent.
@@ -689,6 +716,7 @@ public final class MicrophoneManager {
 
     public func setPriorityOrder(_ order: [String]) async {
         authority.order &+= 1
+        knownOrder = order
         await reconciler.setOrder(order)
         await syncCapturePreference()
     }
