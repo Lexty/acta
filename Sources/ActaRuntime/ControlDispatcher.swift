@@ -149,6 +149,15 @@ public final class ControlDispatcher: ControlRequestHandling {
             // under the policy it replaced. Awaiting here and not below keeps the guard and the start in
             // one turn, which is the other half of this case's correctness.
             await service.settleMicrophoneSettings()
+            // ⚠️ **The entry gate above is an *entry* gate, and this await moved the start behind it.**
+            // Joining an unstructured task does not throw when the *waiter* is cancelled, so a start
+            // parked here sails through a quit that tore the socket down and cancelled this connection —
+            // and begins a recording inside the finalisation window, which is exactly what the gate at
+            // the top of `handle` exists to prevent. Re-checked here, and still one turn away from
+            // `canStart` and `start(title:)`.
+            if Task.isCancelled {
+                return .error(.commandRejected(reason: Rejection.closing))
+            }
             // The guard, before `start(title:)` can edit the title. Same turn, no `await` in between.
             guard service.state.canStart else {
                 return .error(.commandRejected(reason: Rejection.busy))

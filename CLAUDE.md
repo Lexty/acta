@@ -392,6 +392,21 @@ reached the log while the other three reached the user.
   enough, because `applySettings` returns before it has applied — and carries an `isTerminating` flag so a
   bind that completes after quit began does not reopen the endpoint the quit-time teardown just closed.
   ⚠️ That last part is in the **executable** target and no test reaches it; it is human-acceptance work.
+  ⚠️ **An `await` added ahead of a guard moves the command behind the entry gate, and that is a defect
+  shape worth recognising.** `handle` checks `Task.isCancelled` once, on entry — sufficient while nothing
+  suspended before `start(title:)`. Joining an unstructured task does **not** throw when the *waiter* is
+  cancelled, so a start parked in the barrier sails through the quit that tore the socket down and
+  cancelled its connection, and begins recording inside the finalisation window. Cancellation is
+  re-checked immediately after the barrier. Any future `await` inserted before a command acts must do the
+  same; the gate is a gate at the point it is written, not for the whole function.
+  ⚠️ **The barrier's fake-driven tests would pass if `ControlAPI.settleMicrophoneSettings()` became a
+  no-op**, because a fake `ControlServing` proves only that the dispatcher waits on what it is handed.
+  `ControlDispatcherMicrophoneIntegrationTests` closes that: a dispatcher over a **real** `ControlAPI`
+  over a real `MicrophoneManager` on a fake directory and a `GatedClock`, with the application parked
+  deterministically. Deleting the forwarding fails it and nothing else — which is what makes it worth
+  having. Note what makes the parking work: the fake's default input must be a device **other** than the
+  head of the priority list, or enforcement has no write to make and the application finishes before it
+  can be held.
   Assert only through the
   public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are

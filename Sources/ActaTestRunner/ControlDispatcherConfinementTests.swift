@@ -250,3 +250,26 @@ func aTrustedDispatcherWaitsForTheSameBarrier() async {
     _ = await reply.value
     #expect(fake.calls.contains("start"))
 }
+
+@MainActor
+@available(macOS 15.0, *)
+@Test
+func aStartCancelledWhileWaitingForTheBarrierIsRefused() async {
+    // ⚠️ **The await moved the start behind the entry gate.** `handle` checks `Task.isCancelled` on
+    // entry, which was the whole gate while nothing suspended before `start(title:)`. Joining an
+    // unstructured task does not throw when the *waiter* is cancelled, so a start parked in the barrier
+    // survives the quit that cancelled its connection and lands inside the finalisation window — the
+    // exact failure the entry gate exists to prevent.
+    let (dispatcher, fake) = makeSocketDispatcher(ControlState(operation: .idle))
+    fake.parksMicrophoneSettlement = true
+
+    let reply = Task { await dispatcher.handle(.start(title: "Weekly sync")) }
+    await waitUntil("the start to park in the microphone barrier") { fake.parkedInSettlement == 1 }
+    // Quit: the socket is torn down and every connection task cancelled, while this start is parked.
+    reply.cancel()
+    fake.releaseMicrophoneSettlement()
+
+    #expect(await reply.value.wireError?.code == "command_rejected")
+    #expect(!fake.calls.contains("start"), "a cancelled start must not reach the recorder")
+    #expect(fake.titleWithoutRecording.isEmpty, "nor edit the title on its way past")
+}
