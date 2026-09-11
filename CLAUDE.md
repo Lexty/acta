@@ -351,10 +351,59 @@ reached the log while the other three reached the user.
   may name these APIs; move the comment rather than contorting the code. Task 9's live probe is outside
   the production targets by design — it must import `AVFoundation` — which is why the guard scans the
   four production targets rather than keeping an exemption list.
-- **Three confinements, grep-enforceable — keep them green.** ScreenCaptureKit (`import
+- **The identity this whole feature stands on is measured, not documented — and a probe says so.**
+  The CoreAudio device UID (`kAudioDevicePropertyDeviceUID`) and `AVCaptureDevice.uniqueID` are the same
+  string, which is what lets a UID read from the HAL be handed to
+  `SCStreamConfiguration.microphoneCaptureDeviceID`. Apple documents each identity's persistence
+  separately and **never states they are one identity**; the equality was measured here, once, on one
+  OS. If a future macOS diverges, every line still compiles and either the wrong microphone is recorded
+  or capture fails outright. `MicrophoneIdentityProbe` (+ `bash Scripts/probe-microphone-identity.sh`)
+  takes **two independent live observations** and compares them.
+  ⚠️ **Its correspondence is deliberately not the UID.** Matching the two lists by UID and then
+  asserting the UIDs agree is `x == x`; devices are corresponded **by role** (each API asked separately
+  which device is the system default input) and **by display name**, with a name that is not unique on
+  both sides excluded rather than paired arbitrarily — which is the same fact production encodes by
+  keying identity on the UID and never on the name.
+  ⚠️ **Three outcomes, and merging any two defeats it**: corresponded with two different identities is a
+  **failure**; hardware that is simply absent is a **visible `.enabled(if:)` skip**; a comparison that
+  corresponded **nothing** is `inconclusive` and fails, because that is also what a total divergence
+  looks like from inside the matcher. It claims to detect divergence **on the devices this machine
+  exercises** — not compatibility with a future macOS, and not that ScreenCaptureKit captured the
+  intended microphone, which stays in manual acceptance.
+  ⚠️ **The probe warms AVFoundation before the suite runs** (`MicrophoneIdentityProbe.warmUp()` in
+  `main.swift`), and that is measured, not defensive: the first `AVCaptureDevice.DiscoverySession` in a
+  process costs 221 ms of one-time initialization, and paying it *inside* the parallel suite took the
+  gate from 7.6 s to 67 s with `SegmentWriter.finish` exhausting its 30-second `pendingWrites` wait.
+  `isWarm` fails a test if the call is deleted. See
+  `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`.
+- **Two CoreAudio traps that cost real time, both of which pass silently.**
+  ⚠️ **`kAudioDevicePropertyDeviceCanBeDefaultDevice` must be asked in
+  `kAudioObjectPropertyScopeInput`.** Asked in `kAudioObjectPropertyScopeGlobal` it returns
+  `kAudioHardwareUnknownPropertyError` for **every** device, so an adapter reports `.unknown` across the
+  board — and nothing notices, because `.unknown` is a legitimate answer for any single device. Only
+  *universal* `.unknown` identifies it, which is what
+  `theEligibilityQueryUsesTheScopeThatActuallyAnswers` asserts. ⚠️ It is also **not** the question "may
+  Acta record this" — BlackHole and an aggregate device both answered *yes* to it here while being
+  exactly the software endpoints `isPhysical` excludes.
+  ⚠️ **A swallowed `OSStatus` becomes a claim about the hardware.** An adapter that catches a failed
+  HAL call and returns `[]` reports "this machine has no microphones" with the same value it would use
+  for a machine that genuinely has none, and every consumer above then behaves as though it had
+  *looked*. Same class as the recovery scan's `unscannable`: "I could not look" is not "there was
+  nothing to find". Hence `DeviceEnumeration.failed`, `DefaultInputRead.failed`,
+  `ObservationOutcome.failed` and `DeviceEnumeration.devices(_, uninspectable:)` — a driver that will
+  not answer is **named**, because a snapshot that omits it silently is indistinguishable from one where
+  the device left, and consumers above read a departure as a disconnect.
+- **The two a human holds, and the one the package graph holds — keep them green.** ⚠️ The heading
+  used to say "three confinements, grep-enforceable", which read as though something checked all of
+  them; only the third is checked. ScreenCaptureKit (`import
   ScreenCaptureKit`, `SCStream*`, `SCContentFilter`, `SCShareableContent`) appears only in
   `SCKCaptureSource.swift`; the TCC calls (`CGPreflightScreenCaptureAccess`,
-  `CGRequestScreenCaptureAccess`, `AVCaptureDevice`) only in `SystemPermissions.swift`. That is what
+  `CGRequestScreenCaptureAccess`, `AVCaptureDevice`) only in `SystemPermissions.swift`.
+  ⚠️ **Both are rules about the production targets, and that scope is now load-bearing**:
+  `MicrophoneIdentityProbe` in `ActaTestRunner` imports `AVFoundation` and names `AVCaptureDevice` by
+  design — it exists to compare that API against the HAL — so a grep run across the whole repository
+  reports it and is right to. Scope the grep (`Sources/ActaKit Sources/ActaRuntime
+  Sources/ActaControlProtocol Sources/Acta`) or read the hit before acting on it. That is what
   makes the fakes answer the questions production actually asks instead of bypassing them. Match type
   references, not prose — doc comments legitimately name `SCStream`. Never contort code to satisfy
   the grep; move the comment instead. The third: `Sources/ActaControlProtocol/` imports **Foundation and
@@ -385,5 +434,32 @@ reached the log while the other three reached the user.
   **app**, killed while a real `SCStream` is feeding it, recovered on the next real launch. Worth a
   human's eyes when capture or recovery changes — the harness approximates that run, it does not
   replace it.
+- **The microphone feature's own floor, which the seams end above.** The suite proves the decision
+  logic and none of the OS behaviour:
+  - **A real default-input write.** No test writes `kAudioHardwarePropertyDefaultInputDevice` on the
+    real machine. System Settings must be *seen* to follow, and to keep following across a headset
+    connect/disconnect cycle and across sleep/wake.
+  - **That ScreenCaptureKit honours `microphoneCaptureDeviceID`.** The fake accepts any string. Only a
+    TCC-authorized build recording from a deliberately non-default microphone — and the audio being
+    listened to — proves the pin took effect. ⚠️ The identity probe does **not** cover this: equal UIDs
+    say the string is the right string, not that capture used it.
+  - **Live failover and *Use now* during a real recording** — the pinned device pulled out mid-recording
+    and the next candidate actually producing audio rather than silence; and that the segments on both
+    sides of a switch are valid and the assembled file survives a format change.
+  - **That the production HAL listeners actually fire.** The observation tests drive the *fake*: they
+    establish the contract's shape, not that `CoreAudioDeviceDirectory`'s registrations deliver. Only
+    plugging a device in and out on a real Mac shows that — the same gap as `SCKCaptureSource`'s.
+  - **That a real sleep/wake reconciles.** ⚠️ The *handler* is tested — a synthetic post into the
+    injected notification centre exercises it (`aWakeReconcilesWhatSleepHid`), which is how it was
+    found that replacing its body with a no-op had passed every test. What needs a human is the OS
+    behaviour around it: that macOS posts the notification, and that the device world after a real sleep
+    is what the reconciler then finds.
+  - **That the fight-back policy is livable** — whether enforcement feels correct or hostile when the
+    user reaches for System Settings anyway, and whether the conflict budget suspends at the right
+    point.
+  - **The menu's rendering.** ⚠️ Not "the menu cannot be tested" — that claim was wrong and cost four
+    defects. `ControlViewModel` lives in `ActaRuntime` and its commands, subscriptions and intents are
+    tested. What a human still has to look at is the **drawing**: that the priority rows never collapse
+    on screen, that an absent preferred device is visibly removable, that Pause is reachable.
 - Validation Commands check compilation/build/lint, unit logic, the in-process pipeline **and** the
   process-based crash harness — but nothing above the seams: no ScreenCaptureKit, no TCC, no UI.

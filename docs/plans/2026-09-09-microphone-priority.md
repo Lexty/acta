@@ -532,13 +532,13 @@ or capture fails outright, since a UID `SCStream` rejects is as broken as one it
 
 ### Task 10: Documentation
 
-- [ ] **`SPEC.md`: amend the "only records" scope explicitly**, stating feature (B), its promise
+- [x] **`SPEC.md`: amend the "only records" scope explicitly**, stating feature (B), its promise
       ("while Acta is running, the Mac's default input stays on your list"), that it is opt-in, and what
       it does not promise (per-app input pickers)
-- [ ] `CLAUDE.md`: the app-lifetime seam **amendment** (Task 4); the corrected confinement wording
+- [x] `CLAUDE.md`: the app-lifetime seam **amendment** (Task 4); the corrected confinement wording
       (Task 8); the measured-identity dependency and the probe that guards it (Task 9); the
       `canBeDefaultDevice` scope trap and the swallowed-`OSStatus` failure mode
-- [ ] English only — `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .`
+- [x] English only — `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .`
 
 ## Not verified automatically (needs a human)
 

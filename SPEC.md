@@ -17,6 +17,50 @@ Transcription and summarisation are **out of scope** — done separately (the us
 2. **Fault tolerance** — after a restart/crash, whatever was recorded is valid and gets recovered.
 3. **Self-diagnosis** — if recording fails to start or stalls, it is detected at once and healed.
 
+### 1.1 Amendment (2026-09-11): Acta also holds the Mac's default input — opt-in
+
+⚠️ **This widens "only records", and it is written here rather than smuggled past it.** The sentence
+above is still the shape of the app: Acta records, and it does not transcribe, summarise, mix or edit.
+But one feature reaches outside the recording, and the honest thing is to say so at the point the scope
+is claimed.
+
+Two features came out of the same problem — connecting a Bluetooth headset makes macOS switch the
+system default input, so meetings get recorded through a headset microphone nobody chose. They are
+**separate**, because only one of them needed this amendment:
+
+**(A) Acta pins the microphone it records from.** `SCStreamConfiguration.microphoneCaptureDeviceID` is
+set explicitly; unset means "System Default Microphone" (`SCStream.h`), so until this landed Acta
+recorded through whatever macOS had most recently decided the default was. That is a **defect against
+rule 3** — "never show recording when the right data is not being written" — not a new feature, and it
+needs no scope change. It is always on: capture resolves against the user's priority list, or against
+the system default if they ask for that explicitly, and a recording refuses to start rather than
+silently follow something nobody chose.
+
+**(B) Acta holds the Mac's default input on a user-ordered priority list.** This is the scope change.
+
+- **The promise:** *while Acta is running*, the Mac's default input stays on your list — the
+  highest-ranked available device wins, and it is restored when something else moves it. It holds while
+  Acta is idle, not only while recording, which is the whole point: the headset connects before the
+  meeting starts.
+- **Opt-in, and off by default.** It writes `kAudioHardwarePropertyDefaultInputDevice`, which affects
+  **every other application on the machine**. A feature with that reach is not something to switch on
+  for somebody. Enabling it seeds a starting list rather than inventing a full ranking, and never
+  overwrites a list the user already has.
+- **It yields rather than fights.** If something keeps moving the input back, enforcement suspends
+  itself and says so, rather than trading writes with another program indefinitely. Pause withdraws
+  permission to write immediately — including during an operation already in flight.
+- **What it does not promise, and the UI must not imply:** an application with its own selected input
+  device (Slack, Teams and Meet all have one) need not follow the system default at all. (B) fixes the
+  *system* default; per-app pickers stay the user's job, once.
+- **(A) keeps working while (B) is paused or off.** They are different promises and deliberately do not
+  share a switch: pausing enforcement of the *system* input must not change what Acta records from.
+
+⚠️ **One measured dependency underneath both.** The CoreAudio device UID and
+`AVCaptureDevice.uniqueID` are the same string — **measured on this machine, documented by Apple
+nowhere as a single identity**. If a future macOS diverges, everything still compiles and either the
+wrong microphone is recorded or capture fails. `Scripts/probe-microphone-identity.sh` checks it against
+real hardware; see `CLAUDE.md` for what that probe can and cannot claim.
+
 **Definition of Done (v1):** start/stop from the menu bar; system audio and microphone written as
 separate streaming segment tracks; after `kill -9`/restart the recorded segments survive and are
 finalised automatically on the next launch; a failed start is diagnosed and healed or reported;
