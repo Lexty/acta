@@ -90,6 +90,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// The chooser's measured content height, so a bounded scroll view can size to it.
+private struct ChooserHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// Placeholder for macOS < 15 (microphone capture through a single `SCStream` arrived in 15).
 struct UnsupportedContent: View {
     var body: some View {
@@ -120,6 +126,15 @@ struct MenuContent: View {
     /// on a laptop, with only six devices attached. What a user needs at a glance is which
     /// microphone will be used, not the whole apparatus for deciding it.
     @State private var microphoneExpanded = false
+    /// The chooser's own content height, so the bounded scroll view does not claim space it is not
+    /// using. Seeded at the bound rather than at zero: a first frame of height zero collapses the
+    /// section to nothing for one pass, which reads as the disclosure having failed to open.
+    @State private var chooserHeight: CGFloat = MenuContent.chooserMaxHeight
+    /// How tall the chooser may get before it scrolls.
+    ///
+    /// ⚠️ A judgement, not a measurement: it is about two thirds of a short laptop's menu-bar popover,
+    /// leaving the recordings list and the menu's own actions on screen at any device count.
+    static let chooserMaxHeight: CGFloat = 320
 
     /// The current typed state — the single thing every view below reads.
     private var state: ControlState { model.state }
@@ -269,11 +284,21 @@ struct MenuContent: View {
                 // controls — and unbounded it reproduces the layout that ran off the screen the moment
                 // anyone opens it to do the thing it is for. Scrolling keeps the menu's own actions,
                 // Open Archive and Quit, reachable at every device count.
+                // ⚠️ **Measured, not simply capped.** A `ScrollView` is greedy along its scroll axis:
+                // `.frame(maxHeight:)` alone makes it take the whole bound even when the content is half
+                // that, so a Mac with two microphones would show the list above a large empty gap. The
+                // height is the content's own, clamped — so short content sizes naturally and only long
+                // content scrolls.
                 ScrollView {
                     microphoneChooser(mic)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: ChooserHeightKey.self,
+                                                   value: proxy.size.height)
+                        })
                 }
-                .frame(maxHeight: 320)
+                .frame(height: min(chooserHeight, Self.chooserMaxHeight))
+                .onPreferenceChange(ChooserHeightKey.self) { chooserHeight = $0 }
             } label: {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Microphone").font(.headline)
