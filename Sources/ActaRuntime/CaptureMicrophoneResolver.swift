@@ -76,45 +76,33 @@ public struct LiveCaptureMicrophoneResolver: CaptureMicrophoneResolving {
         // One read, so a resolution cannot mix a list from one settings revision with a choice from
         // another.
         let preference = preference.snapshot
-        let devices: [AudioInputDevice]
-        var snapshotComplete = true
+        var observation = CaptureObservation()
         switch reader.enumerateInputDevices() {
         case .devices(let listed, let uninspectable):
-            devices = listed
+            observation.devices = listed
             // ⚠️ Carried, not discarded. An incomplete snapshot is not proof that a device left, and it
             // is certainly not proof the machine has no microphone.
-            snapshotComplete = uninspectable.isEmpty
+            observation.uninspectable = uninspectable
         case .failed(let reason):
             // ⚠️ Not `.noEligibleDevice`: the machine was never described. Telling the user their Mac
             // has no microphone because one query failed is the failure mode this whole feature exists
             // to avoid.
-            return .unavailable(.systemDefaultUnreadable(reason))
+            observation.enumerationFailure = reason
         }
 
-        var systemDefault: String?
-        if case .systemDefault = preference.choice {
+        if case .systemDefault = preference.choice, observation.enumerationFailure == nil {
             switch reader.currentDefaultInput() {
-            case .device(let uid): systemDefault = uid
-            case .none: systemDefault = nil
-            case .failed(let reason): return .unavailable(.systemDefaultUnreadable(reason))
+            case .device(let uid): observation.systemDefault = .device(uid: uid)
+            case .none: observation.systemDefault = .noDefault
+            case .failed(let reason): observation.defaultReadFailure = reason
             }
         }
 
-        let resolution = MicrophonePolicy.resolveCapture(from: devices,
-                                                         priority: preference.priority,
-                                                         choice: preference.choice,
-                                                         systemDefault: systemDefault)
-        // ⚠️ **"I could not see everything" must not be reported as "there is nothing here."** Only the
-        // two answers that are claims *about the hardware* are downgraded; a genuine "you have not
-        // chosen anything" is unaffected by how well the machine could be described.
-        if case .unavailable(let failure) = resolution, !snapshotComplete {
-            switch failure {
-            case .noEligibleDevice, .noPreferredDeviceAvailable:
-                return .unavailable(.snapshotIncomplete)
-            case .noneConfigured, .systemDefaultUnreadable, .snapshotIncomplete:
-                break
-            }
-        }
-        return resolution
+        // ⚠️ **The interpretation is shared, not repeated.** This used to be a wrapper written here,
+        // and the menu's summary called the bare policy instead — so the same machine got two different
+        // answers. See `MicrophonePolicy.resolveCapture(_:priority:choice:)`.
+        return MicrophonePolicy.resolveCapture(observation,
+                                               priority: preference.priority,
+                                               choice: preference.choice)
     }
 }

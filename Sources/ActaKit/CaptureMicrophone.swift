@@ -124,3 +124,92 @@ public extension MicrophonePolicy {
         return ranked
     }
 }
+
+/// One observation of the machine, **including what the observation could not establish**.
+///
+/// ⚠️ **It exists because two callers were resolving the same question from different inputs.** The
+/// live resolver wrapped `resolveCapture` with the handling that turns "the enumeration failed" and "I
+/// could not describe every driver" into answers that are honest about the machine; a second caller —
+/// the menu's summary — called the bare policy with `[AudioInputDevice]` and a `String?` and therefore
+/// gave a *different* answer for the same machine: an incomplete snapshot read as "none of your
+/// microphones is connected", and a default input that was never read read as "there is none". Those
+/// are claims about the hardware drawn from a read that made no such claim.
+///
+/// So the interpretation lives here, once, and both callers pass what they saw.
+public struct CaptureObservation: Equatable, Sendable {
+    public var devices: [AudioInputDevice]
+    /// Devices the OS listed and would not describe. Non-empty means the snapshot is **incomplete**,
+    /// and an incomplete snapshot may not be used to claim a device is absent.
+    public var uninspectable: [String]
+    /// The enumeration itself failed — `devices` says nothing at all in that case.
+    public var enumerationFailure: String?
+    /// What the OS last said about the default input, including "never read".
+    public var systemDefault: ObservedDefaultInput
+    /// Reading the default input failed, which is not the same as there being none.
+    public var defaultReadFailure: String?
+
+    public init(devices: [AudioInputDevice] = [],
+                uninspectable: [String] = [],
+                enumerationFailure: String? = nil,
+                systemDefault: ObservedDefaultInput = .unread,
+                defaultReadFailure: String? = nil) {
+        self.devices = devices
+        self.uninspectable = uninspectable
+        self.enumerationFailure = enumerationFailure
+        self.systemDefault = systemDefault
+        self.defaultReadFailure = defaultReadFailure
+    }
+}
+
+public extension MicrophonePolicy {
+    /// The whole capture decision, made from one observation.
+    ///
+    /// The selection itself is `resolveCapture(from:priority:choice:systemDefault:)`; this adds the two
+    /// things that decide whether its answer may be *believed*, and both of them are about honesty
+    /// rather than policy:
+    ///
+    /// 1. **A failed read is never an answer about the hardware.** A failed enumeration, and a default
+    ///    input that failed or was never read while `.systemDefault` is the choice, are reported as
+    ///    unreadable — not as "this Mac has no microphone".
+    /// 2. **An incomplete snapshot may not claim absence.** When some driver would not describe itself,
+    ///    the two answers that are claims about the hardware are downgraded to `.snapshotIncomplete`.
+    ///    "You have not chosen anything" is untouched: that is a fact about the user, not the machine.
+    static func resolveCapture(_ observation: CaptureObservation,
+                               priority: MicrophonePriority,
+                               choice: CaptureMicrophoneChoice) -> CaptureMicrophoneResolution {
+        if let reason = observation.enumerationFailure {
+            return .unavailable(.systemDefaultUnreadable(reason))
+        }
+
+        var systemDefault: String?
+        if case .systemDefault = choice {
+            if let reason = observation.defaultReadFailure {
+                return .unavailable(.systemDefaultUnreadable(reason))
+            }
+            switch observation.systemDefault {
+            case .device(let uid):
+                systemDefault = uid
+            case .unread:
+                // ⚠️ Never read is **not** "there is none": the user asked to follow the Mac's input and
+                // nobody has looked at what it is.
+                return .unavailable(.systemDefaultUnreadable("the Mac's input has not been read"))
+            case .noDefault:
+                systemDefault = nil
+            }
+        }
+
+        let resolution = resolveCapture(from: observation.devices,
+                                        priority: priority,
+                                        choice: choice,
+                                        systemDefault: systemDefault)
+        if case .unavailable(let failure) = resolution, !observation.uninspectable.isEmpty {
+            switch failure {
+            case .noEligibleDevice, .noPreferredDeviceAvailable:
+                return .unavailable(.snapshotIncomplete)
+            case .noneConfigured, .systemDefaultUnreadable, .snapshotIncomplete:
+                break
+            }
+        }
+        return resolution
+    }
+}

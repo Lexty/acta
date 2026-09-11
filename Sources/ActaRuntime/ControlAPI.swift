@@ -213,8 +213,17 @@ public final class ControlAPI {
         public var captureChoice: CaptureMicrophoneChoice
         /// Enforcement's own status — waiting, paused, suspended, refused, uncertain.
         public var enforcement: MicrophoneEnforcementStatus
-        /// Set when the enumeration or the subscription failed outright.
-        public var inventoryFailure: String?
+        /// Set when the **enumeration** failed outright.
+        ///
+        /// ⚠️ Separate from `observationDegraded`, and the separation is load-bearing rather than tidy:
+        /// this one blocks every claim about the hardware — a selection resolved from a list that was
+        /// never described says nothing — while a lost subscription leaves the last snapshot perfectly
+        /// usable and only means it will stop changing.
+        public var enumerationFailure: String?
+        /// Set while there is no change subscription.
+        public var observationDegraded: String?
+        /// Either failure, for the one warning line the menu shows.
+        public var inventoryFailure: String? { enumerationFailure ?? observationDegraded }
         /// Devices the directory could not describe. ⚠️ **Not the same as absent**, and the menu must
         /// not turn an incomplete read into "there is nothing here".
         public var uninspectable: [String]
@@ -229,10 +238,12 @@ public final class ControlAPI {
         /// decision the recorder makes, so this is that answer rather than an impression of it.
         public var captureSelection: CaptureMicrophoneResolution {
             MicrophonePolicy.resolveCapture(
-                from: devices,
+                CaptureObservation(devices: devices,
+                                   uninspectable: uninspectable,
+                                   enumerationFailure: enumerationFailure,
+                                   systemDefault: systemDefault),
                 priority: MicrophonePriority(order: priority, override: override),
-                choice: captureChoice,
-                systemDefault: systemDefault.uid)
+                choice: captureChoice)
         }
 
         /// The same answer as a short phrase for the menu's always-visible summary.
@@ -248,13 +259,59 @@ public final class ControlAPI {
             case .unavailable(.noneConfigured):
                 return "No microphone chosen yet"
             case .unavailable(.noPreferredDeviceAvailable):
-                return "None of your microphones is connected"
+                // ⚠️ "available", not "connected": this case is also reached by a device that is listed
+                // and not usable, and telling the user to plug in something already plugged in sends
+                // them looking in the wrong place.
+                return "None of your microphones is available"
             case .unavailable(.noEligibleDevice):
                 return "No microphone available"
             case .unavailable(.systemDefaultUnreadable):
-                return "The Mac's input could not be read"
-            case .unavailable(.snapshotIncomplete):
                 return "The audio devices could not be read"
+            case .unavailable(.snapshotIncomplete):
+                return "Some audio devices could not be read"
+            }
+        }
+
+        /// What feature (B) is **actually** doing, as a phrase for the menu — or `nil` when it is off.
+        ///
+        /// ⚠️ **"Enabled" is not "holding", and rendering it as such was a defect.** `managingSystemInput`
+        /// is true for every state except `.disabled`, so a suspended, refused, degraded or still-waiting
+        /// enforcement all reported "Holding the Mac's input on your list" — while the only explanation
+        /// sat inside a collapsed section. A feature that has *stopped* doing what it promised must say
+        /// so in the line that is always visible, and only a verified `.enforcing` may claim it holds a
+        /// device.
+        ///
+        /// ⚠️ It is a projection with tests rather than a ternary in the view, for the same reason
+        /// `captureSummary` is: the view is the one layer nothing checks.
+        public var managementSummary: String? {
+            switch enforcement {
+            case .disabled:
+                return nil
+            case .enforcing(let uid):
+                let name = devices.first { $0.uid == uid }?.name ?? uid
+                return "Holding the Mac's input on \(name)"
+            case .waitingForPreferredDevice:
+                return "Waiting for a microphone from your list"
+            case .noEligibleDevice:
+                return "No microphone the Mac will accept as its input"
+            case .writesRefused:
+                return "The Mac refused the input change"
+            case .uncertain:
+                return "Cannot confirm the Mac's input"
+            case .paused:
+                return "Not changing the Mac's input — paused"
+            case .suspended:
+                return "Stopped changing the Mac's input — something kept changing it back"
+            case .degraded:
+                return "Cannot read the Mac's input"
+            }
+        }
+
+        /// Whether that state is one the user should act on rather than merely be told about.
+        public var managementNeedsAttention: Bool {
+            switch enforcement {
+            case .disabled, .enforcing, .paused: return false
+            default: return true
             }
         }
 
@@ -265,7 +322,8 @@ public final class ControlAPI {
                     recordingFrom: AudioInputDevice? = nil, managingSystemInput: Bool = false,
                     captureChoice: CaptureMicrophoneChoice = .followPriority,
                     enforcement: MicrophoneEnforcementStatus = .disabled,
-                    inventoryFailure: String? = nil,
+                    enumerationFailure: String? = nil,
+                    observationDegraded: String? = nil,
                     uninspectable: [String] = []) {
             self.devices = devices
             self.priority = priority
@@ -276,7 +334,8 @@ public final class ControlAPI {
             self.managingSystemInput = managingSystemInput
             self.captureChoice = captureChoice
             self.enforcement = enforcement
-            self.inventoryFailure = inventoryFailure
+            self.enumerationFailure = enumerationFailure
+            self.observationDegraded = observationDegraded
             self.uninspectable = uninspectable
         }
     }
@@ -328,7 +387,8 @@ public final class ControlAPI {
             managingSystemInput: microphone.enforcement.status != .disabled,
             captureChoice: preference.choice,
             enforcement: microphone.enforcement.status,
-            inventoryFailure: microphone.inventory.failure ?? microphone.inventory.observationDegraded,
+            enumerationFailure: microphone.inventory.failure,
+            observationDegraded: microphone.inventory.observationDegraded,
             // ⚠️ **Carried, not dropped.** Without it a snapshot that could not describe some driver
             // projected as a successfully enumerated empty machine, and the menu said "No microphones
             // found" — a settled claim about the hardware drawn from a read that admitted it was

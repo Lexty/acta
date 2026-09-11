@@ -264,7 +264,16 @@ struct MenuContent: View {
             }
 
             DisclosureGroup(isExpanded: $microphoneExpanded) {
-                microphoneChooser(mic)
+                // ⚠️ **Bounded, because collapsing only fixed the height the user starts with.** The
+                // expanded body is the whole chooser — six rows here, plus a picker, plus feature (B)'s
+                // controls — and unbounded it reproduces the layout that ran off the screen the moment
+                // anyone opens it to do the thing it is for. Scrolling keeps the menu's own actions,
+                // Open Archive and Quit, reachable at every device count.
+                ScrollView {
+                    microphoneChooser(mic)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 320)
             } label: {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Microphone").font(.headline)
@@ -273,13 +282,26 @@ struct MenuContent: View {
                     // ⚠️ Feature (B) changes every other app's input, so *that it is on* stays visible
                     // even when its controls are folded away. Only the controls collapse, never the
                     // statement of what Acta is doing to the machine.
-                    if mic.managingSystemInput {
-                        Text(mic.enforcement == .paused
-                             ? "Holding the Mac's input — paused"
-                             : "Holding the Mac's input on your list")
-                            .font(.caption2).foregroundStyle(.secondary)
+                    // ⚠️ The **actual** status, not "enabled" rendered as success. A suspended or
+                    // refused enforcement is a feature that has stopped doing what it promised, and
+                    // saying so belongs in the line that does not collapse.
+                    if let summary = mic.managementSummary {
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundStyle(mic.managementNeedsAttention ? .orange : .secondary)
                     }
                 }
+            }
+
+            // ⚠️ **A state that needs acting on must not require opening a section to act on.** When
+            // enforcement has stopped or been refused, the two decisions that answer it stay reachable
+            // with the chooser still collapsed.
+            if mic.managementNeedsAttention, !microphoneExpanded {
+                HStack(spacing: 8) {
+                    Button("Pause") { model.pauseMicrophoneManagement() }
+                    Button("Turn off") { model.setManagingSystemInput(false) }
+                }
+                .font(.caption)
             }
         }
     }
@@ -295,10 +317,11 @@ struct MenuContent: View {
             // something is *already* ranked, and the only explanation was a hover tooltip — so the way
             // to make the first entry had to be guessed. Manual acceptance found this immediately;
             // nothing in the suite could, because rendering is the one thing it does not see.
-            Text(mic.priority.isEmpty
-                 ? "Tick a microphone to put it on your list. Acta records from the highest one that is connected."
-                 : "Acta records from the highest one that is connected. Use the arrows to reorder.")
-                .font(.caption2).foregroundStyle(.secondary)
+            // ⚠️ **This sentence used to contradict the picker three lines below it.** It said
+            // recordings use the highest microphone on the list — which is false when the user has
+            // asked for the Mac's input, and false again while a *Use now* is in force. An instruction
+            // that teaches the feature must not be the thing that misdescribes it.
+            Text(listExplanation(mic)).font(.caption2).foregroundStyle(.secondary)
 
             // ⚠️ **Priority order first, including entries whose device is absent.** Iterating the
             // device list rendered rows in enumeration order while the arrows moved a different list —
@@ -350,6 +373,23 @@ struct MenuContent: View {
             managementControls(mic)
         }
         .padding(.top, 4)
+    }
+
+    /// What the list actually governs, given the choice and any temporary override in force.
+    ///
+    /// ⚠️ Three sentences rather than one, because one sentence was wrong in two of the three states.
+    private func listExplanation(_ mic: ControlAPI.MicrophoneStatus) -> String {
+        if mic.override != nil {
+            return "A microphone is chosen for now, so it is used instead of your list. "
+                + "Resume automatic selection to go back to the list."
+        }
+        if mic.captureChoice == .systemDefault {
+            return "Recordings currently use the Mac's input at the time they start, not this list. "
+                + "Your list still decides what the Mac's input becomes, if you turn that on below."
+        }
+        return mic.priority.isEmpty
+            ? "Tick a microphone to put it on your list. Recordings use the highest one available."
+            : "Recordings use the highest one available. Use the arrows to reorder."
     }
 
     private func microphoneStates(_ mic: ControlAPI.MicrophoneStatus) -> some View {
@@ -409,16 +449,16 @@ struct MenuContent: View {
         let present = mic.devices.contains { $0.uid == device.uid }
         HStack(spacing: 6) {
             if let rank { Text("\(rank + 1).").font(.caption2).foregroundStyle(.secondary) }
-            Button {
-                model.togglePreferred(device.uid)
-            } label: {
-                Image(systemName: rank != nil ? "checkmark.circle.fill" : "circle")
-            }
-            .buttonStyle(.plain)
-            .help(rank != nil ? "Remove from your priority list" : "Add to your priority list")
-
+            // ⚠️ **A checkbox carrying the device's own name**, because the unlabelled circle that
+            // stood here read as a radio button — one-of-many — when the control is in fact "on my
+            // list", and several microphones may be on it. The action was explained only in a hover
+            // tooltip, which a menu-bar popover effectively does not have.
             VStack(alignment: .leading, spacing: 0) {
-                Text(device.name).font(.callout)
+                Toggle(isOn: Binding(get: { rank != nil },
+                                     set: { _ in model.togglePreferred(device.uid) })) {
+                    Text(device.name).font(.callout)
+                }
+                .toggleStyle(.checkbox)
                 if device.uid == mic.override {
                     Text("using now").font(.caption2).foregroundStyle(.orange)
                 }

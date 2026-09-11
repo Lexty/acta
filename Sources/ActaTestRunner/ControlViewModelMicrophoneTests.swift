@@ -845,12 +845,16 @@ struct MicrophoneSummaryTests {
                         override: String? = nil,
                         recordingFrom: AudioInputDevice? = nil,
                         choice: CaptureMicrophoneChoice = .followPriority,
-                        systemDefault: ObservedDefaultInput = .device(uid: "BuiltInMicrophoneDevice"))
+                        systemDefault: ObservedDefaultInput = .device(uid: "BuiltInMicrophoneDevice"),
+                        uninspectable: [String] = [],
+                        enumerationFailure: String? = nil)
         -> ControlAPI.MicrophoneStatus {
         ControlAPI.MicrophoneStatus(devices: devices, priority: priority, override: override,
                                     preferred: nil, systemDefault: systemDefault,
                                     recordingFrom: recordingFrom, managingSystemInput: false,
-                                    captureChoice: choice, enforcement: .disabled)
+                                    captureChoice: choice, enforcement: .disabled,
+                                    enumerationFailure: enumerationFailure,
+                                    uninspectable: uninspectable)
     }
 
     /// ⚠️ **"Recording from" is never said about a preference.** A title is true the moment it is typed
@@ -882,11 +886,11 @@ struct MicrophoneSummaryTests {
 
     /// ...and a list whose devices have all gone is a different sentence again. Collapsing these two
     /// would tell a user with an unplugged microphone that they never picked one.
-    @Test("a list with nothing connected is not an empty list")
+    @Test("a list with nothing available is not an empty list")
     @available(macOS 15.0, *)
     func anAbsentDeviceIsNotAnEmptyList() {
         #expect(status(devices: [.builtInMic()], priority: ["USBAudioDevice_UID"]).captureSummary
-            == "None of your microphones is connected")
+            == "None of your microphones is available")
     }
 
     @Test("asking for the Mac's input names the device it resolves to")
@@ -895,12 +899,108 @@ struct MicrophoneSummaryTests {
         #expect(status(choice: .systemDefault).captureSummary == "Will use MacBook Pro Microphone")
     }
 
-    /// ⚠️ A machine whose devices could not be read must not be summarised as a machine with no
-    /// microphones — the same distinction the probe and the inventory keep everywhere else.
-    @Test("an unreadable machine is not an empty one")
+    /// ⚠️ **This test blessed the very conflation its comment claimed to prevent**, and a review caught
+    /// it: it asserted that a machine whose default input had never been read summarises as "No
+    /// microphone available" — a settled claim about the hardware, drawn from a read that made none.
+    /// The projection was calling the bare selection policy with a `String?`, so `.unread` and "there
+    /// is no default" arrived as the same thing. The interpretation is shared with the live resolver
+    /// now, and the assertion says what it always should have.
+    @Test("a default input that was never read is not a machine with no microphone")
     @available(macOS 15.0, *)
-    func anUnreadableMachineIsNotEmpty() {
-        #expect(status(devices: [], choice: .systemDefault, systemDefault: .unread).captureSummary
-            == "No microphone available")
+    func anUnreadDefaultIsNotAnEmptyMachine() {
+        #expect(status(devices: [.builtInMic()], choice: .systemDefault, systemDefault: .unread)
+            .captureSummary == "The audio devices could not be read")
+    }
+
+    /// ⚠️ An enumeration that failed says nothing about the machine at all.
+    @Test("a failed enumeration is not a machine with no microphone")
+    @available(macOS 15.0, *)
+    func aFailedEnumerationIsNotAnEmptyMachine() {
+        #expect(status(devices: [], priority: ["BuiltInMicrophoneDevice"],
+                       enumerationFailure: "scripted").captureSummary
+            == "The audio devices could not be read")
+    }
+
+    /// ⚠️ And a snapshot that could not describe some driver may not claim the user's microphone is
+    /// gone — the device that would not answer may be exactly the one they chose.
+    @Test("an incomplete snapshot does not claim a preferred microphone is absent")
+    @available(macOS 15.0, *)
+    func anIncompleteSnapshotDoesNotClaimAbsence() {
+        #expect(status(devices: [.builtInMic()], priority: ["USBAudioDevice_UID"],
+                       uninspectable: ["a device that would not answer"]).captureSummary
+            == "Some audio devices could not be read")
+    }
+
+    /// ⚠️ A device that is listed but **not usable** reaches the same policy case as one that is not
+    /// there at all, so the wording has to cover both: telling a user to plug in something already
+    /// plugged in sends them looking in the wrong place.
+    @Test("a listed but unusable device is not described as disconnected")
+    @available(macOS 15.0, *)
+    func anUnusableDeviceIsNotCalledDisconnected() {
+        let dead = AudioInputDevice(uid: "USBAudioDevice_UID", name: "USB Microphone",
+                                    transport: .usb, inputChannels: 1,
+                                    canBeSystemDefault: .yes, isAlive: .no, isRunningSomewhere: false)
+        #expect(status(devices: [.builtInMic(), dead], priority: ["USBAudioDevice_UID"]).captureSummary
+            == "None of your microphones is available")
+    }
+}
+
+/// What the always-visible line says feature (B) is doing.
+///
+/// ⚠️ **The line used to say "holding the Mac's input on your list" for every state except paused.**
+/// `managingSystemInput` is true for suspended, refused, degraded, uncertain and still-waiting alike, so
+/// a feature that had *stopped* doing what it promised reported success — and the only explanation was
+/// inside a section the same change had just collapsed.
+@Suite("Menu adapter: what management says it is doing")
+struct ManagementSummaryTests {
+    @available(macOS 15.0, *)
+    private func status(_ enforcement: MicrophoneEnforcementStatus,
+                        devices: [AudioInputDevice] = [.builtInMic()]) -> ControlAPI.MicrophoneStatus {
+        ControlAPI.MicrophoneStatus(devices: devices, managingSystemInput: enforcement != .disabled,
+                                    enforcement: enforcement)
+    }
+
+    @Test("only a verified enforcement claims to hold a device, and it names it")
+    @available(macOS 15.0, *)
+    func onlyEnforcingClaimsToHold() {
+        #expect(status(.enforcing(uid: "BuiltInMicrophoneDevice")).managementSummary
+            == "Holding the Mac's input on MacBook Pro Microphone")
+        #expect(status(.enforcing(uid: "BuiltInMicrophoneDevice")).managementNeedsAttention == false)
+    }
+
+    @Test("management that is off says nothing at all")
+    @available(macOS 15.0, *)
+    func disabledSaysNothing() {
+        #expect(status(.disabled).managementSummary == nil)
+        #expect(status(.disabled).managementNeedsAttention == false)
+    }
+
+    /// ⚠️ The states that used to report success. Each says what is actually true, and each asks to be
+    /// acted on — which is what keeps the Pause and Off actions on screen while the chooser is closed.
+    @Test("a stopped or refused enforcement says so and asks to be acted on")
+    @available(macOS 15.0, *)
+    func stoppedEnforcementSaysSo() {
+        let cases: [MicrophoneEnforcementStatus] = [
+            .suspended(.repeatedReversals(3)), .writesRefused(uids: ["BuiltInMicrophoneDevice"]),
+            .degraded(reason: "scripted"), .uncertain(uid: "BuiltInMicrophoneDevice"),
+            .waitingForPreferredDevice, .noEligibleDevice,
+        ]
+        for enforcement in cases {
+            let summary = status(enforcement).managementSummary
+            #expect(summary != nil, "\(enforcement) said nothing")
+            #expect(summary?.contains("Holding the Mac's input on") != true,
+                    "\(enforcement) claimed to be holding a device: \(summary ?? "")")
+            #expect(status(enforcement).managementNeedsAttention,
+                    "\(enforcement) did not ask to be acted on")
+        }
+    }
+
+    /// ⚠️ Pause is the one non-enforcing state that is **not** a problem: the user asked for it. It says
+    /// what it is without demanding attention.
+    @Test("pause is reported without being treated as a fault")
+    @available(macOS 15.0, *)
+    func pauseIsNotAFault() {
+        #expect(status(.paused).managementSummary == "Not changing the Mac's input — paused")
+        #expect(status(.paused).managementNeedsAttention == false)
     }
 }
