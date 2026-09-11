@@ -301,6 +301,11 @@ struct RecordingPipelineFailureTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let source = FakeCaptureSource()
+        // ⚠️ **The probe window must be genuinely empty, and by default it is not.** `start()` emits a
+        // batch of its own, asynchronously on the per-track queues, so those buffers land either side of
+        // the probe's baseline at random — and a probe that sees data never looks at the permissions at
+        // all. That is what made this test fail about half the time.
+        source.setEmitOnStart(false)
         let permissions = FakePermissions(screenGranted: true, grantsOnRequest: false)
         let clock = TestClock()
         // The user opens System Settings and takes screen recording away while the probe is running.
@@ -334,6 +339,9 @@ struct RecordingPipelineFailureTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let source = FakeCaptureSource()
+        // ⚠️ Same reason as the test above: `start()`'s own batch lands at an unpredictable moment and
+        // can fill the probe window this test needs empty. Every buffer here is emitted deliberately.
+        source.setEmitOnStart(false)
         // Both permissions vanish inside the probe window — screen revoked, the microphone reset to
         // "never asked" — and the user grants both when asked.
         let permissions = FakePermissions(screenGranted: true, grantsOnRequest: true)
