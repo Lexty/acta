@@ -368,7 +368,11 @@ public final class MicrophoneManager {
     /// ⚠️ It is **not** a second source of truth for the list, and nothing selects a microphone from it.
     /// The reconciler owns the order; every writer here updates this mirror synchronously *before* it
     /// suspends, and corrects it from the reconciler's own answer afterwards.
-    private var knownOrder: [String] = []
+    /// ⚠️ `private(set)` rather than `private` so a test can assert the invariant this whole value
+    /// depends on — that it agrees with the reconciler after every operation. Two defects in a row were
+    /// instances of it drifting, each found one case at a time; `theMirrorAgreesWithTheReconciler`
+    /// checks the property instead of the cases.
+    private(set) var knownOrder: [String] = []
 
     /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every
     /// continuation can tell whether it is still the current intent.

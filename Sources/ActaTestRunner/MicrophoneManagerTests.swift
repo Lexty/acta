@@ -900,3 +900,45 @@ func aSeedCompletionDoesNotRestoreAClearedKnownOrder() async {
             "a stale mirror made the manager decline to seed a list that really was empty: \(returned)")
     #expect(await manager.reconciler.priority.order.isEmpty == false)
 }
+
+/// ⚠️ **The mirror's invariant, checked as a property rather than case by case.** `knownOrder` exists
+/// so the seed decision can be made without suspending, and it is only worth anything while it agrees
+/// with the list the reconciler actually holds. Two review findings in a row were instances of it
+/// drifting — a late seed completion restoring a cleared list, and a read taken across a suspension —
+/// and each was fixed one case at a time. This walks the operations that can move the list and requires
+/// agreement after every one, so the next way of getting it wrong fails here instead of in a user's menu.
+@Test("the main-actor mirror agrees with the reconciler after every operation that moves the list")
+@MainActor
+@available(macOS 15.0, *)
+func theMirrorAgreesWithTheReconciler() async {
+    let (_, _, manager) = makeGatedManager(devices: [.builtInMic(), .usbMic()],
+                                           defaultInput: "BuiltInMicrophoneDevice")
+
+    func check(_ step: String) async {
+        let actual = await manager.reconciler.priority.order
+        #expect(manager.knownOrder == actual,
+                "after \(step) the mirror said \(manager.knownOrder) and the list was \(actual)")
+    }
+
+    await check("start")
+    await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+    await check("setPriorityOrder")
+    _ = await manager.enableManagement()
+    await check("enableManagement over a non-empty list")
+    await manager.setPriorityOrder([])
+    await check("clearing the list")
+    _ = await manager.enableManagement()
+    await check("enableManagement over an empty list (a real seed)")
+    await manager.disableManagement()
+    await check("disableManagement")
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: true))
+    _ = await awaitAsyncCondition { await manager.reconciler.priority.order == ["USBAudioDevice_UID"] }
+    await check("a whole-settings application")
+    await manager.useNow(uid: "BuiltInMicrophoneDevice")
+    await check("a Use now, which must not touch the list at all")
+    await manager.resumeAutomaticSelection()
+    await check("resuming automatic selection")
+    await manager.stopEnforcement()
+    await check("stopEnforcement")
+}
