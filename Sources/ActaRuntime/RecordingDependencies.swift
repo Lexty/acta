@@ -20,19 +20,27 @@ public struct RecordingDependencies: Sendable {
     public var makePermissions: @Sendable () -> PermissionChecking
     /// What the self-diagnosis waits on and measures stalls against.
     public var makeClock: @Sendable () -> SelfCheckClock
+    /// The stop reminder's meter, or `nil` when the feature is not wired at all.
+    ///
+    /// ⚠️ **Minted per session like the source**, because a meter's calibration belongs to one capture:
+    /// handing the same one round would let a device change carry its floor into the next recording.
+    public var makeActivityMeter: @Sendable () -> (any AudioActivityMetering)?
 
     public init(makeSource: @escaping @Sendable () -> CaptureSource,
                 makePermissions: @escaping @Sendable () -> PermissionChecking,
-                makeClock: @escaping @Sendable () -> SelfCheckClock) {
+                makeClock: @escaping @Sendable () -> SelfCheckClock,
+                makeActivityMeter: @escaping @Sendable () -> (any AudioActivityMetering)? = { nil }) {
         self.makeSource = makeSource
         self.makePermissions = makePermissions
         self.makeClock = makeClock
+        self.makeActivityMeter = makeActivityMeter
     }
 
     /// The production wiring: real capture, real TCC, real time.
     public static let live = RecordingDependencies(
         makeSource: { SCKCaptureSource() },
         makePermissions: { SystemPermissions() },
-        makeClock: { SystemClock() }
+        makeClock: { SystemClock() },
+        makeActivityMeter: { ActivitySink.shared.makeMeter() }
     )
 }

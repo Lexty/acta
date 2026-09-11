@@ -50,6 +50,12 @@ public final class ReminderCoordinator: ObservableObject {
     /// A monotonic id per recording, minted here because `ControlState` has no notion of one.
     private var recordingID: UInt64 = 0
     private var wasRecording = false
+    /// The capture generation the quiet rule is currently calibrated for.
+    ///
+    /// ⚠️ **Adopted from the summaries rather than guessed.** The recorder mints the generation, several
+    /// layers below; a coordinator that assumed one would silently drop every measurement when the two
+    /// disagreed — a stop reminder that never fires and never says why.
+    private var currentGeneration: UInt64 = 0
 
     /// How often the process list is read.
     ///
@@ -74,6 +80,9 @@ public final class ReminderCoordinator: ObservableObject {
     /// Begin watching. Safe to call twice.
     public func start() {
         guard pollTask == nil else { return }
+        ActivitySink.shared.setHandler { [weak self] summary in
+            Task { @MainActor in self?.ingest(summary) }
+        }
         pollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 self?.poll()
@@ -85,17 +94,21 @@ public final class ReminderCoordinator: ObservableObject {
     public func stop() {
         pollTask?.cancel()
         pollTask = nil
+        ActivitySink.shared.setHandler(nil)
+        ActivitySink.shared.setEnabled(false)
     }
 
     /// The meter's publications arrive here, off the capture queue.
+    ///
+    /// ⚠️ A **rising** generation is adopted; a straggler from a capture that has already been replaced
+    /// is not, and the rule drops it.
     public func ingest(_ summary: AudioActivitySummary) {
+        if summary.generation > currentGeneration {
+            currentGeneration = summary.generation
+            quietRule.beginGeneration(summary.generation)
+        }
         quietRule.ingest(summary, at: Date())
         evaluateQuiet()
-    }
-
-    /// A capture restart, device or format change.
-    public func captureGenerationChanged(_ generation: UInt64) {
-        quietRule.beginGeneration(generation)
     }
 
     // MARK: - Polling
@@ -103,6 +116,11 @@ public final class ReminderCoordinator: ObservableObject {
     private func poll() {
         let settings = service.settings
         quietRule.setQuietInterval(TimeInterval(settings.quietMinutesBeforeStopOffer * 60))
+        // ⚠️ Applied to the *live* meter too, not only to the next one built: switching the reminder off
+        // during a recording has to stop the measuring there and then, and switching it on has to start
+        // a fresh warm-up rather than resume an estimate nobody was allowed to build.
+        ActivitySink.shared.setEnabled(settings.offersStopWhenQuiet)
+        if !settings.offersStopWhenQuiet { quietRule.invalidate() }
         trackRecordingIdentity()
 
         let context = MicrophoneActivityRule.Context(
@@ -143,7 +161,7 @@ public final class ReminderCoordinator: ObservableObject {
         }
         if isRecording, !wasRecording {
             recordingID += 1
-            quietRule.beginRecording(recordingID, generation: 0)
+            quietRule.beginRecording(recordingID, generation: currentGeneration)
         }
         if !isRecording, wasRecording {
             quietRule.invalidate()

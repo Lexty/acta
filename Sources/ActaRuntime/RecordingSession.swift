@@ -113,7 +113,8 @@ public final class RecordingSession: @unchecked Sendable {
                                      segmentSeconds: Double(settings.segmentSeconds),
                                      source: dependencies.makeSource(),
                                      permissions: permissions,
-                                     microphone: microphone)
+                                     microphone: microphone,
+                                     activityMeter: dependencies.makeActivityMeter())
         self.recorder = recorder
         lossWatch = MicrophoneLossWatch(recorder: recorder)
         self.selfCheck = SelfCheck(recorder: recorder, permissions: permissions,

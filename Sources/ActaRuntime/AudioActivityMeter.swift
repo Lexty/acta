@@ -206,3 +206,64 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
                            impliedDuration: Double(maximumFrames) / asbd.mSampleRate)
     }
 }
+
+// MARK: - The sink
+
+/// Where a capture's activity summaries go, and the one place the reminder's preference reaches the
+/// meter.
+///
+/// ⚠️ **A shared sink rather than an injected callback, for one reason: lifetimes.** A meter belongs to
+/// one capture and is minted per session, several layers below anything that knows a coordinator exists;
+/// threading a closure down through `RecordingDependencies`, `RecordingController` and
+/// `RecordingSession` would mean every one of them carrying a reference to a feature that can be
+/// switched off. The sink is the seam instead, and it is inert until a coordinator registers.
+///
+/// ⚠️ **Inert by default and off by default.** With nobody registered, or with the preference off,
+/// `isWanted` is false, the meter the session builds is disabled, and `AudioRecorder` never calls into
+/// it at all.
+@available(macOS 15.0, *)
+public final class ActivitySink: @unchecked Sendable {
+    public static let shared = ActivitySink()
+
+    private let lock = NSLock()
+    private var handler: (@Sendable (AudioActivitySummary) -> Void)?
+    private var enabled = false
+    private weak var currentMeter: AudioActivityMeter?
+
+    private init() {}
+
+    /// Registered by the coordinator, once, for the life of the app.
+    public func setHandler(_ handler: (@Sendable (AudioActivitySummary) -> Void)?) {
+        lock.lock(); self.handler = handler; lock.unlock()
+    }
+
+    /// Follows the preference. Applied to the live meter as well as to the next one built.
+    public func setEnabled(_ newValue: Bool) {
+        lock.lock()
+        let changed = enabled != newValue
+        enabled = newValue
+        let meter = currentMeter
+        lock.unlock()
+        if changed { meter?.setEnabled(newValue) }
+    }
+
+    public var isWanted: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return enabled && handler != nil
+    }
+
+    /// Build the meter for one capture, and remember it so the preference can reach it mid-recording.
+    public func makeMeter() -> AudioActivityMeter {
+        let meter = AudioActivityMeter(enabled: isWanted) { [weak self] summary in
+            guard let handler = self?.currentHandler else { return }
+            handler(summary)
+        }
+        lock.lock(); currentMeter = meter; lock.unlock()
+        return meter
+    }
+
+    private var currentHandler: (@Sendable (AudioActivitySummary) -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        return handler
+    }
+}

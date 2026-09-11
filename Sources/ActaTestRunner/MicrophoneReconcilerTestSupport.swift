@@ -224,7 +224,11 @@ func awaitCondition(timeoutMilliseconds: Int = 2000,
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
     while DispatchTime.now().uptimeNanoseconds < deadline {
         if condition() { return true }
-        await Task.yield()
+        // ⚠️ **A short sleep, not `Task.yield()`.** Yielding keeps this task on a cooperative thread and
+        // re-queues it immediately, so a waiter spins hot — and on a loaded machine it starves the very
+        // work it is waiting for, turning a correct test into an intermittent one. Sleeping hands the
+        // thread back. The bound is unchanged; only the waiting is.
+        try? await Task.sleep(nanoseconds: 1_000_000)
     }
     return condition()
 }
@@ -237,7 +241,8 @@ func awaitAsyncCondition(timeoutMilliseconds: Int = 2000,
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
     while DispatchTime.now().uptimeNanoseconds < deadline {
         if await condition() { return true }
-        await Task.yield()
+        // The same reason as above: a hot spin starves what it waits for.
+        try? await Task.sleep(nanoseconds: 1_000_000)
     }
     return await condition()
 }
