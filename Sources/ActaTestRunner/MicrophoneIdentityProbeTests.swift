@@ -102,6 +102,73 @@ struct MicrophoneIdentityProbeTests {
                                                                          uid: "Cam_UID")))
     }
 
+    // MARK: - The skip decision, which is where the probe once lied
+
+    /// ⚠️ **The probe committed the very error it exists to catch, and this is the guard.** Its first
+    /// version reduced the enumeration to `[AudioInputDevice]`, returning `[]` when the HAL *failed* —
+    /// so a machine whose CoreAudio would not answer skipped all four live tests as "this Mac lists no
+    /// input device" and exited 0. A review injected an enumeration failure into the real adapter and
+    /// measured exactly that. Absence must be **proved**, never inferred from a read that did not
+    /// happen.
+    @Test("an unreadable HAL is not an empty machine")
+    func anUnreadableHALProvesNothing() {
+        let unreadable = Probe.coverage(from: .failed(reason: "scripted"))
+        #expect(unreadable == .unreadable("scripted"))
+        #expect(unreadable.provesAbsence { _ in true } == false,
+                "a failed enumeration was accepted as proof that this Mac has no microphones")
+        #expect(unreadable.provesAbsence(of: \.isBluetooth) == false)
+        #expect(unreadable.complaint != nil)
+    }
+
+    /// ⚠️ And a **partial** read proves nothing either: the device that would have answered the
+    /// question may be exactly the one the HAL would not describe.
+    @Test("a partial read does not prove a device is absent")
+    func aPartialReadProvesNoAbsence() {
+        let partial = Probe.coverage(from: .devices([.builtInMic()],
+                                                    uninspectable: ["a USB device that would not answer"]))
+        #expect(partial.provesAbsence(of: \.isBluetooth) == false,
+                "an incomplete enumeration was accepted as proof that no headset is connected")
+        #expect(partial.isComplete == false)
+        #expect(partial.devices == [.builtInMic()])
+        #expect(partial.complaint != nil)
+    }
+
+    /// The converse, or the guard above would just disable every skip: a complete enumeration really
+    /// does prove absence, and absent hardware stays a skip rather than becoming a failure.
+    @Test("a complete enumeration proves absence")
+    func aCompleteReadProvesAbsence() {
+        let complete = Probe.coverage(from: .devices([.builtInMic()], uninspectable: []))
+        #expect(complete.provesAbsence(of: \.isBluetooth), "absent hardware stopped being a skip")
+        #expect(complete.provesAbsence { _ in true } == false)
+        #expect(complete.isComplete)
+        #expect(complete.complaint == nil)
+    }
+
+    /// ⚠️ The same loss one level on: an observation that drops `uninspectable` arrives as a complete
+    /// description of the machine, and an "agreed" verdict then covers less than it claims.
+    @Test("a partial HAL read is not a successful complete observation")
+    func aPartialHALReadIsCarriedIntoTheObservation() {
+        let directory = FakeAudioDeviceDirectory(devices: [.builtInMic()],
+                                                 defaultInput: "BuiltInMicrophoneDevice")
+        directory.setDevices([.builtInMic()], uninspectable: ["USB device UID could not be read"])
+        guard case .success(let observation) = Probe.observeCoreAudio(directory) else {
+            Issue.record("a partial read should still observe what it could describe"); return
+        }
+        #expect(observation.uninspectable == ["USB device UID could not be read"])
+        #expect(observation.devices.count == 1)
+    }
+
+    /// And a failed enumeration is a failed observation, not an empty one.
+    @Test("a failed enumeration does not observe an empty machine")
+    func aFailedEnumerationIsAFailure() {
+        let directory = FakeAudioDeviceDirectory(devices: [])
+        directory.failEnumeration(reason: "scripted")
+        guard case .failure(let failure) = Probe.observeCoreAudio(directory) else {
+            Issue.record("a failed enumeration was observed as a machine with no microphones"); return
+        }
+        #expect(failure.reason.contains("enumeration failed"))
+    }
+
     // MARK: - The role-based comparison, which needs no names
 
     @Test("the default input is compared by role, and a mismatch is a divergence")
@@ -164,7 +231,7 @@ struct MicrophoneIdentityProbeTests {
     /// early `return`: a Mac that lists no input device covered nothing, and that has to read as
     /// *skipped* in the output, never as a pass.
     @Test("CoreAudio and AVFoundation name this machine's microphones identically",
-          .enabled(if: MicrophoneIdentityProbe.machineHasAnInputDevice(),
+          .enabled(if: MicrophoneIdentityProbe.shouldProbeThisMachine(),
                    "this Mac lists no input device: identity correspondence unverified"))
     func theTwoAPIsAgreeOnThisMachine() {
         guard case .success(let live) = Probe.observeLive(CoreAudioDeviceDirectory()) else {
@@ -173,6 +240,13 @@ struct MicrophoneIdentityProbeTests {
         }
         let comparison = Probe.compare(coreAudio: live.coreAudio, avFoundation: live.avFoundation)
         Probe.report("\n[microphone identity probe] devices\n\(comparison.report)")
+
+        // ⚠️ An "agreed" verdict over a read that could not describe part of the machine covers less
+        // than it says. Reported rather than folded into the verdict, so the gap is named.
+        if !live.coreAudio.uninspectable.isEmpty {
+            let missing = live.coreAudio.uninspectable.joined(separator: ", ")
+            Issue.record("the identity comparison is incomplete: the HAL would not describe \(missing)")
+        }
 
         #expect(comparison.verdict == .agreed, """
             the two APIs disagree about this machine's microphone identities — \
@@ -184,7 +258,7 @@ struct MicrophoneIdentityProbeTests {
     /// The role-based half, which shares no mechanism with the one above: no names, no lists, one
     /// property read from each API.
     @Test("CoreAudio and AVFoundation name the same system default input",
-          .enabled(if: MicrophoneIdentityProbe.machineHasAnInputDevice(),
+          .enabled(if: MicrophoneIdentityProbe.shouldProbeThisMachine(),
                    "this Mac lists no input device: default-input correspondence unverified"))
     func theTwoAPIsAgreeOnTheDefaultInput() {
         guard case .success(let live) = Probe.observeLive(CoreAudioDeviceDirectory()) else {
@@ -213,26 +287,36 @@ struct MicrophoneIdentityProbeTests {
     /// "no headset connected" is missing coverage, and reporting it as a pass is the failure mode this
     /// whole file is written against.
     @Test("the Bluetooth headset carries one identity across both APIs",
-          .enabled(if: MicrophoneIdentityProbe.machineHasABluetoothInput(),
+          .enabled(if: MicrophoneIdentityProbe.shouldProbeBluetooth(),
                    "no Bluetooth microphone is connected: the headset identity is unverified"))
     func theBluetoothHeadsetCorresponds() {
-        expectCorresponded(MicrophoneIdentityProbe.liveInputDevices().filter(\.isBluetooth),
-                           kind: "Bluetooth")
+        expectCorresponded(MicrophoneIdentityProbe.liveCoverage(),
+                           matching: \.isBluetooth, kind: "Bluetooth")
     }
 
     @Test("the built-in microphone carries one identity across both APIs",
-          .enabled(if: MicrophoneIdentityProbe.machineHasABuiltInInput(),
+          .enabled(if: MicrophoneIdentityProbe.shouldProbeBuiltIn(),
                    "this Mac has no built-in microphone: that identity is unverified"))
     func theBuiltInMicrophoneCorresponds() {
-        expectCorresponded(MicrophoneIdentityProbe.liveInputDevices().filter { $0.transport == .builtIn },
-                           kind: "built-in")
+        expectCorresponded(MicrophoneIdentityProbe.liveCoverage(),
+                           matching: { $0.transport == .builtIn }, kind: "built-in")
     }
 
     /// Shared by the two hardware-specific probes: the named devices must appear among the
     /// correspondences **and** agree. ⚠️ Absence from `agreed` is checked explicitly — a device that
     /// fell into `uncorrespondable` proved nothing, and silently accepting that is precisely how a
     /// discrepancy would be filed as "missing".
-    private func expectCorresponded(_ devices: [AudioInputDevice], kind: String) {
+    private func expectCorresponded(_ coverage: Probe.Coverage,
+                                     matching: (AudioInputDevice) -> Bool,
+                                     kind: String) {
+        // ⚠️ **An unreadable or partial enumeration is not "no such device".** The trait above only
+        // skips on *proved* absence, so reaching here with anything but a complete read means the
+        // machine could not be described — which is a finding, not a quiet pass over an empty list.
+        if let complaint = coverage.complaint {
+            Issue.record("the \(kind) identity is unverified — \(complaint)")
+            return
+        }
+        let devices = coverage.devices.filter(matching)
         guard case .success(let live) = Probe.observeLive(CoreAudioDeviceDirectory()) else {
             Issue.record("the machine could not be observed: \(kind) identity unverified")
             return

@@ -106,16 +106,26 @@ public final class ControlViewModel: ObservableObject {
     /// permission to write *now*; queued behind a *Use now* that is parked on its verification deadline,
     /// it did not reach the reconciler until that pass had finished — and the pass then performed one
     /// more write. A revocation that waits for the operation it is meant to interrupt is not a
-    /// revocation. So a decision only ever waits for decisions **of its own kind**.
+    /// revocation.
     ///
-    /// ⚠️ **And supersession is gone.** A single "latest wins" counter shared across kinds meant an Off
-    /// followed by a *Use now* discarded the Off entirely: management stayed on, still writing the Mac's
-    /// input after the user switched it off. Scoping the counter per family would have fixed that, but
-    /// the mechanism never distinguished any test — the queue is what fixes the reentrancy — and it had
-    /// by then caused two real defects. Ordered execution is kept; "latest wins" is not.
+    /// ⚠️ **Per-decision queues were not enough either, and this is the correction.** Putting Enable,
+    /// Resume, Off and Pause on one "management" queue still left a revocation waiting: Resume also
+    /// awaits a full reconciliation, so an Off clicked while a Resume was parked did not reach the
+    /// reconciler, and the released Resume then wrote a fallback device first. A revocation must be
+    /// admitted independently of **any** slow granting operation, **including one of its own kind**.
+    /// So revocations have their own queue and wait for nothing but each other.
+    ///
+    /// ⚠️ **And supersession is gone — with one asymmetric exception that is not it.** A symmetric
+    /// "latest wins" counter shared across kinds meant an Off followed by a *Use now* discarded the Off
+    /// entirely. That is removed. What remains is one-directional and stated as a rule rather than a
+    /// race: **a revocation cancels grants issued before it; a grant never cancels a revocation.**
+    /// Without it, an Enable still queued when the user clicks Off would run afterwards and switch
+    /// management back on.
     private enum CommandQueue: Hashable {
-        /// Feature (B): on, off, pause, resume.
-        case management
+        /// Granting: Enable, Resume. Both await reconciliation and can be slow.
+        case grant
+        /// Withdrawing: Off, Pause. Waits for nothing but other revocations.
+        case revocation
         /// Which microphone Acta records from — *Use now*, *Resume automatic*.
         case selection
         /// The priority list. ⚠️ Two edits are **both** wanted and neither replaces the other, which is
@@ -125,28 +135,44 @@ public final class ControlViewModel: ObservableObject {
 
     private func enqueue(_ queue: CommandQueue,
                          _ body: @escaping @Sendable @MainActor () async -> Void) {
+        // Bumped synchronously, at the moment the user acts — not when the command runs, which is the
+        // whole point: the grant it cancels may not have started.
+        if queue == .revocation { revocations &+= 1 }
+        let issuedAfter = revocations
         let previous = chains[queue]
         chains[queue] = Task { @MainActor [weak self] in
             await previous?.value
             guard let self else { return }
+            // A grant issued before a revocation does not get to run after it.
+            if queue == .grant, issuedAfter != revocations { return }
             await body()
             refreshMicrophone()
         }
     }
 
     private var chains: [CommandQueue: Task<Void, Never>] = [:]
+    private var revocations: UInt64 = 0
 
-    /// The authoritative enablement, written into **every** settings save this adapter makes.
+    /// The one place this adapter writes settings — **one field at a time, merged into the
+    /// authoritative value, with no suspension inside**.
     ///
-    /// ⚠️ A save carries the whole `RecordingSettings`, and saving re-applies them — so a command that
-    /// captured `api.settings` before a revocation and wrote it back afterwards would switch management
-    /// on again. Reading the reconciler at write time is what stops any queue from undoing another's
-    /// revocation, without an epoch nobody can see.
-    private func persist(_ mutate: @escaping @MainActor (inout RecordingSettings) -> Void) async {
-        var settings = api.settings
-        mutate(&settings)
-        settings.managesSystemDefaultInput = await api.isMicrophoneManagementEnabled
-        api.settings = settings
+    /// ⚠️ **The suspension was the defect, and it is the half a test can see.** A save carries every
+    /// field and saving re-applies them, so a read-modify-write that suspends in the middle discards
+    /// whatever landed during the hop: the first version awaited the enablement *after* copying the
+    /// value, and a priority save overwrote a capture choice made after it — measured 15 times in 20 by
+    /// a review, and reproduced here by putting the suspension back. Every statement below runs in one
+    /// main-actor turn. That is why `ControlAPI.isMicrophoneManagementEnabled` had to become
+    /// synchronous.
+    ///
+    /// ⚠️ **The field merge is belt and braces, and no test distinguishes it — that is recorded rather
+    /// than implied away.** Writing the whole value back with only the enablement re-read passes every
+    /// test in the suite; `RecordingSettings.merging` is kept because it is the anti-clobber primitive
+    /// that already existed for exactly this question, and because a command writing only the field it
+    /// owns cannot stamp a sibling field a different queue is responsible for. The reason the 20-in-20
+    /// enable/edit loss is *not* evidence for this line: that was the seeding race, fixed in
+    /// `MicrophoneReconciler.enable(seedingWith:)`.
+    private func persist(_ field: RecordingSettings.Field) {
+        api.settings = api.settings.merging(field)
         api.saveSettings()
     }
 
@@ -194,12 +220,15 @@ public final class ControlViewModel: ObservableObject {
             let order = edit(api.microphoneStatus.priority)
             await api.setMicrophonePriority(order)
             let applied = api.microphoneStatus.priority
-            await persist { $0.microphonePriority = applied }
+            persist(.microphonePriority(applied))
         }
     }
 
     public func setManagingSystemInput(_ on: Bool) {
-        enqueue(.management) { [weak self] in
+        // ⚠️ On and off are not the same kind of decision: switching the feature **off** withdraws
+        // permission to write the Mac's input and must be admitted immediately, while switching it on
+        // may queue behind other grants.
+        enqueue(on ? .grant : .revocation) { [weak self] in
             guard let self else { return }
             if on { await api.enableMicrophoneManagement() } else { await api.disableMicrophoneManagement() }
             // ⚠️ **Read back rather than replayed from the captured flag** — what was actually applied
@@ -209,25 +238,25 @@ public final class ControlViewModel: ObservableObject {
             // answered with the *previous* value. Since saving re-applies the settings, an Off was
             // persisted as On and the save then switched management back on — the user's decision
             // undone by its own write. `persist` is where that read lives now, for every save.
-            let applied = api.microphoneStatus.priority
-            await persist { $0.microphonePriority = applied }
+            // ⚠️ Both fields, and each merged on its own: the enable owns the switch, and the order it
+            // returns is the authoritative one the reconciler settled on (it may have seeded an empty
+            // list). Writing them as one whole value is what let one queue stamp another's field.
+            persist(.managesSystemDefaultInput(api.isMicrophoneManagementEnabled))
+            persist(.microphonePriority(api.microphoneStatus.priority))
         }
     }
 
     public func pauseMicrophoneManagement() {
-        enqueue(.management) { [weak self] in await self?.api.pauseMicrophoneManagement() }
+        enqueue(.revocation) { [weak self] in await self?.api.pauseMicrophoneManagement() }
     }
 
     public func resumeMicrophoneManagement() {
-        enqueue(.management) { [weak self] in await self?.api.resumeMicrophoneManagement() }
+        enqueue(.grant) { [weak self] in await self?.api.resumeMicrophoneManagement() }
     }
 
     public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
         api.setCaptureMicrophoneChoice(choice)
-        var settings = api.settings
-        settings.captureMicrophoneChoice = choice
-        api.settings = settings
-        api.saveSettings()
+        persist(.captureMicrophoneChoice(choice))
         refreshMicrophone()
     }
 
@@ -270,8 +299,7 @@ public final class ControlViewModel: ObservableObject {
     /// `state.settings` snapshot, which could clobber a recent sibling-field edit), then persist —
     /// reproducing today's save-on-change, including the normalisation `saveSettings()` applies.
     private func update(_ field: RecordingSettings.Field) {
-        api.settings = api.settings.merging(field)
-        api.saveSettings()
+        persist(field)
     }
 
     public var archivePathBinding: Binding<String> {

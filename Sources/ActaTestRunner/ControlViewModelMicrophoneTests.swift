@@ -136,6 +136,142 @@ struct ControlViewModelMicrophoneTests {
                 "the released pass wrote the Mac's input after the user had paused")
     }
 
+    /// ⚠️ **A settings save is a read-modify-write of the whole value, so a suspension inside it
+    /// discards whatever landed during the hop.** The priority save read `RecordingSettings`, then
+    /// awaited the enablement, then wrote the copy back — and a capture choice the user made in between
+    /// was overwritten by the stale snapshot. A review measured 15 of 20 runs losing it. Repeated here
+    /// for the same reason: the window is real but narrow, and one iteration would be a coin toss
+    /// dressed as a test.
+    @Test("a priority save cannot overwrite a capture choice made after it")
+    @available(macOS 15.0, *)
+    func aPrioritySaveDoesNotUndoANewerCaptureChoice() async {
+        let controller = ControllerHarness(label: "menu-choice")
+        defer { controller.tearDown() }
+
+        for iteration in 0 ..< 20 {
+            let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                       defaultInput: "BuiltInMicrophoneDevice")
+            manager.start()
+            let api = ControlAPI(controller: controller.controller, microphone: manager)
+            defer { api.finish() }
+            var reset = api.settings
+            reset.microphonePriority = []
+            reset.captureMicrophoneChoice = .followPriority
+            api.settings = reset
+            api.saveSettings()
+
+            let model = ControlViewModel(api: api)
+            directory.setDevices([.builtInMic(), .usbMic()])
+            manager.refreshInventory()
+            model.refreshMicrophone()
+
+            model.togglePreferred("USBAudioDevice_UID")
+            // Land the choice while the priority command is suspended — the interleaving the defect
+            // needed, arranged rather than hoped for.
+            _ = await awaitCondition {
+                MainActor.assumeIsolated { manager.capturePreference.priority.order }
+                    == ["USBAudioDevice_UID"]
+            }
+            model.setCaptureChoice(.systemDefault)
+
+            let settled = await awaitCondition {
+                MainActor.assumeIsolated { api.settings.microphonePriority } == ["USBAudioDevice_UID"]
+            }
+            #expect(settled, "the priority edit never persisted (iteration \(iteration))")
+            #expect(api.settings.captureMicrophoneChoice == .systemDefault,
+                    "a priority save overwrote the newer capture choice (iteration \(iteration))")
+        }
+    }
+
+    /// ⚠️ **Independent queues cannot make two writers of the same state safe**, and this is the
+    /// sequence that proves it. Enabling management seeded its list from a *cached* copy of the priority
+    /// and wrote the result back, so an explicit edit that reached the reconciler during that gap was
+    /// replaced by the seed: the user's chosen microphone was absent from the persisted list in 20 runs
+    /// out of 20. The queues were already independent — that is exactly why neither waited for the
+    /// other. The decision "is the list empty, and if so seed it" now happens inside the reconciler, in
+    /// one turn, against the list it owns.
+    ///
+    /// ⚠️ Kept alongside the *Use now* case rather than instead of it: the override and the order have
+    /// different writers, and one surviving says nothing about the other.
+    @Test("enabling management does not overwrite a priority edit issued with it")
+    @available(macOS 15.0, *)
+    func enablingDoesNotOverwriteAPriorityEdit() async {
+        let controller = ControllerHarness(label: "menu-seed")
+        defer { controller.tearDown() }
+
+        for iteration in 0 ..< 20 {
+            let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                       defaultInput: "BuiltInMicrophoneDevice")
+            manager.start()
+            let api = ControlAPI(controller: controller.controller, microphone: manager)
+            defer { api.finish() }
+            var reset = api.settings
+            reset.microphonePriority = []
+            reset.managesSystemDefaultInput = false
+            api.settings = reset
+            api.saveSettings()
+
+            let model = ControlViewModel(api: api)
+            directory.setDevices([.builtInMic(), .usbMic()])
+            manager.refreshInventory()
+            model.refreshMicrophone()
+
+            // One main-actor turn: the user ranks a microphone and switches the feature on.
+            model.togglePreferred("USBAudioDevice_UID")
+            model.setManagingSystemInput(true)
+
+            let settled = await awaitCondition {
+                MainActor.assumeIsolated { api.settings.managesSystemDefaultInput } == true
+                    && MainActor.assumeIsolated { api.settings.microphonePriority }.isEmpty == false
+            }
+            #expect(settled, "neither decision settled (iteration \(iteration))")
+            let persisted = api.settings.microphonePriority
+            let complaint = "enabling management discarded the user's priority edit "
+                + "(iteration \(iteration)): \(persisted)"
+            #expect(persisted.contains("USBAudioDevice_UID"), "\(complaint)")
+            // The settings saves are applied through the manager's own chain, so the reconciler settles
+            // a turn or two after the value does. Awaited rather than sampled.
+            let enabled = await awaitAsyncCondition { await manager.reconciler.isEnabled }
+            #expect(enabled, "management never came on (iteration \(iteration))")
+        }
+    }
+
+    /// ⚠️ **A revocation must not wait for a grant of its own kind either**, and putting Enable, Resume,
+    /// Off and Pause on one "management" queue left exactly that hole. Resume awaits a full
+    /// reconciliation, so an Off clicked while a Resume was parked did not reach the reconciler at all —
+    /// and the released Resume then wrote a fallback device before the Off ran. Found by review after
+    /// the per-decision queues had already fixed the *Use now* case; the shape is the same and the
+    /// earlier fix did not cover it.
+    @Test("an Off reaches the reconciler while a Resume of its own kind is still parked")
+    @available(macOS 15.0, *)
+    func offInterruptsAnInflightResume() async {
+        let (directory, clock, manager, _, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "BuiltInMicrophoneDevice")
+        _ = await manager.enableManagement()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice", "USBAudioDevice_UID"])
+        await manager.pauseEnforcement()
+        model.refreshMicrophone()
+
+        // Something else takes the Mac's input while enforcement is paused, so a Resume has real work.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+
+        model.resumeMicrophoneManagement()
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the Resume never reached the reconciler — nothing was interrupted")
+
+        model.setManagingSystemInput(false)
+        let revoked = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+        #expect(revoked, "the Off waited behind a Resume instead of withdrawing permission to write")
+
+        let writesAtRevocation = directory.attemptedWrites
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        #expect(directory.attemptedWrites == writesAtRevocation,
+                "the released Resume wrote the Mac's input after management had been switched off")
+    }
+
     /// ⚠️ **An open idle menu observed nothing.** `states()` is driven by the recording controller, and
     /// microphone state is deliberately not part of `ControlState` — so a device arriving, the Mac's
     /// input moving, enforcement suspending itself or a *Use now* expiring all went unseen until the

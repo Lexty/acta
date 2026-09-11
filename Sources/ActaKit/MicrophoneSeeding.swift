@@ -66,7 +66,18 @@ public enum MicrophoneSeeding {
     public static func seeded(_ existing: [String],
                               devices: [AudioInputDevice],
                               systemDefault: String?) -> [String] {
-        guard existing.isEmpty else { return existing }
-        return proposal(from: devices, systemDefault: systemDefault)
+        seeded(existing, proposal: proposal(from: devices, systemDefault: systemDefault))
+    }
+
+    /// The same rule against a proposal computed earlier.
+    ///
+    /// ⚠️ **This overload exists so the decision can be made where the list actually lives.** Computing
+    /// a seed from a cached copy of the order and then writing the result back is a read-modify-write
+    /// across two hops, and an explicit edit arriving in between is lost: enabling management while a
+    /// priority edit was in flight replaced the user's edit with a seed, measured 20 times out of 20.
+    /// The owner of the authoritative list calls this **inside its own turn**, so "is it empty" and
+    /// "then seed it" cannot be separated.
+    public static func seeded(_ existing: [String], proposal: [String]) -> [String] {
+        existing.isEmpty ? proposal : existing
     }
 }

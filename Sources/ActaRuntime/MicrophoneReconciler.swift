@@ -225,6 +225,25 @@ public actor MicrophoneReconciler {
     /// The subscription stays so the actual default remains observable while paused — the menu must be
     /// able to show what the system default is even when Acta is not holding it. Like `disable()`, this
     /// issues no compensating write, and the pass it schedules reads the world without touching it.
+    /// Turn enforcement on, **seeding the list only if it is empty, in this one actor turn**.
+    ///
+    /// ⚠️ **Why this is not `configure(order:enabled:)` with a seed computed by the caller.** The caller
+    /// holds a *copy* of the order; computing the seed there and writing it back is a read-modify-write
+    /// with a suspension in the middle, and an explicit priority edit that reaches this actor during
+    /// that gap is overwritten by the seed. Independent command queues cannot fix that — they are
+    /// independent writers of the same state. Asking "is my list empty?" and answering it here, without
+    /// an await between the two, is what makes the edit and the enable both survive.
+    ///
+    /// - Returns: the order actually in force afterwards.
+    public func enable(seedingWith proposal: [String]) async -> [String] {
+        generation &+= 1
+        priorityStorage.order = MicrophoneSeeding.seeded(priorityStorage.order, proposal: proposal)
+        applyEnabled(resettingSuspension: !enabled)
+        let order = priorityStorage.order
+        await schedule(.enabled)
+        return order
+    }
+
     public func pause() async {
         generation &+= 1
         paused = true

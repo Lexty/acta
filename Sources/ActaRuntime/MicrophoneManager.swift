@@ -149,27 +149,41 @@ public final class MicrophoneManager {
     /// ⚠️ Seeding goes through `MicrophoneSeeding.seeded`, which refuses to overwrite an existing list,
     /// so a disable/re-enable cycle cannot cost a user their hand-made order.
     public func enableManagement() async -> [String] {
-        let seeded = MicrophoneSeeding.seeded(capturePreference.priority.order,
-                                              devices: inventory.devices,
-                                              systemDefault: inventory.observedDefault.uid)
-        await reconciler.configure(order: seeded, enabled: enforcementAdmitted)
+        // ⚠️ Only the *proposal* is computed here. Whether it is used at all is decided by the
+        // reconciler against its own list, in one turn — see `MicrophoneReconciler.enable(seedingWith:)`.
+        // Seeding from `capturePreference` and writing the result back lost an explicit priority edit
+        // that arrived in between.
+        let proposal = MicrophoneSeeding.proposal(from: inventory.devices,
+                                                  systemDefault: inventory.observedDefault.uid)
+        guard enforcementAdmitted else {
+            await reconciler.configure(order: await reconciler.priority.order, enabled: false)
+            managementEnabled = await reconciler.isEnabled
+            await syncCapturePreference()
+            return await reconciler.priority.order
+        }
+        let seeded = await reconciler.enable(seedingWith: proposal)
+        managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
         return seeded
     }
 
-    /// Whether feature (B) is actually in force, **asked of the reconciler rather than of the mirror**.
+    /// Whether feature (B) is in force, readable **synchronously on the main actor**.
     ///
-    /// ⚠️ `enforcement` is a published *mirror*, updated by its own task, so it lags a `configure`
-    /// that has only just returned. Persisting from it wrote the previous value: a user's Off was saved
-    /// as On, and — because saving re-applies the settings — the save then switched management back on.
-    /// This is the authoritative answer, and it accounts for `enforcementAdmitted` refusing an enable
-    /// during shutdown, which a captured flag never could.
-    public var isManagingSystemInput: Bool {
-        get async { await reconciler.isEnabled }
-    }
+    /// ⚠️ **Synchronous is the requirement, not a convenience.** Its one consumer writes it into a
+    /// `RecordingSettings` value that it has just read and is about to write back; an `await` in the
+    /// middle of that read-modify-write is a window in which another main-actor edit lands and is then
+    /// overwritten. A measured 15 runs in 20 lost a capture-choice change that way. So the value is
+    /// mirrored here, updated from the reconciler at the end of every operation that can change it,
+    /// rather than being fetched at the moment it is needed.
+    ///
+    /// ⚠️ Not the same as `enforcement.status != .disabled`: that is a *published* mirror driven by a
+    /// deduplicated stream and lags the `configure` that has just returned. This one is assigned after
+    /// the await, from the reconciler itself.
+    public private(set) var managementEnabled = false
 
     public func disableManagement() async {
         await reconciler.configure(order: capturePreference.priority.order, enabled: false)
+        managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
     }
 
@@ -229,7 +243,9 @@ public final class MicrophoneManager {
         // application can settle while it is in flight, and this one would then publish its older
         // `choice` on top. Rechecked below, after the value is in hand and before anything is published.
         let priority = await reconciler.priority
+        let enabled = await reconciler.isEnabled
         guard revision == settingsRevision, epoch == lifetimeEpoch, started else { return }
+        managementEnabled = enabled
         capturePreference.set(.init(priority: priority, choice: settings.captureMicrophoneChoice))
     }
 

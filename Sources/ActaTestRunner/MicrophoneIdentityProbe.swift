@@ -56,6 +56,11 @@ enum MicrophoneIdentityProbe {
     /// One API's whole answer.
     struct Observation: Equatable, Sendable {
         var devices: [ObservedDevice]
+        /// Devices the API listed but could not describe. ⚠️ **Carried, not dropped.** A snapshot that
+        /// omits them is indistinguishable from one where the machine really holds only what is listed —
+        /// so a partial read would arrive as complete coverage and an "agreed" verdict would silently
+        /// cover less of the machine than it claimed.
+        var uninspectable: [String] = []
         /// The device *this* API names as the system default input, if it names one. `nil` is a real
         /// answer (no default input), distinct from the read failing — a failure never reaches here.
         var defaultInput: ObservedDevice?
@@ -199,7 +204,7 @@ enum MicrophoneIdentityProbe {
     /// to `SCStreamConfiguration` is the one `CoreAudioDeviceDirectory` produces, so that is the one
     /// that has to be checked. A second reader here would prove the probe agrees with itself.
     static func observeCoreAudio(_ directory: any AudioDeviceReading) -> Result<Observation, ObservationFailure> {
-        guard case .devices(let devices, _) = directory.enumerateInputDevices() else {
+        guard case .devices(let devices, let uninspectable) = directory.enumerateInputDevices() else {
             return .failure(ObservationFailure(reason: "CoreAudio enumeration failed"))
         }
         let observed = devices.map { ObservedDevice(uid: $0.uid, name: $0.name) }
@@ -213,7 +218,9 @@ enum MicrophoneIdentityProbe {
         case .failed(let reason):
             return .failure(ObservationFailure(reason: "reading the default input failed: \(reason)"))
         }
-        return .success(Observation(devices: observed, defaultInput: defaultInput))
+        return .success(Observation(devices: observed,
+                                    uninspectable: uninspectable,
+                                    defaultInput: defaultInput))
     }
 
     /// What `AVFoundation` says. The independent half — it consults nothing above.
@@ -261,18 +268,72 @@ enum MicrophoneIdentityProbe {
 
     // MARK: - What this machine can cover
 
-    /// The live input devices, for the `.enabled(if:)` conditions below. Absent hardware is not a
-    /// failure — it is coverage this run did not have, and it has to be **visible** rather than passed.
-    static func liveInputDevices() -> [AudioInputDevice] {
-        guard case .devices(let devices, _) = CoreAudioDeviceDirectory().enumerateInputDevices() else {
-            return []
+    /// What the HAL was able to say about this machine, **before** any comparison runs.
+    ///
+    /// ⚠️ **This type exists because the probe committed the exact error it was written to catch.** The
+    /// first version asked for `[AudioInputDevice]` and returned `[]` when the enumeration *failed* —
+    /// so a machine whose HAL would not answer skipped all four live tests with "this Mac lists no
+    /// input device" and exited 0. A review injected an enumeration failure into the real adapter and
+    /// measured exactly that. "I could not look" reported as "there was nothing to find" is the failure
+    /// mode `CLAUDE.md` documents, and the probe is the last place it may happen: a divergence filed as
+    /// missing hardware is the one outcome that defeats its purpose.
+    enum Coverage: Equatable {
+        /// A successful enumeration that described everything it listed.
+        case complete([AudioInputDevice])
+        /// Succeeded, but some device could not be described — so absence is **not** proved: the device
+        /// that would have answered the question may be the one that would not answer.
+        case partial([AudioInputDevice], uninspectable: [String])
+        /// The enumeration itself failed.
+        case unreadable(String)
+
+        var devices: [AudioInputDevice] {
+            switch self {
+            case .complete(let devices): return devices
+            case .partial(let devices, _): return devices
+            case .unreadable: return []
+            }
         }
-        return devices
+
+        var isComplete: Bool { if case .complete = self { return true }; return false }
+
+        /// ⚠️ **The only thing that may justify a skip**: a complete, successful enumeration that
+        /// contains nothing matching. Every other outcome must let the test run and fail.
+        func provesAbsence(of matches: (AudioInputDevice) -> Bool) -> Bool {
+            guard case .complete(let devices) = self else { return false }
+            return !devices.contains(where: matches)
+        }
+
+        var complaint: String? {
+            switch self {
+            case .complete: return nil
+            case .partial(_, let uninspectable):
+                return "the HAL could not describe: \(uninspectable.joined(separator: ", "))"
+            case .unreadable(let reason):
+                return "the HAL enumeration failed: \(reason)"
+            }
+        }
     }
 
-    static func machineHasAnInputDevice() -> Bool { !liveInputDevices().isEmpty }
-    static func machineHasABluetoothInput() -> Bool { liveInputDevices().contains(where: \.isBluetooth) }
-    static func machineHasABuiltInInput() -> Bool { liveInputDevices().contains { $0.transport == .builtIn } }
+    static func coverage(from enumeration: DeviceEnumeration) -> Coverage {
+        switch enumeration {
+        case .failed(let reason):
+            return .unreadable(reason)
+        case .devices(let devices, let uninspectable):
+            return uninspectable.isEmpty ? .complete(devices)
+                                         : .partial(devices, uninspectable: uninspectable)
+        }
+    }
+
+    static func liveCoverage() -> Coverage {
+        coverage(from: CoreAudioDeviceDirectory().enumerateInputDevices())
+    }
+
+    /// The `.enabled(if:)` conditions. Each reads "unless absence is **proved**", never "if present".
+    static func shouldProbeThisMachine() -> Bool { !liveCoverage().provesAbsence { _ in true } }
+    static func shouldProbeBluetooth() -> Bool { !liveCoverage().provesAbsence(of: \.isBluetooth) }
+    static func shouldProbeBuiltIn() -> Bool {
+        !liveCoverage().provesAbsence { $0.transport == .builtIn }
+    }
 
     // MARK: - Warming AVFoundation before the suite runs
 
@@ -289,8 +350,7 @@ enum MicrophoneIdentityProbe {
     ///
     /// ⚠️ **The mechanism is not established, and is deliberately not guessed at.** What is measured is
     /// the three numbers above; naming a cause on that evidence is exactly the mistake
-    /// `docs/backlog/segment-finalisation-waits-under-parallel-tests.md` exists to record. It is a
-    /// second reproducer for the open question in that file, and it is written up there.
+    /// `docs/backlog/segment-finalisation-waits-under-parallel-tests.md` exists to record.
     ///
     /// `isWarm` exists so deleting the call fails a test rather than silently restoring a 60-second
     /// flaky gate.

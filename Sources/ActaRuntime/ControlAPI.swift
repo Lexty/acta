@@ -303,11 +303,10 @@ public final class ControlAPI {
     public func enableMicrophoneManagement() async { _ = await microphone.enableManagement() }
     public func disableMicrophoneManagement() async { await microphone.disableManagement() }
 
-    /// Whether feature (B) is in force — the authoritative answer, not the published mirror. See
-    /// `MicrophoneManager.isManagingSystemInput`.
-    public var isMicrophoneManagementEnabled: Bool {
-        get async { await microphone.isManagingSystemInput }
-    }
+    /// Whether feature (B) is in force — the authoritative answer, not the published mirror, and
+    /// readable **without suspending**. See `MicrophoneManager.managementEnabled` for why that matters:
+    /// its consumer is in the middle of a read-modify-write of the whole settings value.
+    public var isMicrophoneManagementEnabled: Bool { microphone.managementEnabled }
     public func pauseMicrophoneManagement() async { await microphone.pauseEnforcement() }
     public func resumeMicrophoneManagement() async { await microphone.resumeEnforcement() }
     public func setMicrophonePriority(_ order: [String]) async { await microphone.setPriorityOrder(order) }
