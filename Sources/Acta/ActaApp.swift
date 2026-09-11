@@ -161,6 +161,27 @@ private struct ChooserHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+private extension View {
+    /// Make a `DisclosureGroup`'s label behave like the row it looks like: the whole strip toggles the
+    /// section, not just the chevron.
+    ///
+    /// ⚠️ **Three parts, and each one is load-bearing.** `maxWidth: .infinity` makes the label occupy
+    /// the row rather than hugging its text — without it the click target is the words, and the gap to
+    /// the right of a short title stays dead. `contentShape` makes that frame hit-testable at all: a
+    /// `VStack` of `Text` is transparent to a tap everywhere its glyphs are not, so a click between two
+    /// lines of the label fell through. The gesture goes on the label, never on the `DisclosureGroup`,
+    /// because the chevron is the group's own control and wrapping the whole group would take the click
+    /// the chevron is already handling — toggling twice and leaving the section exactly as it was.
+    ///
+    /// ⚠️ Only for labels with **nothing interactive in them**. A tap gesture here swallows clicks on
+    /// any button placed inside the label, and the two callers are text.
+    func disclosureRow(toggle: @escaping () -> Void) -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: toggle)
+    }
+}
+
 /// Placeholder for macOS < 15 (microphone capture through a single `SCStream` arrived in 15).
 struct UnsupportedContent: View {
     var body: some View {
@@ -384,6 +405,7 @@ struct MenuContent: View {
                             .foregroundStyle(mic.managementNeedsAttention ? .orange : .secondary)
                     }
                 }
+                .disclosureRow { microphoneExpanded.toggle() }
             }
 
             // ⚠️ **A state that needs acting on must not require opening a section to act on.** When
@@ -701,6 +723,7 @@ struct MenuContent: View {
             .disabled(isBusy)
         } label: {
             Label("Settings", systemImage: "gearshape").font(.caption)
+                .disclosureRow { settingsExpanded.toggle() }
         }
     }
 
