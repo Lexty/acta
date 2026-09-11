@@ -81,3 +81,22 @@ public enum MicrophoneSeeding {
         existing.isEmpty ? proposal : existing
     }
 }
+
+/// Laying out a bounded, self-sizing section.
+///
+/// ⚠️ **Pure and here because it is a rule, not a drawing.** A `ScrollView` is greedy along its scroll
+/// axis, so a bounded section has to be told its content's height — and the measurement arrives from a
+/// `PreferenceKey`, which reports its **default** whenever the content is not in the hierarchy. A
+/// collapsed disclosure is exactly that: it renders nothing, the measurement comes back zero, the zero
+/// is stored, and on the next expansion the frame is zero tall, so the content lays out at zero and goes
+/// on measuring zero. The section opens empty and stays empty, which is what shipped.
+public enum BoundedSectionLayout {
+    /// The height to give the section, given the last measurement and the bound.
+    ///
+    /// A non-positive measurement means **not measured**, never "nothing to show": it is what an absent
+    /// hierarchy reports, and treating it as a height is the latch above.
+    public static func height(measured: Double, bound: Double) -> Double {
+        guard measured > 0 else { return bound }
+        return min(measured, bound)
+    }
+}

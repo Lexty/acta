@@ -126,10 +126,10 @@ struct MenuContent: View {
     /// on a laptop, with only six devices attached. What a user needs at a glance is which
     /// microphone will be used, not the whole apparatus for deciding it.
     @State private var microphoneExpanded = false
-    /// The chooser's own content height, so the bounded scroll view does not claim space it is not
-    /// using. Seeded at the bound rather than at zero: a first frame of height zero collapses the
-    /// section to nothing for one pass, which reads as the disclosure having failed to open.
-    @State private var chooserHeight: CGFloat = MenuContent.chooserMaxHeight
+    /// The chooser's last measured content height — **zero meaning "not measured"**, which is what a
+    /// collapsed disclosure reports. `BoundedSectionLayout.height` is what turns that into a usable
+    /// frame; seeding it here was not enough, because the collapsed state overwrites the seed.
+    @State private var chooserHeight: CGFloat = 0
     /// How tall the chooser may get before it scrolls.
     ///
     /// ⚠️ A judgement, not a measurement, and scoped to what it can actually promise: it bounds **this
@@ -299,7 +299,8 @@ struct MenuContent: View {
                                                    value: proxy.size.height)
                         })
                 }
-                .frame(height: min(chooserHeight, Self.chooserMaxHeight))
+                .frame(height: BoundedSectionLayout.height(measured: chooserHeight,
+                                                           bound: Self.chooserMaxHeight))
                 .onPreferenceChange(ChooserHeightKey.self) { chooserHeight = $0 }
             } label: {
                 VStack(alignment: .leading, spacing: 1) {

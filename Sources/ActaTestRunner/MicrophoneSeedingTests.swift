@@ -176,3 +176,25 @@ struct MicrophoneSeedingTests {
         #expect(device == .builtInMic())
     }
 }
+
+/// ⚠️ **The rule behind a bounded, self-sizing section, and it shipped broken.** The chooser opened
+/// completely empty: a `PreferenceKey` reports its default when the content is not in the hierarchy, a
+/// collapsed disclosure renders nothing, so the measurement came back zero — and a zero stored as a
+/// height makes the next expansion zero tall, whereupon the content lays out at zero and goes on
+/// measuring zero. It is a latch, and a user sees a section that refuses to open.
+@Suite("Bounded section layout")
+struct BoundedSectionLayoutTests {
+    @Test("an unmeasured section falls back to the bound rather than collapsing")
+    func zeroMeansUnmeasured() {
+        #expect(BoundedSectionLayout.height(measured: 0, bound: 320) == 320)
+        #expect(BoundedSectionLayout.height(measured: -1, bound: 320) == 320,
+                "a negative measurement is not a height either")
+    }
+
+    @Test("a measured section takes its own height, up to the bound")
+    func measuredContentSizesItself() {
+        #expect(BoundedSectionLayout.height(measured: 120, bound: 320) == 120)
+        #expect(BoundedSectionLayout.height(measured: 900, bound: 320) == 320)
+        #expect(BoundedSectionLayout.height(measured: 320, bound: 320) == 320)
+    }
+}
