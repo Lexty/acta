@@ -240,3 +240,89 @@ struct AudioProcessListTrimmingTests {
                                                    stride: stride) == [11])
     }
 }
+
+/// The projection driving the **real** rule.
+///
+/// ⚠️ **Two correct-looking halves do not establish their composition**, and this is the seam where that
+/// has already bitten: a snapshot that is individually reasonable — an unknown identity, marked
+/// incomplete — still produced an anonymous offer downstream, past an exclusion list keyed by bundle id,
+/// and a second offer for the same process once the identifier resolved.
+@Suite("Audio process projection into the rule")
+struct AudioProcessProjectionIntegrationTests {
+    private typealias Fake = AudioProcessProjectionTests.FakeProperties
+    private static let start = Date(timeIntervalSince1970: 3_000_000)
+    private static func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+    private static let slack = "com.tinyspeck.slackmacgap"
+
+    /// A rule that has taken its baseline on an idle machine.
+    private static func armed(_ projection: AudioProcessProjection, _ fake: Fake)
+        -> MicrophoneActivityRule {
+        var rule = MicrophoneActivityRule()
+        fake.list = .list([])
+        _ = rule.observe(projection.readSnapshot(), at: start,
+                         context: MicrophoneActivityRule.Context())
+        return rule
+    }
+
+    @Test("an unreadable identity never produces an anonymous offer")
+    func anUnresolvedIdentityCannotQualify() {
+        let fake = Fake()
+        let projection = AudioProcessProjection(reader: fake)
+        var rule = Self.armed(projection, fake)
+        let context = MicrophoneActivityRule.Context(excludedBundleIDs: [Self.slack])
+
+        // The process appears holding the input, but its identifier cannot be read and we have never
+        // seen it before.
+        fake.list = .list([1])
+        fake.processes[1] = .init(pid: .value(777), bundleID: .unreadable,
+                                  isRunningInput: .value(true))
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(1), context: context) == .none)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(4.1), context: context) == .none)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(30), context: context) == .none)
+    }
+
+    @Test("once the identity resolves, the exclusion list is honoured")
+    func aResolvedIdentityIsMatchedAgainstTheExclusions() {
+        let fake = Fake()
+        let projection = AudioProcessProjection(reader: fake)
+        var rule = Self.armed(projection, fake)
+        let context = MicrophoneActivityRule.Context(excludedBundleIDs: [Self.slack])
+
+        fake.list = .list([1])
+        fake.processes[1] = .init(pid: .value(777), bundleID: .unreadable,
+                                  isRunningInput: .value(true))
+        _ = rule.observe(projection.readSnapshot(), at: Self.at(1), context: context)
+        _ = rule.observe(projection.readSnapshot(), at: Self.at(4.1), context: context)
+
+        // The identifier becomes readable, and it is the excluded application. No prompt, ever — and in
+        // particular not a second one under a different key.
+        fake.processes[1]?.bundleID = .value(Self.slack)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(5), context: context) == .none)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(9), context: context) == .none)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(60), context: context) == .none)
+    }
+
+    @Test("an allowed application still gets exactly one offer once it resolves")
+    func aResolvedAllowedApplicationIsOfferedOnce() {
+        // ⚠️ The other half: withholding on unknown identity must not turn into withholding for ever.
+        let fake = Fake()
+        let projection = AudioProcessProjection(reader: fake)
+        var rule = Self.armed(projection, fake)
+        let context = MicrophoneActivityRule.Context()
+
+        fake.list = .list([1])
+        fake.processes[1] = .init(pid: .value(777), bundleID: .unreadable,
+                                  isRunningInput: .value(true))
+        _ = rule.observe(projection.readSnapshot(), at: Self.at(1), context: context)
+        fake.processes[1]?.bundleID = .value(Self.slack)
+        #expect(rule.observe(projection.readSnapshot(), at: Self.at(2), context: context) == .none)
+        var offers = 0
+        for second in stride(from: 3.0, through: 40.0, by: 1.0) {
+            if case .offer = rule.observe(projection.readSnapshot(), at: Self.at(second),
+                                          context: context) {
+                offers += 1
+            }
+        }
+        #expect(offers == 1)
+    }
+}

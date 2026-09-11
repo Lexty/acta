@@ -157,10 +157,64 @@ public struct AudioActivityRule: Sendable {
         case indistinguishable
     }
 
+    /// A bounded histogram of recent levels, in one-decibel bins.
+    ///
+    /// ⚠️ **Not a sorted array, and the reason is the audio path.** Percentiles over a growing window
+    /// recomputed on every summary is O(n log n) per measurement; at 2 Hz over a ten-minute window that
+    /// is a sort of 1200 samples twice a second, for a hint. A histogram makes insertion O(1) and a
+    /// percentile a walk over a hundred bins, and it is exactly as accurate as a decibel is meaningful.
+    struct PowerHistogram {
+        private static let lowest = -120
+        private static let highest = 0
+        private var bins = [Int](repeating: 0, count: highest - lowest + 1)
+        private var entries: [(at: Date, bin: Int)] = []
+        private(set) var count = 0
+
+        private static func bin(for power: Double) -> Int {
+            let rounded = Int(power.rounded())
+            return min(max(rounded, lowest), highest) - lowest
+        }
+
+        mutating func insert(_ power: Double, at now: Date) {
+            let index = Self.bin(for: power)
+            bins[index] += 1
+            entries.append((now, index))
+            count += 1
+        }
+
+        mutating func expire(before cutoff: Date) {
+            var removed = 0
+            while removed < entries.count, entries[removed].at < cutoff {
+                bins[entries[removed].bin] -= 1
+                count -= 1
+                removed += 1
+            }
+            if removed > 0 { entries.removeFirst(removed) }
+        }
+
+        /// The level below which `fraction` of the window sits.
+        func percentile(_ fraction: Double) -> Double? {
+            guard count > 0 else { return nil }
+            let target = max(1, Int((Double(count) * fraction).rounded()))
+            var seen = 0
+            for (index, bucket) in bins.enumerated() where bucket > 0 {
+                seen += bucket
+                if seen >= target { return Double(index + Self.lowest) }
+            }
+            return nil
+        }
+    }
+
     private struct TrackEstimate {
-        var samples: [(at: Date, power: Double)] = []
+        var levels = PowerHistogram()
         var measuredDuration: TimeInterval = 0
+        /// When a summary last arrived at all — the meter is running.
         var lastSummaryAt: Date?
+        /// When a summary last carried a usable measurement.
+        ///
+        /// ⚠️ **The one the state depends on.** A meter that keeps reporting "I could not measure that"
+        /// is alive and blind, and a blind meter must not be able to call a recording quiet.
+        var lastMeasuredAt: Date?
         var lastActiveAt: Date?
         var floor: Double?
         var floorUpdatedAt: Date?
@@ -241,13 +295,14 @@ public struct AudioActivityRule: Sendable {
             // quiet interval cannot advance on it either.
             estimate.isActive = false
             tracks[summary.track] = estimate
-            unknownSeen(for: summary.track)
+            refreshQuiet(at: now)
             return
         }
 
+        estimate.lastMeasuredAt = now
         let clamped = max(power, configuration.digitalSilenceFloor)
-        estimate.samples.append((now, clamped))
-        estimate.samples.removeAll { now.timeIntervalSince($0.at) > configuration.floorWindow }
+        estimate.levels.expire(before: now.addingTimeInterval(-configuration.floorWindow))
+        estimate.levels.insert(clamped, at: now)
         estimate.measuredDuration += summary.duration
 
         updateFloor(&estimate, at: now)
@@ -266,6 +321,7 @@ public struct AudioActivityRule: Sendable {
             }
         }
         tracks[summary.track] = estimate
+        refreshQuiet(at: now)
     }
 
     /// ⚠️ **The floor may rise slowly and fall freely.** Falling is always safe — a quieter room is a
@@ -273,9 +329,7 @@ public struct AudioActivityRule: Sendable {
     /// up into speech and declares it background, which is exactly what a recording that starts
     /// mid-sentence would teach it.
     private func updateFloor(_ estimate: inout TrackEstimate, at now: Date) {
-        let powers = estimate.samples.map(\.power).sorted()
-        guard !powers.isEmpty else { return }
-        let candidate = percentile(powers, 0.10)
+        guard let candidate = estimate.levels.percentile(0.10) else { return }
         guard let current = estimate.floor, let updatedAt = estimate.floorUpdatedAt else {
             estimate.floor = candidate
             estimate.floorUpdatedAt = now
@@ -291,32 +345,41 @@ public struct AudioActivityRule: Sendable {
         estimate.floorUpdatedAt = now
     }
 
-    private func percentile(_ sorted: [Double], _ fraction: Double) -> Double {
-        guard !sorted.isEmpty else { return configuration.digitalSilenceFloor }
-        let index = Int((Double(sorted.count - 1) * fraction).rounded())
-        return sorted[min(max(index, 0), sorted.count - 1)]
-    }
-
     private func isWarm(_ estimate: TrackEstimate) -> Bool {
         estimate.measuredDuration >= configuration.warmUp
     }
 
-    private mutating func unknownSeen(for track: AudioActivitySummary.Track) {
-        quietSince = nil
+    /// ⚠️ **The quiet clock advances on measurement, not on being asked.** Keeping it inside
+    /// `evaluate` made the answer depend on how often the caller happened to poll: a coordinator that
+    /// evaluated once every ten minutes would need ten more minutes of quiet before it could offer.
+    private mutating func refreshQuiet(at now: Date) {
+        let bothQuiet = state(of: .microphone, at: now) == .quiet
+            && state(of: .system, at: now) == .quiet
+        if bothQuiet {
+            if quietSince == nil { quietSince = now }
+        } else {
+            quietSince = nil
+        }
     }
 
     // MARK: - Deciding
 
     /// How one track reads right now.
     public func state(of track: AudioActivitySummary.Track, at now: Date) -> TrackState {
-        guard let estimate = tracks[track], let last = estimate.lastSummaryAt,
+        guard let estimate = tracks[track], let last = estimate.lastMeasuredAt,
               now.timeIntervalSince(last) <= configuration.staleAfter else {
             return .unknown
         }
         guard isWarm(estimate), estimate.floor != nil else { return .warmingUp }
-        let powers = estimate.samples.map(\.power).sorted()
-        let spread = percentile(powers, 0.90) - percentile(powers, 0.10)
-        if spread < configuration.minimumDynamicRange { return .indistinguishable }
+        guard let low = estimate.levels.percentile(0.10),
+              let high = estimate.levels.percentile(0.90) else { return .warmingUp }
+        // ⚠️ **Measured digital silence is quiet, not ambiguous.** The spread test exists to refuse a
+        // constant *audible* signal, where a hum and a room full of talking look alike. A track sitting
+        // at the digital floor is not ambiguous at all: nothing is there. Without this, a microphone-only
+        // recording could never be offered, because its system track is exactly this and its spread is
+        // zero for ever.
+        if high <= configuration.digitalSilenceFloor { return .quiet }
+        if high - low < configuration.minimumDynamicRange { return .indistinguishable }
         if let lastActive = estimate.lastActiveAt,
            now.timeIntervalSince(lastActive) <= configuration.activityHold {
             return .active
@@ -326,20 +389,13 @@ public struct AudioActivityRule: Sendable {
 
     /// Ask the rule what to do, given the clock.
     public mutating func evaluate(at now: Date, context: Context) -> Outcome {
-        let microphone = state(of: .microphone, at: now)
-        let system = state(of: .system, at: now)
-
         // ⚠️ Quiet requires *both* tracks to be positively quiet. Unknown, warming up and
         // indistinguishable are all reasons to hold the clock at zero rather than to let it run.
-        let bothQuiet = microphone == .quiet && system == .quiet
-        if bothQuiet {
-            if quietSince == nil { quietSince = now }
-        } else {
-            quietSince = nil
-            if let standing = standingOffer {
-                standingOffer = nil
-                return .withdraw(recordingID: standing)
-            }
+        let wasQuiet = quietSince != nil
+        refreshQuiet(at: now)
+        if quietSince == nil, wasQuiet || standingOffer != nil, let standing = standingOffer {
+            standingOffer = nil
+            return .withdraw(recordingID: standing)
         }
 
         guard context.isEnabled else { return .none }

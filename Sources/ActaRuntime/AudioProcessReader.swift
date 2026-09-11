@@ -97,13 +97,21 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
             }
             seenPIDs.insert(pid)
 
-            let bundle = resolveBundleID(for: pid, object: object, isComplete: &isComplete)
+            var identityIsKnown = true
+            let bundle = resolveBundleID(for: pid, object: object, isComplete: &isComplete,
+                                         identityIsKnown: &identityIsKnown)
             let names = resolveNames(for: pid)
+            // ⚠️ **An unresolved identity may not carry actionable input evidence.** Reporting a held
+            // input under a fabricated process key is worse than reporting nothing: the rule keys the
+            // episode by pid, offers anonymously — past the exclusion list, which is keyed by bundle id
+            // — and then mints a *second* episode for the same process the moment the identifier
+            // resolves. Unknown here means unknown, which the rule already refuses to read as idle.
+            let input = identityIsKnown ? inputState(of: object) : nil
             observations.append(AudioProcessObservation(pid: pid,
                                                         bundleID: bundle,
                                                         displayName: names.display,
                                                         processName: names.process,
-                                                        isRunningInput: inputState(of: object)))
+                                                        isRunningInput: input))
         }
 
         if isComplete { forget(pidsOutside: seenPIDs) }
@@ -113,7 +121,8 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
     // MARK: - Identity
 
     private func resolveBundleID(for pid: Int32, object: UInt32,
-                                 isComplete: inout Bool) -> String? {
+                                 isComplete: inout Bool,
+                                 identityIsKnown: inout Bool) -> String? {
         switch reader.bundleID(of: object) {
         case .value(let identifier):
             lock.lock(); knownBundleIDs[pid] = identifier; lock.unlock()
@@ -129,7 +138,10 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
             lock.lock(); let remembered = knownBundleIDs[pid]; lock.unlock()
             // ⚠️ The inout is *completeness*, not degradation — an inverted name here silently
             // turned every unreadable identity into a complete reading.
-            if remembered == nil { isComplete = false }
+            if remembered == nil {
+                isComplete = false
+                identityIsKnown = false
+            }
             return remembered
         }
     }
