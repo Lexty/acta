@@ -151,6 +151,18 @@ Consequences to keep in mind:
   subscription, a stale continuation, a lost edit intent and a dropped incompleteness — none of which
   manual rendering acceptance would have caught. New non-UI code belongs in `ActaRuntime`, not here,
   and so does anything the views merely *call*.
+  ⚠️ **A user-facing string that states a fact is a projection, not view code**, and this rule was paid
+  for three times in one review round. A ternary in the menu said the feature was "holding the Mac's
+  input" for every enabled state, *suspended* and *refused* included; a summary resolved from
+  insufficient inputs told the user their microphones were disconnected when the snapshot had merely
+  been incomplete; a sentence teaching the priority list contradicted the picker three lines below it,
+  and its own correction was then wrong in a fourth combination. Every fix was the same move — into
+  `ControlAPI.MicrophoneStatus` (`captureSummary`, `managementSummary`, `listExplanation`), with tests.
+  The view still decides **layout, colour and what to show when**; the moment it decides **what is
+  true**, it is in the one layer nothing checks.
+  ⚠️ **A hover tooltip is not an explanation here.** In a menu-bar popover it effectively does not
+  exist, which is how the "add to my list" control shipped as an unlabelled circle that read as a radio
+  button, with its meaning only in `.help`.
 - `Sources/ActaTestRunner/` — **where tests are actually written** (swift-testing `@Test`, run via
   `bash Scripts/test.sh`).
 - `Tests/ActaTests/` — **a stub only**, so `swift test` compiles. Never add real tests here: under
