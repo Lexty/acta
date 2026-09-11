@@ -607,11 +607,11 @@ func theDirectEnforcementSwitchesUpdateTheMirror() async {
 }
 
 /// ⚠️ **The manager's application queue is a second writer with its own timeline**, and the adapter's
-/// permission fence cannot reach it. A management field captured before an explicit Off — which is how
+/// permission fence cannot reach it. A settings value captured before an explicit Off — which is how
 /// the control protocol and the launch application deliver settings — wrote the Mac's input after the
 /// Off had been proved effective. A final persisted "off" does not undo an OS write that already
 /// escaped.
-@Test("a management field queued before an explicit Off does not write after it")
+@Test("a settings application queued before an explicit Off does not write after it")
 @MainActor
 @available(macOS 15.0, *)
 func aQueuedManagementFieldDoesNotWriteAfterAnOff() async {
@@ -636,7 +636,8 @@ func aQueuedManagementFieldDoesNotWriteAfterAnOff() async {
     #expect(held, "no application parked — nothing was queued behind one")
 
     // Captured while the feature is on, queued behind the parked application.
-    manager.apply(.managesSystemDefaultInput(true))
+    manager.applySettings(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                            managesSystemDefaultInput: true))
 
     await manager.disableManagement()
     #expect(await manager.reconciler.isEnabled == false, "the Off did not take effect")
@@ -720,4 +721,92 @@ func aSettingsApplicationSubmittedAfterADirectEditWins() async {
         return await MainActor.run { manager.capturePreference.snapshot.choice == .systemDefault }
     }
     #expect(applied, "a settings application submitted after a direct edit was discarded as stale")
+}
+
+/// A manager parked mid-pass, for the two seeding timelines below.
+@MainActor
+@available(macOS 15.0, *)
+private func makeGatedManager(devices: [AudioInputDevice], defaultInput: String?)
+    -> (FakeAudioDeviceDirectory, GatedClock, MicrophoneManager) {
+    let directory = FakeAudioDeviceDirectory(devices: devices, defaultInput: defaultInput)
+    let clock = GatedClock()
+    let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                             makeClock: { clock },
+                                                             makeWakeCenter: { NotificationCenter() }))
+    manager.start()
+    manager.refreshInventory()
+    return (directory, clock, manager)
+}
+
+/// ⚠️ **A command that seeded nothing must not speak for the list.** `enableManagement` advanced the
+/// order authority on every call, but seeding only replaces an *empty* list — so the ordinary case, a
+/// user with a list who switches the feature on, withdrew a priority change it had never replaced. The
+/// persisted value kept the change while the reconciler was left on the old one.
+@Test("enabling with a list already set does not discard a pending order change")
+@MainActor
+@available(macOS 15.0, *)
+func aNoOpSeedDoesNotDiscardAPendingOrderChange() async {
+    let (directory, clock, manager) = makeGatedManager(devices: [.builtInMic(), .usbMic()],
+                                                       defaultInput: "BuiltInMicrophoneDevice")
+    await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+    _ = await manager.enableManagement()
+
+    // Something else takes the input, so the next application has work and parks.
+    directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+    directory.setWritesTakeEffect(false)
+    clock.hold()
+    manager.applySettings(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                            managesSystemDefaultInput: true))
+    let held = await awaitCondition { clock.isHoldingSleeper }
+    #expect(held, "no application parked — nothing was queued behind one")
+
+    // A later request that really does change the list, and then an Enable that seeds nothing.
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: true))
+    _ = await manager.enableManagement()
+
+    clock.release()
+    let applied = await awaitAsyncCondition {
+        await manager.reconciler.priority.order == ["USBAudioDevice_UID"]
+    }
+    #expect(applied, "a no-op Enable withdrew a priority change it had not replaced")
+}
+
+/// The converse, and the protection that must survive the fix above: an Enable that **really seeds**
+/// — an empty list — does replace the list, and an application captured before it must not put the old
+/// one back.
+@Test("an Enable that really seeds does speak for the list")
+@MainActor
+@available(macOS 15.0, *)
+func aRealSeedClaimsTheOrder() async {
+    let (directory, clock, manager) = makeGatedManager(devices: [.builtInMic(), .usbMic()],
+                                                       defaultInput: "USBAudioDevice_UID")
+    await manager.setPriorityOrder(["USBAudioDevice_UID"])
+    _ = await manager.enableManagement()
+
+    directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+    directory.setWritesTakeEffect(false)
+    clock.hold()
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: true))
+    let held = await awaitCondition { clock.isHoldingSleeper }
+    #expect(held, "no application parked")
+
+    // ⚠️ The order of these three lines is the whole test. Emptying the list claims the order itself,
+    // so a request submitted *before* it is invalidated by that and proves nothing about seeding. The
+    // request has to be captured **after** the emptying and **before** the seed, so the only thing that
+    // can supersede it is the seed.
+    await manager.setPriorityOrder([])
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: true))
+    let seeded = await manager.enableManagement()
+    #expect(seeded.isEmpty == false, "the Enable seeded nothing, so it claimed no order to defend")
+    #expect(seeded != ["USBAudioDevice_UID"], "the seed happened to reproduce the old list")
+
+    clock.release()
+    let replaced = await awaitAsyncCondition(timeoutMilliseconds: 300) {
+        await manager.reconciler.priority.order != seeded
+    }
+    #expect(replaced == false,
+            "a request captured before a real seed overwrote the list that seed had just chosen")
 }

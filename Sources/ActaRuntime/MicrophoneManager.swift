@@ -149,9 +149,7 @@ public final class MicrophoneManager {
     /// ⚠️ Seeding goes through `MicrophoneSeeding.seeded`, which refuses to overwrite an existing list,
     /// so a disable/re-enable cycle cannot cost a user their hand-made order.
     public func enableManagement() async -> [String] {
-        // Seeding can change the list, so this speaks for the order as well as for management.
         authority.management &+= 1
-        authority.order &+= 1
         // ⚠️ Only the *proposal* is computed here. Whether it is used at all is decided by the
         // reconciler against its own list, in one turn — see `MicrophoneReconciler.enable(seedingWith:)`.
         // Seeding from `capturePreference` and writing the result back lost an explicit priority edit
@@ -164,7 +162,13 @@ public final class MicrophoneManager {
             await syncCapturePreference()
             return await reconciler.priority.order
         }
-        let seeded = await reconciler.enable(seedingWith: proposal)
+        let outcome = await reconciler.enable(seedingWith: proposal)
+        // ⚠️ **Only a seed that actually changed the list speaks for the order.** Bumping this on every
+        // enable meant a command that seeded *nothing* — the ordinary case, an existing list — withdrew
+        // an explicit priority change it had not replaced. "Seeding can change the list" is not "it
+        // did"; a no-op enable expresses no replacement priority.
+        if outcome.seeded { authority.order &+= 1 }
+        let seeded = outcome.order
         managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
         return seeded
@@ -302,59 +306,6 @@ public final class MicrophoneManager {
         applyTask = Task { @MainActor [weak self] in
             await previous?.value
             await self?.apply(settings, issuedAt: issuedAt)
-        }
-    }
-
-    /// Apply **one changed field**, on the same ordered queue.
-    ///
-    /// ⚠️ **This exists because replaying a whole captured `RecordingSettings` is a write of every
-    /// microphone setting, by anyone who saves anything.** A queued snapshot is stale by construction:
-    /// one captured while the feature was on wrote the Mac's input again *after* the user had switched
-    /// it off, and the withdrawal's own save carried the pre-edit priority list and put it back — both
-    /// measured by review. Changing `api.settings` synchronously cannot fix that, because the stale
-    /// value was already captured.
-    ///
-    /// So a save from a control says what it **changed**, and nothing else is replayed. The whole-value
-    /// `applySettings` stays for the two places where the whole value genuinely is the intent: the
-    /// launch application, and a client setting settings over the control protocol.
-    public func apply(_ field: RecordingSettings.Field) {
-        let issuedAt = authority
-        let previous = applyTask
-        applyTask = Task { @MainActor [weak self] in
-            await previous?.value
-            await self?.applyIntent(field, issuedAt: issuedAt)
-        }
-    }
-
-    private func applyIntent(_ field: RecordingSettings.Field, issuedAt: Authority) async {
-        // Admission first, as in `apply(_:)`: a save requested before Quit must not reach the OS after.
-        guard started else { return }
-        switch field {
-        case .microphonePriority(let order):
-            guard issuedAt.order == authority.order else { return }
-            await reconciler.setOrder(order)
-            await syncCapturePreference()
-        case .managesSystemDefaultInput(let on):
-            // ⚠️ Superseded by an explicit command issued after this was queued — applying it now would
-            // be a write the user has already countermanded.
-            guard issuedAt.management == authority.management else { return }
-            if on, enforcementAdmitted {
-                // ⚠️ `enable(seedingWith:)`, not `enable()`: the plain enable clears Pause and the
-                // conflict budget unconditionally, so persisting an enable cleared a Pause issued after
-                // it. Seeding with nothing changes no list; it is the pause-preserving path.
-                _ = await reconciler.enable(seedingWith: [])
-            } else {
-                await reconciler.disable()
-            }
-            managementEnabled = await reconciler.isEnabled
-            await syncCapturePreference()
-        case .captureMicrophoneChoice(let choice):
-            guard issuedAt.choice == authority.choice else { return }
-            setCaptureChoice(choice)
-        case .archivePath, .segmentSeconds, .deleteSegmentsAfterAssembly:
-            // Nothing here owns these. ⚠️ Enumerated rather than defaulted, so a new microphone field
-            // that forgets to be handled fails to compile instead of going quiet.
-            break
         }
     }
 

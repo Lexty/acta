@@ -234,14 +234,19 @@ public actor MicrophoneReconciler {
     /// independent writers of the same state. Asking "is my list empty?" and answering it here, without
     /// an await between the two, is what makes the edit and the enable both survive.
     ///
-    /// - Returns: the order actually in force afterwards.
-    public func enable(seedingWith proposal: [String]) async -> [String] {
+    /// - Returns: the order actually in force afterwards, and **whether the seed changed it**. The
+    ///   second half is not decoration: the caller uses it to decide whether this command speaks for the
+    ///   priority list at all, and a no-op seed that claimed to would withdraw an explicit edit it never
+    ///   replaced.
+    public func enable(seedingWith proposal: [String]) async -> (order: [String], seeded: Bool) {
         generation &+= 1
-        priorityStorage.order = MicrophoneSeeding.seeded(priorityStorage.order, proposal: proposal)
+        let before = priorityStorage.order
+        priorityStorage.order = MicrophoneSeeding.seeded(before, proposal: proposal)
+        let seeded = priorityStorage.order != before
         applyEnabled(resettingSuspension: !enabled)
         let order = priorityStorage.order
         await schedule(.enabled)
-        return order
+        return (order: order, seeded: seeded)
     }
 
     public func pause() async {
