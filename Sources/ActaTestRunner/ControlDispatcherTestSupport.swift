@@ -37,6 +37,22 @@ final class FakeControlServing: ControlServing {
     private var continuations: [UUID: AsyncStream<ControlState>.Continuation] = [:]
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// Hold `settleMicrophoneSettings()` open, so a test proves the dispatcher **waits** rather than
+    /// merely getting lucky about scheduling. With this false the barrier returns at once, which is what
+    /// every suite that is not about the barrier wants.
+    var parksMicrophoneSettlement = false
+    private var settlementWaiters: [CheckedContinuation<Void, Never>] = []
+    /// How many callers are parked in the barrier right now — the evidence that it was entered, without
+    /// which "nothing happened" is also what deleting the call looks like.
+    var parkedInSettlement: Int { settlementWaiters.count }
+
+    /// Let every parked caller out of the barrier.
+    func releaseMicrophoneSettlement() {
+        let waiting = settlementWaiters
+        settlementWaiters.removeAll()
+        for waiter in waiting { waiter.resume() }
+    }
+
     /// A scripted `states()` (see `scriptStates`) and how many times its consumer has pulled from it.
     private var scriptQueue: [ControlState]?
     private(set) var pulls = 0
@@ -125,6 +141,12 @@ final class FakeControlServing: ControlServing {
     }
 
     func saveSettings() { record("saveSettings") }
+
+    func settleMicrophoneSettings() async {
+        record("settleMicrophoneSettings")
+        guard parksMicrophoneSettlement else { return }
+        await withCheckedContinuation { settlementWaiters.append($0) }
+    }
     func start(title: String?) {
         record("start")
         if let title { storedTitle = title }

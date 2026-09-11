@@ -42,6 +42,34 @@ Consequences to keep in mind:
 - Work parked out of a plan goes to `docs/backlog/`, which is where scope lives between runs. The
   plan file is written once, executed once, archived, and left alone.
 
+## Branches: `dev` is where work lands, `main` is what has been accepted
+
+**Every change goes to `dev` first.** The `dev` flavor (`bash Scripts/bundle.sh dev` — and note that
+`bundle.sh` with no argument builds `dev`) is built from it, the user runs that build by hand, and only
+when it has been seen to work does `dev` merge into `main`. `main` is therefore not "the latest work";
+it is the last state a human accepted. Do not commit to `main`.
+
+⚠️ **This was written down on 2026-09-11, after it had already cost a divergence.** The rule existed in
+the user's head and nowhere else, so 57 commits of microphone work went straight onto `main` while the
+socket transport and the app icons sat on `socket-transport`, tagged `v0.3.0`, branched from the same
+commit and never merged. Neither line contained the other's feature; a fresh clone of `main` built an
+app with no icon and no control socket, and `git describe` on that line could not even see `v0.3.0`.
+The merge that reconciled them found two textual conflicts and **four** things that compiled and passed
+every test while being wrong — which is the real lesson here, not the bookkeeping.
+
+**What a merge of two long-lived lines owes, beyond a green gate.** The 696 tests that passed the
+moment the merge compiled proved nothing about the merge: neither branch had a test for the other's
+feature, so the suite was green *because* the interaction was untested. Every finding came from reading
+the seams instead. Ask, in this order:
+- **Which caller-supplied values did the other branch add?** (Here: a socket made `microphone_priority`
+  reachable by a stranger.)
+- **Which of my synchronous assumptions did the other branch make asynchronous — or give a second
+  client?** (Here: `applySettings` returns before it applies, which only a second client could observe.)
+- **Which invariant did the other branch state in a comment that my change quietly falsified?**
+  (Here: "every peer ships in the same binary", written before a Unix socket existed.)
+- **Which document did the other branch write against code I have since moved or rebuilt?**
+  (Here: `docs/ui-vocabulary.md`, read off a file that no longer lives at that path.)
+
 ## Three mandatory recording properties
 1. **Streaming writes to disk** (incremental, segmented) — never buffer a whole recording in memory.
 2. **Fault tolerance** — a restart/crash must not lose recorded audio; an interrupted recording is
@@ -96,7 +124,9 @@ Consequences to keep in mind:
   undecodable to an older client — that is a version bump, not an additive change.
 - `Sources/ActaKit/` — **pure logic, no I/O**: `Recovery`, `WAV`, `FFmpeg` (argument builders),
   `MeetingArchive`, `RecordingSettings`, `Diagnostics`, `SegmentLayout`, `SegmentProgress`,
-  `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`. Anything worth testing goes here —
+  `SessionManifest`, `SelfCheckTuning`, `ControllerMessage`, `ControlStringPolicy` (the shared
+  length/character bound the socket dispatcher enforces on every caller-supplied command-payload string).
+  Anything worth testing goes here —
   including **constants a test must assert exactly against** (`SelfCheckTuning.maxRestartAttempts`):
   `SelfCheck` is internal to `ActaRuntime`, and a threshold written once in the runtime and again in
   the test asserts only that the test agrees with itself. The same rule is what puts
@@ -115,7 +145,10 @@ Consequences to keep in mind:
   `ControlState+Mapping` — the transport boundary above it — `WireProjection` (the pure
   `ControlState` → `WireControlState` projection, plus `ControlRecordingLookup`), `ControlServing` (the
   narrow surface a transport may reach for; `ControlAPI` conforms) and `ControlDispatcher` (`@MainActor`,
-  conforms to `ControlRequestHandling`) — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
+  conforms to `ControlRequestHandling`) — the Unix-socket transport over it —
+  `ControlEndpoint`/`BoundSocket`/`ControlSocketAddress` (the secure bind),
+  `ControlSocketServer`/`ControlConnection`/`ControlConnectionIO` (non-blocking serving) and
+  `ControlSocketHost` (the app-side lifecycle owner) — plus the injected seams — `CaptureSource`/`SCKCaptureSource`,
   `PermissionChecking`/`SystemPermissions`, `SelfCheckClock`/`SystemClock`, `RecordingDependencies`
   — FS, `powerd` and process I/O. Kept thin; decisions are delegated to ActaKit.
   **A pure function may live here when its *types* cannot leave.** `ControllerSnapshot` and
@@ -312,7 +345,53 @@ reached the log while the other three reached the user.
   façade's first production client. The **wire protocol and dispatcher have landed** too
   (`ActaControlProtocol`, `ControlDispatcher` over `ControlServing`, with `ControlDispatcherTestSupport`'s
   `FakeControlServing` injected by every dispatcher test) — the boundary's second client, in-process and
-  socket-free. What stays parked in `docs/backlog/` is the POSIX socket transport and the `actactl` CLI.
+  socket-free. The **POSIX socket transport has landed** too: the app hosts **exactly one** Unix control
+  socket at `~/Library/Application Support/<bundle-id>/control.sock` (`0600`, in a verified `0700` current-UID
+  parent), so a future `actactl` can reach the running app. **The trust boundary is the filesystem and
+  only that** — `AF_UNIX`/`SOCK_STREAM` only (never TCP, Bonjour or a network fallback), **no token** (a
+  `0600` socket in a `0700` user-private directory is the whole boundary; any same-UID process can already
+  act as the user), and no launch-on-demand (an absent socket means "not running"). The pieces:
+  `ControlEndpoint`/`BoundSocket`/`ControlSocketAddress` (the secure bind — `flock`ed init, exact
+  stale-socket recovery that never severs a live server nor removes a non-socket, device/inode-checked
+  teardown), `ControlSocketServer`/`ControlConnection`/`ControlConnectionIO` (non-blocking `DispatchSource`
+  I/O with single-owner descriptors, `SO_NOSIGPIPE`, deadlines, a ~16 connection cap, `watch` coalescing
+  to the newest state), and `ControlSocketHost` (the `ActaRuntime` lifecycle owner — `AppDelegate` is thin
+  wiring — with a **synchronous, bounded `teardown()`** because `applicationWillTerminate` is not an async
+  suspension point). ⚠️ **A socket dispatcher is `.socket`-confined, the in-process UI one `.trusted`**: a
+  socket client **cannot relocate the archive, rewrite the microphone priority list, or switch
+  management of the Mac's default input** (`settingsSet` ignores the wire `archive_path`,
+  `microphone_priority` and `manages_system_default_input`, substituting the current authoritative
+  values) and every caller-supplied command-payload string is
+  length-bounded and rejected for control characters (`ControlStringPolicy`) — the envelope's echo-only
+  correlation id and an unknown-tag discriminator are round-tripped verbatim and bounded only by the 64 KiB
+  frame limit, since neither reaches recorder state; a human relocating their own archive through the
+  menu is fine. What stays parked in `docs/backlog/` is the `actactl` CLI (Plan 3).
+  ⚠️ **The two microphone substitutions were added when the socket and the microphone feature were merged
+  (2026-09-11), and the rule they follow is not the archive path's.** A path is a filesystem reach; those
+  two fields decide whether Acta writes the **Mac's system-wide default input** and which device it
+  writes — state every other application on the machine reads, changed by an app the user never opened.
+  **Both, and unconditionally**: substituting only the enable flag would still let a client redirect
+  enforcement that is already on, and substituting the list only while enforcement is on would let a
+  client plant a list that takes effect the moment the user enables it. `captureMicrophoneChoice` is
+  deliberately **not** substituted — it selects the microphone *Acta's own recording* uses and writes
+  nothing outside the app, which is what a control client is for. ⚠️ It is an **authority** boundary, not
+  a security one: the socket is same-UID and such a process can do more directly. What it buys is that a
+  client round-tripping `settings_get` → edit → `settings_set` cannot silently carry the machine's audio
+  configuration along with the field it meant to change.
+  ⚠️ **`ok` on a settings write means *applied*, not *accepted*, and that needed a barrier
+  (`ControlServing.settleMicrophoneSettings()`).** `saveSettings()` hands the microphone half of the
+  settings to `MicrophoneManager`, which chains the application and returns; the capture policy is
+  published several suspension points later. In-process that never mattered — the same person clicks Save
+  and then Start, seconds apart. A socket client receives `ok` and can send `start` in the next frame, and
+  a recording resolving under the policy it just replaced is the one failure this feature exists to
+  prevent. The dispatcher awaits the barrier before acknowledging `settingsSave` **and before admitting a
+  `start`** (before the `canStart` guard, never between the guard and `start(title:)`, which must stay one
+  turn). The same rule holds for `.trusted`: the menu cannot lose the race in practice, but a weaker
+  guarantee for the in-process client is one nobody could state a reason for. **`AppDelegate` defers
+  hosting the socket** behind the same barrier for the same reason — ordering the calls at launch is not
+  enough, because `applySettings` returns before it has applied — and carries an `isTerminating` flag so a
+  bind that completes after quit began does not reopen the endpoint the quit-time teardown just closed.
+  ⚠️ That last part is in the **executable** target and no test reaches it; it is human-acceptance work.
   Assert only through the
   public surface: `isStopping` is
   `@Published private` and the derived flags (`isBusy`/`isSaving`/`isRecording`/`hasWorkInFlight`) are
@@ -473,5 +552,11 @@ reached the log while the other three reached the user.
     defects. `ControlViewModel` lives in `ActaRuntime` and its commands, subscriptions and intents are
     tested. What a human still has to look at is the **drawing**: that the priority rows never collapse
     on screen, that an absent preferred device is visibly removable, that Pause is reachable.
+- The control socket **hosted by a bundled app**. `ControlSocketHost` is driven in-process against a
+  fake handler (`ControlSocketHostTests`), but the real launch/quit lifecycle is not: that a bundled
+  `Acta Dev.app` creates the socket at the dev path on launch, that a second launch refuses, and that
+  quitting removes it, needs a human (a full `actactl` round-trip is Plan 3).
+- **The `dev`-flavor acceptance run itself.** A green gate on `dev` is not the gate — the branch rule
+  above exists because a human runs `Acta Dev.app` and looks. Nothing merges to `main` before that.
 - Validation Commands check compilation/build/lint, unit logic, the in-process pipeline **and** the
   process-based crash harness — but nothing above the seams: no ScreenCaptureKit, no TCC, no UI.

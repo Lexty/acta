@@ -31,11 +31,16 @@ case "$FLAVOR" in
     APP_NAME="Acta"
     BUNDLE_ID="dev.personal.acta"
     DISPLAY_NAME="Acta"
+    ICON_SRC="Resources/AppIcon.icns"
     ;;
   dev)
     APP_NAME="Acta Dev"
     BUNDLE_ID="dev.personal.acta-dev"
     DISPLAY_NAME="Acta Dev"
+    # Visibly different artwork (magenta rim, sparkle badge): with both flavors
+    # installed, the icon is the only cue in Finder and Spotlight telling you
+    # which one you are about to launch.
+    ICON_SRC="Resources/AppIcon-dev.icns"
     ;;
   *)
     echo "error: unknown flavor '$FLAVOR' (expected: stable | dev)" >&2
@@ -83,6 +88,15 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BIN" "$APP_DIR/Contents/MacOS/Acta"
 cp "$ROOT/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+
+# Icon, under the fixed name CFBundleIconFile points at. This has to happen
+# before codesign: the signature seals Contents/Resources, so a file added
+# afterwards makes the bundle fail verification.
+if [[ ! -f "$ROOT/$ICON_SRC" ]]; then
+  echo "error: missing $ICON_SRC — run Scripts/make-icons.sh" >&2
+  exit 1
+fi
+cp "$ROOT/$ICON_SRC" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 # Flavor identity + build provenance. ActaBuildFlavor/ActaBuildRevision are custom keys: with two
 # apps installed, "which build produced this recording?" must have an answer.

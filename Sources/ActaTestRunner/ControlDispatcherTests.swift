@@ -138,6 +138,29 @@ func aBusyStartIsRejectedWithoutChangingTheTitle(operation: ControlState.Operati
     #expect(!fake.calls.contains("start"))
 }
 
+// MARK: - A cancelled connection does not mutate the recorder
+
+@MainActor
+@available(macOS 15.0, *)
+@Test
+func aCancelledDispatchRefusesTheCommandBeforeTouchingTheRecorder() async {
+    let (dispatcher, fake) = makeDispatcher(ControlState(operation: .idle))
+
+    // A `.start` whose delivering connection has been cancelled (an orderly quit cancels every
+    // connection task) must not still begin a recording. The command reaches `handle` because Swift
+    // cancellation is cooperative — the frame was already read — so the dispatcher's own cancellation
+    // gate is the last thing between a torn-down connection and a recording begun during quit
+    // finalisation. Deterministic: the child runs `handle` only once this test suspends at
+    // `await task.value`, by which point `cancel()` has already marked it.
+    let task = Task { @MainActor in await dispatcher.handle(.start(title: "Ghost")) }
+    task.cancel()
+    let response = await task.value
+
+    #expect(response.wireError == .commandRejected(reason: ControlDispatcher.Rejection.closing))
+    #expect(!fake.calls.contains("start"))
+    #expect(fake.titleWithoutRecording.isEmpty)
+}
+
 // MARK: - stop
 
 @MainActor

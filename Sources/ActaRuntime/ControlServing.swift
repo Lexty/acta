@@ -32,6 +32,15 @@ public protocol ControlServing: AnyObject {
     var settings: RecordingSettings { get set }
     /// Normalise and persist the settings.
     func saveSettings()
+    /// Wait until every microphone setting submitted so far has actually been applied.
+    ///
+    /// ⚠️ **On the surface because the asynchrony is not the dispatcher's to see.** Writing `settings`
+    /// or calling `saveSettings()` hands the microphone half of them to an app-lifetime owner that
+    /// applies them across several suspension points and publishes the capture policy last. A client
+    /// that receives `ok` and sends `start` in the next frame would otherwise record under the policy it
+    /// just replaced. The dispatcher awaits this before acknowledging a settings write and before
+    /// admitting a start.
+    func settleMicrophoneSettings() async
 
     /// Start recording. A `title` sets the field first — which is exactly why the dispatcher checks
     /// `canStart` *before* calling this.

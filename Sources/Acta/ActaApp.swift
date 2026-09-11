@@ -1,6 +1,7 @@
 import SwiftUI
 import ActaKit
 import ActaRuntime
+import os
 
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
@@ -39,8 +40,23 @@ struct ActaApp: App {
 /// `menuBarExtraStyle(.window)` builds its content only when the user clicks — no SwiftUI hook
 /// fires before the menu is opened for the first time.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The control-socket lifecycle owner (`ControlSocketHost`), type-erased because that type is
+    /// macOS 15+ and this delegate is not gated. Nil on macOS 14, or if the bind was refused.
+    private var socketHost: AnyObject?
+
+    /// The deferred hosting of the socket — see `applicationDidFinishLaunching`.
+    private var hostingTask: Task<Void, Never>?
+
+    /// Whether quit has begun. ⚠️ **The reason hosting is deferred is the reason this exists**: a bind
+    /// that completes after `applicationShouldTerminate` has already torn the socket down would leave a
+    /// live endpoint for the whole finalisation window — the exact window the quit-time teardown exists
+    /// to close. Both this flag and the hosting task live on the main actor, so a check after the
+    /// suspension sees a `terminate` that has already run.
+    private var isTerminating = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
+            // Recovery of interrupted recordings must run first (SPEC §7).
             ControlAPI.shared.recover()
             // ⚠️ **Here, and not from a view.** `MenuBarExtra(.window)` builds its content on the first
             // click, so anything that waits for the menu has already missed every device change since
@@ -50,6 +66,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The persisted list and the enable flag, applied once at launch. Without this the settings
             // are stored and inert until someone happens to open the menu and save.
             ControlAPI.shared.microphone.applySettings(ControlAPI.shared.settings)
+            // Then host the control socket, **last and awaited**: it is the surface through which another
+            // process can ask for a recording, and it must not open before the policy deciding which
+            // microphone such a recording would use has actually been applied.
+            //
+            // ⚠️ **Ordering the calls is not enough, which is why this is a task.** `applySettings` chains
+            // the work and returns; the capture policy is published several suspension points later. A
+            // client connecting in that window would get a recording resolved against the initial empty
+            // priority list — "follow my list" silently meaning "whatever the Mac prefers", which is the
+            // one failure this feature exists to prevent.
+            hostingTask = Task { @MainActor [weak self] in
+                await ControlAPI.shared.microphone.settlePendingApplication()
+                guard let self, !self.isTerminating else { return }
+                let host = ControlSocketHost.live()
+                do {
+                    try host.start()
+                    self.socketHost = host
+                } catch {
+                    Logger(subsystem: BuildFlavor.logSubsystem, category: "AppDelegate")
+                        .error("control socket not hosted: \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+    }
+
+    /// Backstop teardown of the control socket on every **orderly** termination route. The socket is
+    /// already torn down at quit *initiation* in `applicationShouldTerminate` (so no client can start work
+    /// during a `.terminateLater` finalisation); `teardown()` is idempotent, so this covers any orderly
+    /// route that somehow reached termination without passing through that hook. It cannot cover
+    /// `SIGKILL`/crash; stale-socket recovery handles those.
+    func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        hostingTask?.cancel()
+        if #available(macOS 15.0, *) {
+            (socketHost as? ControlSocketHost)?.teardown()
         }
     }
 
@@ -59,8 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// but it exists for crashes, not for a deliberate user action — here the recording must be
     /// honestly finished and assembled.
     /// ⚠️ **Always `.terminateLater` now, and the ordering inside is the whole point.** Quitting has
-    /// three things to finish and they are not interchangeable:
+    /// four things to finish and they are not interchangeable:
     ///
+    /// 0. **Close the control socket before anything else**, synchronously, so no client can start work
+    ///    during the finalisation below. See the comment at the call.
     /// 1. **Stop writing the system default first.** It is the only part of shutdown that changes state
     ///    other applications depend on, and it must not still be correcting the default while the user
     ///    is quitting.
@@ -77,6 +129,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
+            // Quit is decided: tear the control socket down **now**, before finalising. Otherwise a socket
+            // client could `start` a fresh recording during the `stopAndWait()` window below — one that
+            // `applicationWillTerminate` (which only tears down, it does not finalise) would then let the
+            // process exit on without honouring it, defeating the whole point of this hook. `teardown()`
+            // is idempotent, so the `applicationWillTerminate` backstop stays a harmless no-op.
+            isTerminating = true
+            hostingTask?.cancel()
+            (socketHost as? ControlSocketHost)?.teardown()
+            socketHost = nil
+            // ⚠️ **No `hasWorkInFlight` early return here, deliberately.** This method used to answer
+            // `.terminateNow` when nothing was recording; microphone shutdown then never ran at all. The
+            // idle case still has work to do — releasing the default-input enforcement — so every quit
+            // goes through `.terminateLater` and the task below.
             Task {
                 await ControlAPI.shared.microphone.stopEnforcement()
                 if ControlAPI.shared.state.hasWorkInFlight {

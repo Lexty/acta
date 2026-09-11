@@ -342,6 +342,21 @@ public final class MicrophoneManager {
         }
     }
 
+    /// Wait until every application submitted **so far** has finished.
+    ///
+    /// ⚠️ **A queued application is invisible from outside, and that became a defect the day a second
+    /// client appeared.** `applySettings` returns as soon as it has chained the work; the choice, the
+    /// list and the management flag are published several suspensions later. In-process that was
+    /// harmless — the menu writes the settings and the same person then clicks Start, seconds away. Over
+    /// the control socket a client gets `ok` and can send `start` in the next frame, and a recording
+    /// resolving under the *previous* policy is the exact failure this feature exists to prevent.
+    ///
+    /// Joining the latest chained task is enough: `applySettings` links each application behind the
+    /// previous one, so the last one's completion implies every earlier one.
+    public func settlePendingApplication() async {
+        await applyTask?.value
+    }
+
     private var applyTask: Task<Void, Never>?
 
     /// Who last spoke for each setting this owner writes.

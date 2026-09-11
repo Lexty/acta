@@ -48,7 +48,7 @@ public enum BuildFlavor: String {
     /// lines indistinguishable in `log show` — exactly when telling them apart matters most. Outside
     /// a bundle (tests, `swift run`) there is no `Bundle.main.bundleIdentifier`, so we fall back to
     /// the constant.
-    static var logSubsystem: String {
+    public static var logSubsystem: String {
         Bundle.main.bundleIdentifier ?? AppInfo.bundleID
     }
 

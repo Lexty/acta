@@ -548,6 +548,13 @@ public final class ControlAPI {
         microphone.applySettings(controller.settings)
     }
 
+    /// Wait until every microphone setting submitted so far has actually been applied. See
+    /// `ControlServing.settleMicrophoneSettings()` for why the transport needs this and the menu does
+    /// not.
+    public func settleMicrophoneSettings() async {
+        await microphone.settlePendingApplication()
+    }
+
     /// Persist a change the caller has **already carried out**, and ask the microphone owner for
     /// nothing.
     ///

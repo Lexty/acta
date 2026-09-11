@@ -129,6 +129,11 @@ acta/
     ControlServing.swift            # the narrow surface a transport may reach for; ControlAPI conforms
     ControlDispatcher.swift         # Command → ControlServing call → CommandResult; the transport policy
     WireProjection.swift            # pure ControlState → WireControlState projection + ControlRecordingLookup
+    ControlEndpoint.swift           # secure Unix-socket bind (flock'd init, stale-socket recovery, device/inode teardown)
+    ControlSocketServer.swift       # non-blocking accept loop, ~16-connection cap, synchronous bounded shutdown
+    ControlConnection.swift         # serves one connection: read request, dispatch, reply; watch streaming
+    ControlConnectionIO.swift       # non-blocking read/write over one fd via DispatchSource, SO_NOSIGPIPE, deadlines
+    ControlSocketHost.swift         # app-side lifecycle owner; synchronous bounded teardown()
     RecordingController.swift       # UI-facing observable state, start/stop wiring
     RecordingSession.swift          # one recording's lifecycle: marker, capture, assembly, wake lock
     AudioRecorder.swift             # SCStream, separate tracks, streaming segment writes, flush
