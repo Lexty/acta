@@ -217,19 +217,41 @@ struct AudioActivityRuleTests {
         #expect(rule.evaluate(at: Self.at(2_330), context: Self.context) == .offerStop(recordingID: 1))
     }
 
-    @Test("a conversation that resumed cancels the reminder instead of asking about a live meeting")
-    func aResumedConversationDefusesTheSnooze() {
-        // ⚠️ The whole reason the snooze is re-checked rather than fired: a guaranteed prompt half an
-        // hour later is a prompt to stop a meeting that is under way.
+    @Test("a conversation that resumed cancels the reminder rather than merely deferring it")
+    func aResumedConversationCancelsTheSnooze() {
+        // ⚠️ **Cancellation, not suppression, and the difference is the whole point.** Codex was right
+        // that the previous version of this test proved only that a prompt is withheld *while* people
+        // are talking. The failure it must rule out is the other one: the meeting resumes, pauses again
+        // for a moment, and the half-hour reminder fires into a live conversation.
         var rule = Self.armed()
         Self.feed(&rule, from: 0, to: 60, microphone: Self.background, system: Self.background)
         Self.feed(&rule, from: 60, to: 200, microphone: Self.speech, system: Self.speech)
         Self.feed(&rule, from: 200, to: 520, microphone: Self.background, system: Self.background)
         _ = rule.evaluate(at: Self.at(520), context: Self.context)
         rule.armSnooze(until: Self.at(2_320), recordingID: 1)
-        // People come back and keep talking straight through the reminder.
-        Self.feed(&rule, from: 520, to: 2_400, microphone: Self.speech, system: Self.speech)
+
+        // People come back for a few minutes...
+        Self.feed(&rule, from: 520, to: 800, microphone: Self.speech, system: Self.speech)
+        // ...and then the room goes quiet again, for longer than the whole quiet interval.
+        Self.feed(&rule, from: 800, to: 2_400, microphone: Self.background, system: Self.background)
+        // The reminder is gone, not merely postponed: nothing is asked, then or later.
+        #expect(rule.evaluate(at: Self.at(2_330), context: Self.context) == .none)
         #expect(rule.evaluate(at: Self.at(2_400), context: Self.context) == .none)
+    }
+
+    @Test("a meter hiccup is not a resumed conversation and does not cancel the reminder")
+    func anUnknownStretchLeavesTheSnoozeArmed() {
+        // ⚠️ The converse, so cancellation does not quietly become "any interruption cancels it".
+        var rule = Self.armed()
+        Self.feed(&rule, from: 0, to: 60, microphone: Self.background, system: Self.background)
+        Self.feed(&rule, from: 60, to: 200, microphone: Self.speech, system: Self.speech)
+        Self.feed(&rule, from: 200, to: 520, microphone: Self.background, system: Self.background)
+        _ = rule.evaluate(at: Self.at(520), context: Self.context)
+        rule.armSnooze(until: Self.at(1_400), recordingID: 1)
+        // The meter fails for a while, then recovers, and the room was quiet throughout.
+        Self.feed(&rule, from: 520, to: 560, microphone: { _ in nil }, system: Self.background)
+        Self.feed(&rule, from: 560, to: 1_410, microphone: Self.background, system: Self.background)
+        #expect(rule.evaluate(at: Self.at(1_410), context: Self.context) == .offerStop(recordingID: 1))
     }
 
     @Test("a snooze does not survive into the next recording")
@@ -368,5 +390,118 @@ struct AudioActivitySilenceTests {
         Self.feed(&rule, from: 0, to: 420, microphone: { _ in -50 }, system: { _ in -50 })
         #expect(rule.state(of: .microphone, at: Self.at(420)) == .indistinguishable)
         #expect(rule.evaluate(at: Self.at(420), context: context) == .none)
+    }
+}
+
+/// The two traces Codex executed against the committed rule, at default configuration.
+///
+/// ⚠️ Both produce an **actual erroneous offer** without the fix, so they are regressions rather than
+/// hypotheticals. Both are written at the exact instant the quiet threshold is crossed, which is where
+/// a "it settles down eventually" fix would still be wrong.
+@Suite("Audio activity rule: failures at the threshold")
+struct AudioActivityThresholdTests {
+    private static let start = Date(timeIntervalSince1970: 5_000_000)
+    private static func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+    private static let context = AudioActivityRule.Context(isEnabled: true, recordingID: 1)
+
+    /// One second of both tracks, once per second, exactly as Codex's reproducer does.
+    private static func feed(_ rule: inout AudioActivityRule, from: Int, through: Int,
+                             microphone: Double?, system: Double?) {
+        for second in from...through {
+            rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1,
+                                             power: microphone), at: at(Double(second)))
+            rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1,
+                                             power: system), at: at(Double(second)))
+        }
+    }
+
+    private static func silentRule() -> AudioActivityRule {
+        var rule = AudioActivityRule()
+        rule.beginRecording(1, generation: 1)
+        feed(&rule, from: 0, through: 358, microphone: -100, system: -100)
+        return rule
+    }
+
+    @Test("the first unmeasurable buffer at the threshold withholds the offer")
+    func aFailedMeasurementAtTheThresholdIsNotQuiet() {
+        var rule = Self.silentRule()
+        // The measurement fails exactly as five minutes of quiet completes.
+        rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1, power: nil),
+                    at: Self.at(359))
+        rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1, power: -100),
+                    at: Self.at(359))
+        #expect(rule.state(of: .microphone, at: Self.at(359)) == .unknown)
+        #expect(rule.evaluate(at: Self.at(359), context: Self.context) == .none)
+    }
+
+    @Test("a non-finite measurement is refused the same way")
+    func aNonFiniteMeasurementAtTheThresholdIsNotQuiet() {
+        var rule = Self.silentRule()
+        rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1,
+                                         power: Double.nan), at: Self.at(359))
+        rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1, power: -100),
+                    at: Self.at(359))
+        #expect(rule.state(of: .microphone, at: Self.at(359)) == .unknown)
+        #expect(rule.evaluate(at: Self.at(359), context: Self.context) == .none)
+    }
+
+    @Test("a measurement that recovers is trusted again")
+    func measurementRecoveryRestoresEvidence() {
+        // ⚠️ The other half: invalidating on failure must not be a one-way door.
+        var rule = Self.silentRule()
+        rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1, power: nil),
+                    at: Self.at(359))
+        Self.feed(&rule, from: 360, through: 700, microphone: -100, system: -100)
+        #expect(rule.state(of: .microphone, at: Self.at(700)) == .quiet)
+        #expect(rule.evaluate(at: Self.at(700), context: Self.context) == .offerStop(recordingID: 1))
+    }
+
+    @Test("remote speech arriving at the threshold is not hidden by a silent history")
+    func speechAtTheThresholdOutranksTheWindow() {
+        // ⚠️ Six minutes of digital silence keep the ninetieth percentile at the floor, so the history
+        // still looks silent when somebody starts talking. What is happening now outranks it.
+        var rule = Self.silentRule()
+        rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1, power: -100),
+                    at: Self.at(359))
+        rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1, power: -20),
+                    at: Self.at(359))
+        #expect(rule.state(of: .system, at: Self.at(359)) == .active)
+        #expect(rule.evaluate(at: Self.at(359), context: Self.context) == .none)
+    }
+
+    @Test("speech on the microphone at the threshold is not hidden either")
+    func microphoneSpeechAtTheThresholdOutranksTheWindow() {
+        var rule = Self.silentRule()
+        rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1, power: -20),
+                    at: Self.at(359))
+        rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1, power: -100),
+                    at: Self.at(359))
+        #expect(rule.state(of: .microphone, at: Self.at(359)) == .active)
+        #expect(rule.evaluate(at: Self.at(359), context: Self.context) == .none)
+    }
+
+    @Test("speech arriving while an offer stands withdraws it")
+    func speechWithdrawsAStandingOfferOutOfASilentHistory() {
+        var rule = Self.silentRule()
+        Self.feed(&rule, from: 359, through: 400, microphone: -100, system: -100)
+        #expect(rule.evaluate(at: Self.at(400), context: Self.context) == .offerStop(recordingID: 1))
+        rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1, power: -20),
+                    at: Self.at(401))
+        #expect(rule.evaluate(at: Self.at(401), context: Self.context) == .withdraw(recordingID: 1))
+    }
+
+    @Test("an absurd finite power degrades the hint instead of trapping the conversion")
+    func anAbsurdPowerDoesNotTrap() {
+        // ⚠️ `Int(_:)` traps on a finite Double too large for `Int`, and a meter reporting nonsense must
+        // never be able to take a recording down with it.
+        var rule = AudioActivityRule()
+        rule.beginRecording(1, generation: 1)
+        for second in 0...120 {
+            rule.ingest(AudioActivitySummary(track: .microphone, generation: 1, duration: 1,
+                                             power: 1e308), at: Self.at(Double(second)))
+            rule.ingest(AudioActivitySummary(track: .system, generation: 1, duration: 1,
+                                             power: -1e308), at: Self.at(Double(second)))
+        }
+        #expect(rule.evaluate(at: Self.at(120), context: Self.context) == .none)
     }
 }

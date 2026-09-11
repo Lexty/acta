@@ -171,8 +171,11 @@ public struct AudioActivityRule: Sendable {
         private(set) var count = 0
 
         private static func bin(for power: Double) -> Int {
-            let rounded = Int(power.rounded())
-            return min(max(rounded, lowest), highest) - lowest
+            // ⚠️ **Clamped as a Double first.** `Int(_:)` traps on a finite value too large for `Int`,
+            // and "the meter reported something absurd" must degrade a hint, never crash a recording.
+            guard power.isFinite else { return 0 }
+            let bounded = min(max(power, Double(lowest)), Double(highest))
+            return Int(bounded.rounded()) - lowest
         }
 
         mutating func insert(_ power: Double, at now: Date) {
@@ -293,7 +296,11 @@ public struct AudioActivityRule: Sendable {
             // ⚠️ A failed measurement is *not* a quiet measurement. The track keeps its freshness — the
             // meter is running — but contributes no evidence, so the estimate cannot warm on it and the
             // quiet interval cannot advance on it either.
+            // ⚠️ **Invalidated now, not when the last good sample ages out.** Keeping the previous
+            // valid reading "fresh" for `staleAfter` means the first failed measurement — which can land
+            // exactly as the quiet threshold is crossed — still produces a confident offer.
             estimate.isActive = false
+            estimate.lastMeasuredAt = nil
             tracks[summary.track] = estimate
             refreshQuiet(at: now)
             return
@@ -353,9 +360,16 @@ public struct AudioActivityRule: Sendable {
     /// `evaluate` made the answer depend on how often the caller happened to poll: a coordinator that
     /// evaluated once every ten minutes would need ten more minutes of quiet before it could offer.
     private mutating func refreshQuiet(at now: Date) {
-        let bothQuiet = state(of: .microphone, at: now) == .quiet
-            && state(of: .system, at: now) == .quiet
-        if bothQuiet {
+        let microphone = state(of: .microphone, at: now)
+        let system = state(of: .system, at: now)
+        // ⚠️ **Positive activity cancels a snooze; uncertainty does not.** "Remind me in thirty minutes"
+        // is a request about a recording that had gone quiet. If the conversation resumed, the request
+        // no longer describes anything, and firing it later would be a prompt to stop a live meeting. A
+        // meter hiccup is not a resumed conversation, so only `.active` clears it.
+        if microphone == .active || system == .active {
+            snooze = nil
+        }
+        if microphone == .quiet && system == .quiet {
             if quietSince == nil { quietSince = now }
         } else {
             quietSince = nil
@@ -371,6 +385,17 @@ public struct AudioActivityRule: Sendable {
             return .unknown
         }
         guard isWarm(estimate), estimate.floor != nil else { return .warmingUp }
+
+        // ⚠️ **Current activity is decided before any historical shortcut.** A long silent history keeps
+        // the ninetieth percentile at the digital floor for many minutes, so a run of digital silence
+        // could mask speech that has *just* arrived — and the offer would appear while somebody was
+        // talking. What is happening now outranks what the window remembers.
+        if estimate.isActive { return .active }
+        if let lastActive = estimate.lastActiveAt,
+           now.timeIntervalSince(lastActive) <= configuration.activityHold {
+            return .active
+        }
+
         guard let low = estimate.levels.percentile(0.10),
               let high = estimate.levels.percentile(0.90) else { return .warmingUp }
         // ⚠️ **Measured digital silence is quiet, not ambiguous.** The spread test exists to refuse a
@@ -380,11 +405,7 @@ public struct AudioActivityRule: Sendable {
         // zero for ever.
         if high <= configuration.digitalSilenceFloor { return .quiet }
         if high - low < configuration.minimumDynamicRange { return .indistinguishable }
-        if let lastActive = estimate.lastActiveAt,
-           now.timeIntervalSince(lastActive) <= configuration.activityHold {
-            return .active
-        }
-        return estimate.isActive ? .active : .quiet
+        return .quiet
     }
 
     /// Ask the rule what to do, given the clock.

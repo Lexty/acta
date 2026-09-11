@@ -37,6 +37,12 @@ public final class AudioRecorder: @unchecked Sendable {
     private let systemWriter: SegmentWriter
     private let micWriter: SegmentWriter
 
+    /// The stop reminder's meter, when the reminder is wired up at all.
+    ///
+    /// ⚠️ **A passenger, never a dependency.** Nothing in the recording path reads its answer, waits on
+    /// it, or fails because of it: `append` writes first and measures afterwards.
+    private let activityMeter: (any AudioActivityMetering)?
+
     // Counters of received buffers per track under a lock: the buffer handler is driven by the
     // source's two queues, while the self-diagnosis/watchdog reads them from yet another one. We
     // count the tracks separately so that the system audio flow does not mask a dead microphone
@@ -121,9 +127,11 @@ public final class AudioRecorder: @unchecked Sendable {
                 segmentSeconds: Double = Double(SegmentLayout.defaultSegmentSeconds),
                 source: CaptureSource,
                 permissions: PermissionChecking,
-                microphone: any CaptureMicrophoneResolving) {
+                microphone: any CaptureMicrophoneResolving,
+                activityMeter: (any AudioActivityMetering)? = nil) {
         self.directory = directory
         self.source = source
+        self.activityMeter = activityMeter
         self.permissions = permissions
         self.microphone = microphone
         self.systemWriter = SegmentWriter(
@@ -481,6 +489,22 @@ public final class AudioRecorder: @unchecked Sendable {
             countBuffer(system: false)
             micWriter.append(buffer)
         }
+        // ⚠️ **After the write, and behind a gate that is read before anything else happens.** With the
+        // stop reminder switched off, `isEnabled` is false and nothing below runs at all — no format
+        // parsing, no sample walk, no allocation. The recording is the product; this is a hint about it,
+        // and the ordering here says which is which.
+        guard let activityMeter, activityMeter.isEnabled else { return }
+        activityMeter.measure(buffer,
+                              track: track == .system ? .system : .microphone,
+                              generation: currentGeneration)
+    }
+
+    /// The capture generation a summary belongs to, so a restart cannot warm the next recording's
+    /// estimate with the previous one's audio.
+    private var currentGeneration: UInt64 {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return generation
     }
 
     private func countBuffer(system: Bool) {
