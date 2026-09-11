@@ -132,8 +132,10 @@ struct MenuContent: View {
     @State private var chooserHeight: CGFloat = MenuContent.chooserMaxHeight
     /// How tall the chooser may get before it scrolls.
     ///
-    /// ⚠️ A judgement, not a measurement: it is about two thirds of a short laptop's menu-bar popover,
-    /// leaving the recordings list and the menu's own actions on screen at any device count.
+    /// ⚠️ A judgement, not a measurement, and scoped to what it can actually promise: it bounds **this
+    /// section's** growth with the device count. It is not proof that the whole menu fits — the other
+    /// sections, an expanded Settings above all, take height of their own, and nothing here has
+    /// measured a rendered popover.
     static let chooserMaxHeight: CGFloat = 320
 
     /// The current typed state — the single thing every view below reads.
@@ -282,8 +284,8 @@ struct MenuContent: View {
                 // ⚠️ **Bounded, because collapsing only fixed the height the user starts with.** The
                 // expanded body is the whole chooser — six rows here, plus a picker, plus feature (B)'s
                 // controls — and unbounded it reproduces the layout that ran off the screen the moment
-                // anyone opens it to do the thing it is for. Scrolling keeps the menu's own actions,
-                // Open Archive and Quit, reachable at every device count.
+                // anyone opens it to do the thing it is for. What the bound buys is that this section
+                // stops growing with the device count; it is not a claim that the whole menu fits.
                 // ⚠️ **Measured, not simply capped.** A `ScrollView` is greedy along its scroll axis:
                 // `.frame(maxHeight:)` alone makes it take the whole bound even when the content is half
                 // that, so a Mac with two microphones would show the list above a large empty gap. The
@@ -346,7 +348,7 @@ struct MenuContent: View {
             // recordings use the highest microphone on the list — which is false when the user has
             // asked for the Mac's input, and false again while a *Use now* is in force. An instruction
             // that teaches the feature must not be the thing that misdescribes it.
-            Text(listExplanation(mic)).font(.caption2).foregroundStyle(.secondary)
+            Text(mic.listExplanation).font(.caption2).foregroundStyle(.secondary)
 
             // ⚠️ **Priority order first, including entries whose device is absent.** Iterating the
             // device list rendered rows in enumeration order while the arrows moved a different list —
@@ -398,23 +400,6 @@ struct MenuContent: View {
             managementControls(mic)
         }
         .padding(.top, 4)
-    }
-
-    /// What the list actually governs, given the choice and any temporary override in force.
-    ///
-    /// ⚠️ Three sentences rather than one, because one sentence was wrong in two of the three states.
-    private func listExplanation(_ mic: ControlAPI.MicrophoneStatus) -> String {
-        if mic.override != nil {
-            return "A microphone is chosen for now, so it is used instead of your list. "
-                + "Resume automatic selection to go back to the list."
-        }
-        if mic.captureChoice == .systemDefault {
-            return "Recordings currently use the Mac's input at the time they start, not this list. "
-                + "Your list still decides what the Mac's input becomes, if you turn that on below."
-        }
-        return mic.priority.isEmpty
-            ? "Tick a microphone to put it on your list. Recordings use the highest one available."
-            : "Recordings use the highest one available. Use the arrows to reorder."
     }
 
     private func microphoneStates(_ mic: ControlAPI.MicrophoneStatus) -> some View {

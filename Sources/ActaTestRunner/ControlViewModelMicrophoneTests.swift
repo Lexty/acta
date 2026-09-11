@@ -931,6 +931,36 @@ struct MicrophoneSummaryTests {
             == "Some audio devices could not be read")
     }
 
+    /// ⚠️ **The sentence that teaches the list must be true in all four combinations.** It was wrong in
+    /// two of them: it promised the list governs recordings while the user had asked to follow the Mac's
+    /// input, and it promised that resuming automatic selection returns to the list when in that mode it
+    /// returns to the Mac's input.
+    @Test("the list explanation is true in each of the four combinations")
+    @available(macOS 15.0, *)
+    func theListExplanationIsTrueInEachCombination() {
+        let emptyList = status().listExplanation
+        #expect(emptyList.contains("Tick a microphone"))
+
+        let withList = status(priority: ["BuiltInMicrophoneDevice"]).listExplanation
+        #expect(withList.contains("highest one available"))
+        #expect(withList.contains("arrows"))
+
+        let systemDefault = status(choice: .systemDefault).listExplanation
+        #expect(systemDefault.contains("the Mac's input at the time they start"))
+        #expect(systemDefault.contains("Recordings use the highest") == false,
+                "system-default mode was told its recordings follow the list")
+
+        let overriddenInListMode = status(priority: ["BuiltInMicrophoneDevice"],
+                                          override: "00-00-5E-00-53-01:input").listExplanation
+        #expect(overriddenInListMode.contains("go back to the list"))
+
+        let overriddenInDefaultMode = status(override: "00-00-5E-00-53-01:input",
+                                             choice: .systemDefault).listExplanation
+        #expect(overriddenInDefaultMode.contains("go back to your recording setting"))
+        #expect(overriddenInDefaultMode.contains("go back to the list") == false,
+                "system-default mode was told that resuming returns it to the list")
+    }
+
     /// ⚠️ A device that is listed but **not usable** reaches the same policy case as one that is not
     /// there at all, so the wording has to cover both: telling a user to plug in something already
     /// plugged in sends them looking in the wrong place.
@@ -977,11 +1007,29 @@ struct ManagementSummaryTests {
 
     /// ⚠️ The states that used to report success. Each says what is actually true, and each asks to be
     /// acted on — which is what keeps the Pause and Off actions on screen while the chooser is closed.
+    /// ⚠️ **The two suspension causes are different facts and must not share a sentence.** Repeated
+    /// *reversals* mean something was observed putting the input back; repeated *convergence failures*
+    /// mean Acta's writes never visibly took at all, and nobody was seen doing anything. Telling the
+    /// user "something kept changing it back" for the second is inventing a culprit — and the earlier
+    /// version of these tests could not catch it, because it only asserted the text was non-empty and
+    /// did not claim to be holding.
+    @Test("a suspension says which kind it was, and invents no culprit")
+    @available(macOS 15.0, *)
+    func aSuspensionNamesItsOwnCause() {
+        #expect(status(.suspended(.repeatedReversals(3))).managementSummary
+            == "Stopped changing the Mac's input — something kept changing it back")
+        let convergence = status(.suspended(.repeatedConvergenceFailures(3))).managementSummary
+        #expect(convergence == "Stopped changing the Mac's input after repeated unsuccessful attempts")
+        #expect(convergence?.contains("changing it back") != true,
+                "a convergence failure was described as something changing the input back")
+    }
+
     @Test("a stopped or refused enforcement says so and asks to be acted on")
     @available(macOS 15.0, *)
     func stoppedEnforcementSaysSo() {
         let cases: [MicrophoneEnforcementStatus] = [
-            .suspended(.repeatedReversals(3)), .writesRefused(uids: ["BuiltInMicrophoneDevice"]),
+            .suspended(.repeatedReversals(3)), .suspended(.repeatedConvergenceFailures(3)),
+            .writesRefused(uids: ["BuiltInMicrophoneDevice"]),
             .degraded(reason: "scripted"), .uncertain(uid: "BuiltInMicrophoneDevice"),
             .waitingForPreferredDevice, .noEligibleDevice,
         ]
@@ -1002,5 +1050,61 @@ struct ManagementSummaryTests {
     func pauseIsNotAFault() {
         #expect(status(.paused).managementSummary == "Not changing the Mac's input — paused")
         #expect(status(.paused).managementNeedsAttention == false)
+    }
+}
+
+/// ⚠️ **The mapping, not the interpretation.** The shared interpretation was right and both callers
+/// still fed it different facts: the manager wrote a failed *default-input read* into the same field as
+/// a failed *enumeration*, so a machine whose device list read perfectly but whose default input would
+/// not answer was reported as one whose devices could not be read — and a recording following the
+/// user's list, which needs that read not at all, was shown as unavailable. Renaming the field at the
+/// projection boundary did not separate its inputs; this drives the real directory, manager and façade
+/// rather than a literal observation that would bypass the very step that was wrong.
+@Suite("Menu adapter: the summary over the real inventory")
+@MainActor
+struct MicrophoneSummaryMappingTests {
+    @Test("a failed default-input read does not make a list-mode recording unavailable")
+    @available(macOS 15.0, *)
+    func aFailedDefaultReadDoesNotBlockListMode() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                   defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        manager.setCaptureChoice(.followPriority)
+        directory.setDefaultInput(.failed(reason: "the default read failed"))
+        manager.refreshInventory()
+
+        let api = ControlAPI(controller: ControllerHarness(label: "summary-mapping").controller,
+                             microphone: manager)
+        defer { api.finish() }
+        let status = api.microphoneStatus
+
+        // The shipped resolver is the reference: list mode needs no default-input read.
+        guard case .pinned = manager.captureResolver.resolve() else {
+            Issue.record("the live resolver refused a list-mode recording it can serve"); return
+        }
+        #expect(status.captureSummary == "Will use MacBook Pro Microphone",
+                "the menu disagreed with the resolver: \(status.captureSummary)")
+        // The failure is still *reported* — combining them for display was never the problem.
+        #expect(status.inventoryFailure == "the default read failed")
+        #expect(status.enumerationFailure == nil)
+    }
+
+    /// The converse, which is why the failure may not simply be ignored: asking to follow the Mac's
+    /// input while that read is failing must still be blocked.
+    @Test("a failed default-input read still blocks following the Mac's input")
+    @available(macOS 15.0, *)
+    func aFailedDefaultReadStillBlocksSystemDefaultMode() async {
+        let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                                   defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        manager.setCaptureChoice(.systemDefault)
+        directory.setDefaultInput(.failed(reason: "the default read failed"))
+        manager.refreshInventory()
+
+        let api = ControlAPI(controller: ControllerHarness(label: "summary-mapping-converse").controller,
+                             microphone: manager)
+        defer { api.finish() }
+        #expect(api.microphoneStatus.captureSummary == "The audio devices could not be read")
     }
 }

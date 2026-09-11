@@ -222,8 +222,14 @@ public final class ControlAPI {
         public var enumerationFailure: String?
         /// Set while there is no change subscription.
         public var observationDegraded: String?
-        /// Either failure, for the one warning line the menu shows.
-        public var inventoryFailure: String? { enumerationFailure ?? observationDegraded }
+        /// Set when reading the Mac's **default input** failed. Blocks only what depends on that read —
+        /// a recording that follows the user's list needs it not at all.
+        public var defaultReadFailure: String?
+        /// Any of them, for the one warning line the menu shows. ⚠️ Combining them for *display* is
+        /// fine; combining them as *input to a selection* is what made a working machine unavailable.
+        public var inventoryFailure: String? {
+            enumerationFailure ?? defaultReadFailure ?? observationDegraded
+        }
         /// Devices the directory could not describe. ⚠️ **Not the same as absent**, and the menu must
         /// not turn an incomplete read into "there is nothing here".
         public var uninspectable: [String]
@@ -241,7 +247,8 @@ public final class ControlAPI {
                 CaptureObservation(devices: devices,
                                    uninspectable: uninspectable,
                                    enumerationFailure: enumerationFailure,
-                                   systemDefault: systemDefault),
+                                   systemDefault: systemDefault,
+                                   defaultReadFailure: defaultReadFailure),
                 priority: MicrophonePriority(order: priority, override: override),
                 choice: captureChoice)
         }
@@ -300,11 +307,43 @@ public final class ControlAPI {
                 return "Cannot confirm the Mac's input"
             case .paused:
                 return "Not changing the Mac's input — paused"
-            case .suspended:
+            case .suspended(.repeatedReversals):
                 return "Stopped changing the Mac's input — something kept changing it back"
+            case .suspended(.repeatedConvergenceFailures):
+                // ⚠️ **Not a reversal, and saying so was an invention.** This cause means Acta's writes
+                // never visibly took; nobody was observed changing anything back, and the budget keeps
+                // the two apart precisely so the user is not sent looking for a culprit that may not
+                // exist.
+                return "Stopped changing the Mac's input after repeated unsuccessful attempts"
             case .degraded:
                 return "Cannot read the Mac's input"
             }
+        }
+
+        /// What the priority list actually governs, given the choice and any override in force.
+        ///
+        /// ⚠️ **Four combinations, and the first version of this sentence was wrong in two of them.** It
+        /// said recordings use the highest microphone on the list — false when the user has asked to
+        /// follow the Mac's input, and false again while a *Use now* is in force. Then the corrected
+        /// version still told a user in system-default mode that resuming automatic selection returns
+        /// them "to the list", when it returns them to the Mac's input. An instruction that teaches the
+        /// feature must not be the thing that misdescribes it, so it lives here where it is tested
+        /// rather than in the view, where nothing checks a string.
+        public var listExplanation: String {
+            if override != nil {
+                return captureChoice == .systemDefault
+                    ? "A microphone is chosen for now, so it is used instead of the Mac's input. "
+                        + "Resume automatic selection to go back to your recording setting."
+                    : "A microphone is chosen for now, so it is used instead of your list. "
+                        + "Resume automatic selection to go back to the list."
+            }
+            if captureChoice == .systemDefault {
+                return "Recordings currently use the Mac's input at the time they start, not this list. "
+                    + "Your list still decides what the Mac's input becomes, if you turn that on below."
+            }
+            return priority.isEmpty
+                ? "Tick a microphone to put it on your list. Recordings use the highest one available."
+                : "Recordings use the highest one available. Use the arrows to reorder."
         }
 
         /// Whether that state is one the user should act on rather than merely be told about.
@@ -324,6 +363,7 @@ public final class ControlAPI {
                     enforcement: MicrophoneEnforcementStatus = .disabled,
                     enumerationFailure: String? = nil,
                     observationDegraded: String? = nil,
+                    defaultReadFailure: String? = nil,
                     uninspectable: [String] = []) {
             self.devices = devices
             self.priority = priority
@@ -336,6 +376,7 @@ public final class ControlAPI {
             self.enforcement = enforcement
             self.enumerationFailure = enumerationFailure
             self.observationDegraded = observationDegraded
+            self.defaultReadFailure = defaultReadFailure
             self.uninspectable = uninspectable
         }
     }
@@ -389,6 +430,7 @@ public final class ControlAPI {
             enforcement: microphone.enforcement.status,
             enumerationFailure: microphone.inventory.failure,
             observationDegraded: microphone.inventory.observationDegraded,
+            defaultReadFailure: microphone.inventory.defaultReadFailure,
             // ⚠️ **Carried, not dropped.** Without it a snapshot that could not describe some driver
             // projected as a successfully enumerated empty machine, and the menu said "No microphones
             // found" — a settled claim about the hardware drawn from a read that admitted it was

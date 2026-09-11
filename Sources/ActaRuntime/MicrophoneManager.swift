@@ -50,8 +50,16 @@ public struct MicrophoneInventory: Equatable, Sendable {
     /// driver silently is indistinguishable from one where the device genuinely left, and consumers
     /// above act destructively on a departure.
     public var uninspectable: [String]
-    /// Set when the last enumeration **failed**, which is not the same as finding nothing.
+    /// Set when the last **enumeration** failed, which is not the same as finding nothing.
+    ///
+    /// ⚠️ **Only the enumeration.** This field used to take the default-input read's failure too, and
+    /// that conflation reached the menu: a machine whose device list read perfectly but whose default
+    /// input would not answer was reported as one whose devices could not be read, so a recording that
+    /// needed no such read at all was shown as unavailable. The live resolver kept the two apart; this
+    /// did not, and a shared interpretation is worth nothing when its callers feed it different facts.
     public var failure: String?
+    /// Set when reading the **default input** failed. Blocks only what depends on it.
+    public var defaultReadFailure: String?
     /// Set while the manager has no change subscription.
     ///
     /// ⚠️ **A separate field from `failure`, because they are separate facts and one hides.** A failed
@@ -65,11 +73,13 @@ public struct MicrophoneInventory: Equatable, Sendable {
     public init(devices: [AudioInputDevice] = [],
                 uninspectable: [String] = [],
                 failure: String? = nil,
+                defaultReadFailure: String? = nil,
                 observationDegraded: String? = nil,
                 observedDefault: ObservedDefaultInput = .unread) {
         self.devices = devices
         self.uninspectable = uninspectable
         self.failure = failure
+        self.defaultReadFailure = defaultReadFailure
         self.observationDegraded = observationDegraded
         self.observedDefault = observedDefault
     }
@@ -617,7 +627,7 @@ public final class MicrophoneManager {
         case .none: next.observedDefault = .noDefault
         case .failed(let reason):
             next.observedDefault = inventory.observedDefault
-            next.failure = next.failure ?? reason
+            next.defaultReadFailure = reason
         }
         guard next != inventory else { return }
         inventory = next
