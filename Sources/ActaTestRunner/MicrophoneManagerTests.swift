@@ -861,3 +861,42 @@ func aDelayedSeedAcknowledgementDoesNotCancelANewerOrder() async {
     // The choice landing proves the request reached its final publication rather than being dropped.
     #expect(manager.capturePreference.snapshot.choice == .systemDefault)
 }
+
+/// ⚠️ **"Was the writer" is not "is still the writer".** The main-actor mirror of the list used to be
+/// corrected from the seed's own return value whenever this command had done the seeding — but both of
+/// those flags describe the seed, neither notices a newer `setPriorityOrder` arriving during the
+/// reconciliation the Enable awaited, and the returned order was read before that await. So a cleared
+/// list came back as a stale non-empty one, and the next Enable then declined to seed a list that
+/// really was empty: the user is left on "waiting for a preferred microphone" with a perfectly good
+/// built-in microphone attached. A stale mirror is worse than no mirror, because the decision it feeds
+/// looks well-founded.
+@Test("a seed completing late does not restore a list that was cleared while it ran")
+@MainActor
+@available(macOS 15.0, *)
+func aSeedCompletionDoesNotRestoreAClearedKnownOrder() async {
+    let (directory, clock, manager) = makeGatedManager(devices: [.builtInMic(), .usbMic()],
+                                                       defaultInput: "00-00-5E-00-53-01:input")
+    directory.setWritesTakeEffect(false)
+    clock.hold()
+
+    let enable = Task { @MainActor in await manager.enableManagement() }
+    let seeded = await awaitAsyncCondition { await manager.reconciler.priority.order.isEmpty == false }
+    #expect(seeded, "the seed never reached the list, so there was nothing to supersede")
+
+    // The user clears the list while that Enable is still reconciling.
+    await manager.setPriorityOrder([])
+    #expect(await manager.reconciler.priority.order.isEmpty, "the list was not actually cleared")
+    #expect(manager.capturePreference.priority.order.isEmpty)
+
+    clock.release()
+    _ = await enable.value
+    #expect(await manager.reconciler.priority.order.isEmpty,
+            "the late completion changed the list itself, not only the mirror")
+
+    // The proof that the mirror matters: an empty list must seed again.
+    await manager.disableManagement()
+    let returned = await manager.enableManagement()
+    #expect(returned.isEmpty == false,
+            "a stale mirror made the manager decline to seed a list that really was empty: \(returned)")
+    #expect(await manager.reconciler.priority.order.isEmpty == false)
+}

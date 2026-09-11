@@ -173,11 +173,15 @@ public final class MicrophoneManager {
         // ⚠️ The proposal is handed over **only** when this turn decided to seed. Passing it regardless
         // and letting the reconciler decide is what put the decision on the far side of a suspension.
         let outcome = await reconciler.enable(seedingWith: willSeed ? proposal : [])
-        // ⚠️ Corrected **only when this command is the one that wrote the list**. `outcome.order` was
-        // read before the reconciliation this call awaited, so assigning it unconditionally would let a
-        // late completion put a stale value back into the mirror — the same shape as the defect above,
-        // one field over.
-        if willSeed, outcome.seeded { knownOrder = outcome.order }
+        // ⚠️ **No correction here, and the absence is the point.** An earlier version wrote
+        // `outcome.order` back into the mirror when this command had been the writer — but "was the
+        // writer" is not "is still the writer": both flags describe the seed, neither notices a newer
+        // `setPriorityOrder` arriving during the reconciliation this call awaited, and `outcome.order`
+        // was read before that await. So it could restore a superseded list into the mirror, and a
+        // later enable would then decline to seed a list that really was empty — leaving the user on
+        // "waiting for a preferred microphone" with a working built-in microphone in front of them.
+        // The assignment was also redundant: when the seed took, `knownOrder` was already set to that
+        // same proposal *before* suspending. A correction that can only be wrong is not a correction.
         let seeded = outcome.order
         managementEnabled = await reconciler.isEnabled
         await syncCapturePreference()
@@ -295,8 +299,14 @@ public final class MicrophoneManager {
         // ⚠️ **This read is a second suspension**, and the check above does not cover it: a newer
         // application can settle while it is in flight, and this one would then publish its older
         // `choice` on top. Rechecked below, after the value is in hand and before anything is published.
-        let priority = await reconciler.priority
+        // ⚠️ The enablement is read **first** so that nothing suspends between reading the order and
+        // mirroring it: an await in between is the same "read before, assign after" shape that made the
+        // seed's correction wrong, and would put a superseded list into the mirror the same way.
+        // ⚠️ **No test distinguishes this ordering** — swapping the two lines back leaves the suite
+        // green, and that is measured, not assumed. It is kept because the shape is the one that has
+        // now produced three defects in this file, not because anything catches it.
         let enabled = await reconciler.isEnabled
+        let priority = await reconciler.priority
         guard revision == settingsRevision, epoch == lifetimeEpoch, started else { return }
         managementEnabled = enabled
         knownOrder = priority.order
