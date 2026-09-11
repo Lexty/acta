@@ -251,6 +251,94 @@ struct MicrophoneActivityRuleTests {
         #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(120), context: context) == .none)
     }
 
+    // MARK: - Regressions found by executing the rule (Codex, 2026-09-12)
+
+    @Test("a partial list whose visible sibling is idle does not release the application")
+    func anIdleSiblingInAPartialListIsNotARelease() {
+        // ⚠️ The subtler half of "unknown is not idle", and the empty-partial test above misses it: the
+        // key *is* present in a partial snapshot, via a sibling process that is genuinely idle, while
+        // the process that actually held the input is the one missing. Folding that into `released`
+        // ends the episode and asks about the same conversation twice.
+        var rule = Self.armedRule()
+        let context = MicrophoneActivityRule.Context()
+        func pair(_ held: Bool?, sibling: Bool?) -> AudioProcessSnapshot {
+            var processes = [AudioProcessObservation(pid: 502, bundleID: Self.slack,
+                                                     isRunningInput: sibling)]
+            if let held {
+                processes.insert(AudioProcessObservation(pid: 501, bundleID: Self.slack,
+                                                         isRunningInput: held), at: 0)
+            }
+            return AudioProcessSnapshot(processes: processes, isComplete: held != nil)
+        }
+        _ = rule.observe(pair(true, sibling: false), at: Self.at(1), context: context)
+        #expect(Self.offeredEpisode(rule.observe(pair(true, sibling: false), at: Self.at(4.1),
+                                                 context: context)) != nil)
+        // The holding process drops out of a snapshot that admits it is partial.
+        #expect(rule.observe(pair(nil, sibling: false), at: Self.at(5), context: context) == .none)
+        #expect(rule.observe(pair(nil, sibling: false), at: Self.at(36), context: context) == .none)
+        #expect(rule.observe(pair(true, sibling: false), at: Self.at(37), context: context) == .none)
+        #expect(rule.observe(pair(true, sibling: false), at: Self.at(40), context: context) == .none)
+    }
+
+    @Test("a first reading that failed does not spend the startup baseline")
+    func anUnreadableFirstSnapshotIsNotABaseline() {
+        // Acta launches mid-meeting and the very first enumeration fails. The first *successful*
+        // reading is then the baseline — otherwise it looks like a rising edge and prompts about a call
+        // that was already running, which is the one thing the baseline exists to prevent.
+        var rule = MicrophoneActivityRule()
+        let context = MicrophoneActivityRule.Context()
+        #expect(rule.observe(.unreadable, at: Self.start, context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(1), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(4), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(300), context: context) == .none)
+    }
+
+    @Test("a first reading whose property failed does not spend the baseline either")
+    func anUnreadablePropertyInTheFirstSnapshotIsNotABaseline() {
+        var rule = MicrophoneActivityRule()
+        let context = MicrophoneActivityRule.Context()
+        let unknownProperty = AudioProcessSnapshot(
+            processes: [AudioProcessObservation(pid: 501, bundleID: Self.slack, isRunningInput: nil)],
+            isComplete: true)
+        #expect(rule.observe(unknownProperty, at: Self.start, context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(1), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(4.1), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(300), context: context) == .none)
+    }
+
+    @Test("an excluded application does not swallow an allowed one that qualified with it")
+    func anExcludedKeyDoesNotSuppressAnEligibleOne() {
+        // ⚠️ A level meter left open in Sound Settings is exactly the application a user excludes, and
+        // it must not become a filter over every other application whose identifier sorts after it.
+        var rule = Self.armedRule()
+        let meter = "com.apple.systempreferences"
+        let context = MicrophoneActivityRule.Context(excludedBundleIDs: [meter])
+        let both = Self.holding([meter, Self.slack], names: [Self.slack: "Slack"])
+        _ = rule.observe(both, at: Self.at(1), context: context)
+        let outcome = rule.observe(both, at: Self.at(4.1), context: context)
+        #expect(Self.offeredEpisode(outcome)?.bundleID == Self.slack)
+    }
+
+    @Test("a later qualifier does not replace an offer still on screen")
+    func aStandingOfferIsNotOverwritten() {
+        // ⚠️ One prompt at a time is a rule about ownership, not only about a single sample: a second
+        // application qualifying four seconds later must not silently take over the slot, because the
+        // first offer's identity is what a click on the visible prompt will carry.
+        var rule = Self.armedRule()
+        let context = MicrophoneActivityRule.Context()
+        _ = rule.observe(Self.holding([Self.slack]), at: Self.at(1), context: context)
+        let first = Self.offeredEpisode(rule.observe(Self.holding([Self.slack]), at: Self.at(4.1),
+                                                     context: context))
+        #expect(first != nil)
+        let both = Self.holding([Self.slack, "us.zoom.xos"])
+        #expect(rule.observe(both, at: Self.at(5), context: context) == .none)
+        #expect(rule.observe(both, at: Self.at(9), context: context) == .none)
+        // Once the first offer is answered or expires, the slot is free again — but the episode that
+        // qualified while it was occupied is spent, so it does not arrive late.
+        rule.offerResolved(episodeID: first!.id)
+        #expect(rule.observe(both, at: Self.at(12), context: context) == .none)
+    }
+
     // MARK: - Suppression
 
     @Test("an excluded application never offers, and stays spent when the exclusion is lifted")

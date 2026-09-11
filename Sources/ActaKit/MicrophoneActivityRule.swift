@@ -14,19 +14,31 @@ public struct AudioProcessObservation: Equatable, Hashable, Sendable {
     public var pid: Int32
     /// The bundle identifier, when the process has one. `nil` is common and normal.
     public var bundleID: String?
-    /// A human-readable application name, when the system could supply one.
+    /// The name a **prompt** may show, and only when it describes something the user recognises.
     ///
-    /// ⚠️ **Never invented.** A browser helper holding the input for a call in a tab has no name that
-    /// describes the meeting, and the prompt must say so rather than guess a service.
+    /// ⚠️ **Measured, not assumed.** On this machine a call in a Safari tab is held by
+    /// `com.apple.WebKit.GPU`, whose name resolves to "Safari Graphics and Media", and Chrome's audio
+    /// runs in `com.google.Chrome.helper`, "Google Chrome Helper". Those are real names, and putting
+    /// either in "… is using the microphone" describes the meeting worse than saying nothing. So this
+    /// field is filled only for a regular, user-facing application; a helper leaves it `nil` and the
+    /// prompt names nobody.
     public var displayName: String?
+
+    /// The name of the process itself, helper or not.
+    ///
+    /// ⚠️ For a **list**, never a sentence. "Google Chrome Helper" is the right label for a row in the
+    /// exclusion list, because that is precisely what was excluded, and the wrong subject for a prompt
+    /// about a meeting.
+    public var processName: String?
     /// Whether the process is running IO with at least one active input stream. `nil` = unread.
     public var isRunningInput: Bool?
 
     public init(pid: Int32, bundleID: String? = nil, displayName: String? = nil,
-                isRunningInput: Bool?) {
+                processName: String? = nil, isRunningInput: Bool?) {
         self.pid = pid
         self.bundleID = bundleID
         self.displayName = displayName
+        self.processName = processName
         self.isRunningInput = isRunningInput
     }
 }
@@ -62,13 +74,17 @@ public struct MicrophoneActivityEpisode: Equatable, Sendable, Identifiable {
     public var id: UInt64
     /// The bundle identifier the episode is attributed to, when there is one.
     public var bundleID: String?
-    /// The name to show, when the system supplied one. `nil` → the prompt must not name an app.
+    /// The name to show, when the system supplied one for a regular application. `nil` → the prompt
+    /// must not name an app.
     public var displayName: String?
+    /// The process's own name, for labelling what an exclusion would actually cover.
+    public var processName: String?
 
-    public init(id: UInt64, bundleID: String?, displayName: String?) {
+    public init(id: UInt64, bundleID: String?, displayName: String?, processName: String? = nil) {
         self.id = id
         self.bundleID = bundleID
         self.displayName = displayName
+        self.processName = processName
     }
 
     /// Whether this episode can be attributed to a named application at all.
@@ -166,6 +182,10 @@ public struct MicrophoneActivityRule: Sendable {
 
     /// How one tracked application is currently seen.
     private enum Phase: Equatable, Sendable {
+        /// Never yet observed in a trustworthy reading. **Not** the same as idle: an application we
+        /// have never seen may already be in a call, and the first thing we learn about it must not be
+        /// read as it starting one.
+        case unseen
         /// Input observed released, and released long enough. No episode.
         case idle
         /// Input observed held since, not yet qualified.
@@ -192,7 +212,12 @@ public struct MicrophoneActivityRule: Sendable {
     private var configuration: Configuration
     private var phases: [Key: Phase] = [:]
     private var nextEpisodeID: UInt64 = 1
-    /// Whether any snapshot has been seen. The first one is the baseline and never offers.
+    /// Whether a trustworthy picture of the machine has been taken yet.
+    ///
+    /// ⚠️ **Set by the first *complete* snapshot, never merely by the first call.** A failed first
+    /// enumeration observes nothing, and letting it spend the baseline means the first successful
+    /// reading of a call already in progress looks like a rising edge — a prompt about a meeting that
+    /// was under way before Acta launched, which is the one thing the baseline exists to prevent.
     private var hasBaseline = false
     /// The episode a standing offer belongs to, so its end can be withdrawn exactly once.
     private var standingOffer: UInt64?
@@ -203,6 +228,8 @@ public struct MicrophoneActivityRule: Sendable {
     /// same episode is still a name the system gave us. Absent means absent: the prompt then says that
     /// some application is using the microphone, and names none.
     private var names: [Key: String] = [:]
+    /// The last process name seen for a key — what an exclusion row would be labelled with.
+    private var processNames: [Key: String] = [:]
 
     public init(configuration: Configuration = .default) {
         self.configuration = configuration
@@ -225,13 +252,21 @@ public struct MicrophoneActivityRule: Sendable {
         }
 
         if !hasBaseline {
-            // ⚠️ The baseline pass: everything already holding input becomes a spent episode, so the
-            // launch of Acta during a meeting is silent. Anything else is left as the transitions above
-            // left it — a machine with nothing recording starts genuinely idle.
+            guard snapshot.isComplete else { return .none }
             hasBaseline = true
+            // ⚠️ Everything holding the input at this instant is an episode that is already spent, so
+            // the launch of Acta during a meeting is silent. **And everything unreadable is spent too**:
+            // a key whose property failed in the baseline reading cannot be ruled out as already in a
+            // call, and guessing in the other direction is the prompt we must not produce. It costs one
+            // re-arm window of silence for that key if it was in fact idle.
             for (key, phase) in phases {
-                if case .holding = phase {
+                switch phase {
+                case .holding:
                     phases[key] = .spent(episodeID: mintEpisodeID())
+                case .unreadable(let previous) where Self.isUnseen(previous):
+                    phases[key] = .spent(episodeID: mintEpisodeID())
+                default:
+                    break
                 }
             }
             return .none
@@ -250,10 +285,11 @@ public struct MicrophoneActivityRule: Sendable {
     /// Keep every name the system managed to supply, keyed the same way the readings are.
     private mutating func rememberNames(from snapshot: AudioProcessSnapshot, context: Context) {
         for process in snapshot.processes {
-            guard let name = process.displayName, !name.isEmpty else { continue }
             if context.ownPIDs.contains(process.pid) { continue }
             if let bundleID = process.bundleID, context.ownBundleIDs.contains(bundleID) { continue }
-            names[process.bundleID.map { Key.bundle($0) } ?? .process(process.pid)] = name
+            let key = process.bundleID.map { Key.bundle($0) } ?? .process(process.pid)
+            if let name = process.displayName, !name.isEmpty { names[key] = name }
+            if let name = process.processName, !name.isEmpty { processNames[key] = name }
         }
     }
 
@@ -277,6 +313,7 @@ public struct MicrophoneActivityRule: Sendable {
     ///
     /// ⚠️ Acta's own processes are dropped here rather than filtered later, so its own capture can never
     /// create, extend or re-arm an episode.
+    // swiftlint:disable:next cyclomatic_complexity
     private static func readings(from snapshot: AudioProcessSnapshot,
                                  context: Context) -> [Key: Reading] {
         var readings: [Key: Reading] = [:]
@@ -292,6 +329,15 @@ public struct MicrophoneActivityRule: Sendable {
             }
             readings[key] = Self.stronger(readings[key], reading)
         }
+        // ⚠️ **A partial list cannot say that anything stopped**, and a visible idle sibling does not
+        // make it able to. The process that actually held the input is exactly the one that can be
+        // missing, so a key with no positively-held process in an incomplete snapshot is unreadable,
+        // never released. Positive evidence still counts: a process seen holding is holding.
+        if !snapshot.isComplete {
+            for (key, reading) in readings where reading == .released {
+                readings[key] = .unreadable
+            }
+        }
         return readings
     }
 
@@ -305,7 +351,7 @@ public struct MicrophoneActivityRule: Sendable {
     }
 
     private mutating func apply(_ reading: Reading, to key: Key, at now: Date) {
-        let current = phases[key] ?? .idle
+        let current = phases[key] ?? .unseen
         switch reading {
         case .unreadable:
             // Wrap once: an unreadable run remembers the phase it started from, not the last wrapper.
@@ -314,7 +360,7 @@ public struct MicrophoneActivityRule: Sendable {
 
         case .held:
             switch current {
-            case .idle:
+            case .unseen, .idle:
                 phases[key] = .holding(since: now)
             case .holding, .spent:
                 break
@@ -329,6 +375,9 @@ public struct MicrophoneActivityRule: Sendable {
 
         case .released:
             switch current {
+            case .unseen:
+                // Seen, and seen idle: now a later hold is a genuine rising edge.
+                phases[key] = .idle
             case .idle:
                 break
             case .holding:
@@ -344,13 +393,22 @@ public struct MicrophoneActivityRule: Sendable {
         }
     }
 
+    /// Whether an unreadable run started from a key we had never trustworthily observed.
+    private static func isUnseen(_ phase: Phase) -> Bool {
+        switch phase {
+        case .unseen: return true
+        case .unreadable(let inner): return isUnseen(inner)
+        default: return false
+        }
+    }
+
     /// Leaving an unreadable run on a **held** sample.
     ///
     /// ⚠️ Every clock restarts. The rule may only act on time it actually observed, and the gap is by
     /// definition unobserved: a hold that "completed" across it was never seen to complete.
     private static func resuming(_ previous: Phase, heldAt now: Date) -> Phase {
         switch previous {
-        case .idle, .holding: return .holding(since: now)
+        case .unseen, .idle, .holding: return .holding(since: now)
         case .spent(let episodeID): return .spent(episodeID: episodeID)
         case .releasing(_, let episodeID): return .spent(episodeID: episodeID)
         case .unreadable(let inner): return resuming(inner, heldAt: now)
@@ -361,6 +419,7 @@ public struct MicrophoneActivityRule: Sendable {
     /// either, so its clock restarts too.
     private static func resuming(_ previous: Phase, releasedAt now: Date) -> Phase {
         switch previous {
+        case .unseen: return .idle
         case .idle: return .idle
         case .holding: return .idle
         case .spent(let episodeID): return .releasing(since: now, episodeID: episodeID)
@@ -394,32 +453,41 @@ public struct MicrophoneActivityRule: Sendable {
             lhs.1 == rhs.1 ? Self.ordering(lhs.0) < Self.ordering(rhs.0) : lhs.1 < rhs.1
         }
 
-        guard let (key, _) = qualified.first else { return .none }
+        guard !qualified.isEmpty else { return .none }
 
-        // ⚠️ **Every key that qualified in this sample is spent, not only the one we offer for.** Two
-        // applications holding the input at the same instant are one situation, and the user's answer
-        // is about the situation. Leaving the runner-up `.holding` would hand it an offer on the very
-        // next sample — a second prompt, a fifth of a second later, for the same moment.
-        for (other, _) in qualified where other != key {
-            phases[other] = .spent(episodeID: mintEpisodeID())
+        // ⚠️ **The candidate is chosen from the eligible keys, and only then is everything spent.**
+        // Picking `qualified.first` and *then* testing the exclusion made an excluded application into
+        // a filter over every other one: a level meter left open in Sound Settings, whose identifier
+        // happens to sort first, silently swallowed the Slack offer standing next to it.
+        let eligible = qualified.first { key, _ in
+            guard case .bundle(let bundleID) = key else { return true }
+            return !context.excludedBundleIDs.contains(bundleID)
+        }?.0
+
+        // ⚠️ **Spent either way, eligible or not.** Suppressed by a recording in progress, by an open
+        // menu, by the preference being off or by the exclusion list — the episode is over as far as
+        // prompting goes. Offering later, when the suppression lifts, means asking "record this call?"
+        // the moment the user has just stopped recording it, which is the one time the answer is
+        // obviously no.
+        var chosenEpisode: UInt64?
+        for (qualifiedKey, _) in qualified {
+            let episodeID = mintEpisodeID()
+            phases[qualifiedKey] = .spent(episodeID: episodeID)
+            if qualifiedKey == eligible { chosenEpisode = episodeID }
         }
 
-        let episodeID = mintEpisodeID()
-        // ⚠️ **Spent either way.** Suppressed by a recording in progress, by an open menu, by the
-        // preference being off or by the exclusion list — the episode is over as far as prompting goes.
-        // Offering later, when the suppression lifts, means asking "record this call?" the moment the
-        // user has just stopped recording it, which is the one time the answer is obviously no.
-        phases[key] = .spent(episodeID: episodeID)
-
+        guard let key = eligible, let episodeID = chosenEpisode else { return .none }
         guard context.isEnabled, !context.isBusy, !context.isMenuOpen else { return .none }
-        if case .bundle(let bundleID) = key, context.excludedBundleIDs.contains(bundleID) {
-            return .none
-        }
+        // ⚠️ **One offer owns the slot until it is resolved.** A second application qualifying while a
+        // prompt is still on screen must not take the slot over: the visible prompt's identity is what
+        // a click will carry, and overwriting it loses the episode that still needs withdrawing.
+        guard standingOffer == nil else { return .none }
 
         standingOffer = episodeID
         return .offer(MicrophoneActivityEpisode(id: episodeID,
                                                 bundleID: bundleIdentifier(of: key),
-                                                displayName: names[key]))
+                                                displayName: names[key],
+                                                processName: processNames[key]))
     }
 
     private static func ordering(_ key: Key) -> String {
@@ -434,6 +502,20 @@ public struct MicrophoneActivityRule: Sendable {
         return nil
     }
 
+    /// Whether `episodeID` is not merely alive but **currently holding the input**.
+    ///
+    /// ⚠️ **Liveness and actionability are different questions, and conflating them authorises a stale
+    /// click.** An episode survives a release for the whole re-arm window, which is what stops a device
+    /// handoff producing a second prompt — but that grace says nothing about whether a call is still in
+    /// progress. A prompt raised at t=4 whose application dropped the input at t=5 must not start a
+    /// recording when it is clicked at t=20. The coordinator asks *this* at the final admission point.
+    public func isEpisodeActionable(_ episodeID: UInt64) -> Bool {
+        phases.values.contains { phase in
+            if case .spent(let id) = phase { return id == episodeID }
+            return false
+        }
+    }
+
     private func isEpisodeLive(_ episodeID: UInt64) -> Bool {
         phases.values.contains { phase in
             switch phase {
@@ -442,7 +524,7 @@ public struct MicrophoneActivityRule: Sendable {
                 if case .spent(let id) = previous { return id == episodeID }
                 if case .releasing(_, let id) = previous { return id == episodeID }
                 return false
-            case .idle, .holding: return false
+            case .unseen, .idle, .holding: return false
             }
         }
     }

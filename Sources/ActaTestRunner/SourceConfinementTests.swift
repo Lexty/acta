@@ -58,8 +58,20 @@ struct SourceConfinementTests {
     /// somebody makes about this rule rather than a silent gap.
     private static let productionTargets = ["ActaKit", "ActaRuntime", "ActaControlProtocol", "Acta"]
 
-    /// The one file allowed to name the HAL.
-    private static let allowedAdapter = "CoreAudioDeviceDirectory.swift"
+    /// The files allowed to name the HAL.
+    ///
+    /// ⚠️ **Widened on purpose, and the reason is written here rather than discovered later.** The
+    /// device inventory is not the right owner of "which applications are using the microphone": that
+    /// is a different question over different objects, and making one adapter answer both would tie the
+    /// app-lifetime device inventory to a feature that can be switched off. So there are two adapters,
+    /// each over one family of HAL objects — and still no third.
+    private static let allowedAdapters: Set<String> = ["CoreAudioDeviceDirectory.swift",
+                                                       "AudioProcessReader.swift"]
+
+    /// ⚠️ **The process reader may only read.** The device adapter writes the Mac's default input,
+    /// which is the one thing Acta changes outside itself; the reader answering "who is recording" has
+    /// no business writing anything at all, and this is what keeps it that way.
+    private static let readOnlyAdapters: Set<String> = ["AudioProcessReader.swift"]
 
     /// ⚠️ **The confinement Task 8 exists for.** Keeping the HAL in one file is what lets everything
     /// above it be tested without a sound card — and what stops a second CoreAudio directory being
@@ -70,25 +82,42 @@ struct SourceConfinementTests {
         for target in Self.productionTargets {
             let directory = SourceConfinement.sourcesRoot.appendingPathComponent(target)
             for file in SourceConfinement.swiftFiles(under: directory) {
-                guard file.lastPathComponent != Self.allowedAdapter else { continue }
+                guard !Self.allowedAdapters.contains(file.lastPathComponent) else { continue }
                 let symbols = SourceConfinement.halSymbols(in: try String(contentsOf: file, encoding: .utf8))
                 if !symbols.isEmpty {
                     offenders.append("\(target)/\(file.lastPathComponent): \(symbols.joined(separator: ", "))")
                 }
             }
         }
-        #expect(offenders.isEmpty,
-                "the HAL must stay in \(Self.allowedAdapter): \(offenders.joined(separator: "; "))")
+        let allowed = Self.allowedAdapters.sorted().joined(separator: " or ")
+        let found = offenders.joined(separator: "; ")
+        #expect(offenders.isEmpty, "the HAL must stay in \(allowed): \(found)")
+    }
+
+    /// The half that keeps the widening honest: a read-only adapter that starts writing HAL properties
+    /// fails here rather than in a review.
+    @Test("the process reader never writes a HAL property")
+    func theProcessReaderIsReadOnly() throws {
+        for name in Self.readOnlyAdapters {
+            let file = SourceConfinement.sourcesRoot
+                .appendingPathComponent("ActaRuntime").appendingPathComponent(name)
+            let code = try String(contentsOf: file, encoding: .utf8)
+            #expect(!SourceConfinement.halSymbols(in: code).contains("AudioObjectSetPropertyData"),
+                    "\(name) must not write HAL properties")
+        }
     }
 
     /// The adapter is where the HAL lives, so it had better name it — otherwise this whole suite could
     /// pass over a codebase that had quietly moved the HAL somewhere the scanner does not look.
     @Test("the adapter really is where the HAL lives")
     func theAdapterNamesTheHAL() throws {
-        let adapter = SourceConfinement.sourcesRoot
-            .appendingPathComponent("ActaRuntime").appendingPathComponent(Self.allowedAdapter)
-        let symbols = SourceConfinement.halSymbols(in: try String(contentsOf: adapter, encoding: .utf8))
-        #expect(symbols.count >= 5, "the adapter names almost no HAL symbols — has the HAL moved?")
+        for name in Self.allowedAdapters {
+            let adapter = SourceConfinement.sourcesRoot
+                .appendingPathComponent("ActaRuntime").appendingPathComponent(name)
+            let symbols = SourceConfinement.halSymbols(in: try String(contentsOf: adapter,
+                                                                      encoding: .utf8))
+            #expect(symbols.count >= 5, "\(name) names almost no HAL symbols — has the HAL moved?")
+        }
     }
 
     /// ⚠️ **Deliberately excluded**: the live divergence probe of Task 9 must import `AVFoundation` and
