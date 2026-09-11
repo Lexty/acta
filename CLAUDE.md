@@ -57,6 +57,22 @@ app with no icon and no control socket, and `git describe` on that line could no
 The merge that reconciled them found two textual conflicts and **four** things that compiled and passed
 every test while being wrong — which is the real lesson here, not the bookkeeping.
 
+**The version number is bumped on `dev`; the tag is cut on `main`.** A version is a file change like any
+other, so it goes through `dev` — putting it straight on `main` is the thing the rule above forbids. A
+**tag** is a statement that a state was accepted, so it belongs on the merge commit in `main`, after the
+human acceptance run. Order: bump on `dev` → acceptance → merge to `main` → tag the merge. `git describe`
+then reads as "the last accepted release, plus N" on both branches, which is the only reading that is
+useful.
+
+⚠️ **Both halves of that were being done wrong, and the symptoms looked unrelated.** `v0.3.0` was cut on
+`socket-transport`, a branch that never reached `main`, so `git describe` from `main` could not see it at
+all and reported `v0.2.1-99`. Meanwhile `CFBundleShortVersionString` sat at **`0.1.0` from the package
+skeleton through four tags** — nobody noticed, because nothing in `Sources/` reads it: the version the
+app actually shows comes from `ActaBuildRevision`, which `bundle.sh` injects from `git describe` at
+bundle time. So the plist version is what **Finder and the Get Info panel** report, and it had been lying
+for two months. A number that no code reads is a number no test can catch; it is checked by remembering
+to bump it here.
+
 **What a merge of two long-lived lines owes, beyond a green gate.** The 696 tests that passed the
 moment the merge compiled proved nothing about the merge: neither branch had a test for the other's
 feature, so the suite was green *because* the interaction was untested. Every finding came from reading
