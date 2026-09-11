@@ -229,6 +229,19 @@ func awaitCondition(timeoutMilliseconds: Int = 2000,
     return condition()
 }
 
+/// The same bounded wait, for a condition that must be **asked of an actor**. A sync closure cannot
+/// await, and sampling an actor's state through a cached mirror is how a test ends up asserting on a
+/// value that lags the thing it is checking.
+func awaitAsyncCondition(timeoutMilliseconds: Int = 2000,
+                         _ condition: @escaping @Sendable () async -> Bool) async -> Bool {
+    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        if await condition() { return true }
+        await Task.yield()
+    }
+    return await condition()
+}
+
 /// A scripted `CaptureMicrophoneResolving`.
 ///
 /// ⚠️ **What it cannot prove, stated here rather than discovered later.** It hands back a uid and the

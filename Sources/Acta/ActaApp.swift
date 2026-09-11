@@ -299,8 +299,8 @@ struct MenuContent: View {
             // at its next start or recovery — a healthy capture is not preempted — while enabled
             // management of the Mac's input reconciles immediately. Conflating them would make the menu
             // lie about one of the two promises.
-            Text("Changes apply to the next recording. If Acta manages the Mac's input, that changes "
-                 + "right away.")
+            Text("Changes apply the next time capture starts — a new recording, or one this recording "
+                 + "restarts by itself. If Acta manages the Mac's input, that changes right away.")
                 .font(.caption2).foregroundStyle(.secondary)
 
             if mic.override != nil {

@@ -76,3 +76,32 @@ A stall whose cost is flat in the amount of work is evidence of *a* stall. It is
 stall, and certainly not of which subsystem. The right next step was to instrument the writer, which
 takes minutes; instead I wrote a backlog entry naming a cause I had not measured, and told the user
 their headset's format was implicated. Two of today's other findings have the same shape.
+
+## A second reproducer, measured 2026-09-11 (Task 9)
+
+Task 9's live identity probe reproduces item 1 on demand, which the original run could not.
+
+The probe's live tests call `AVCaptureDevice.DiscoverySession` — the first use of AVFoundation's
+**capture** stack anywhere in this binary. Measured:
+
+- the **first** `DiscoverySession` in a process costs **221 ms**; every later one **0.04 ms**. It is a
+  one-time initialization, not a per-call cost.
+- Paying it *inside* the parallel suite: the full gate goes from **7.6 s to 67 s**, and
+  `aRecordingBackedByAFakeSourceCrossesASegmentBoundaryAndAssembles` fails with `segmentCount == 0` —
+  `SegmentWriter.finish` exhausting its 30-second `pendingWrites` wait, exactly as in the original
+  finding.
+- Paying it **once, before the suite starts** (`MicrophoneIdentityProbe.warmUp()`, called from
+  `main.swift`): **7.8 s**, all tests mandatory, and the in-suite discoveries are free.
+- Stubbing AVFoundation while keeping every CoreAudio HAL read the probe makes: **7.2 s**. So the HAL
+  half is not implicated.
+
+⚠️ **The mechanism is still not established, and is deliberately not named here.** What is measured is
+the four numbers above. A plausible story — that capture-stack initialization needs servicing the main
+thread while a `@MainActor` test holds it — is a *story*; writing it down as the cause would be the
+same mistake this file was created to record. What it adds to item 1 is a cheap, deterministic
+reproducer: 220 ms of blocking work on the cooperative pool is enough to push concurrent segment
+finalisation past a 30-second timeout, which is a very large amplification and the thing worth
+explaining.
+
+`MicrophoneIdentityProbe.isWarm` exists so deleting the warm-up fails a test rather than silently
+restoring a 60-second flaky gate.

@@ -302,6 +302,12 @@ public final class ControlAPI {
     /// Turn management of the Mac's default input on, seeding the list if it is empty.
     public func enableMicrophoneManagement() async { _ = await microphone.enableManagement() }
     public func disableMicrophoneManagement() async { await microphone.disableManagement() }
+
+    /// Whether feature (B) is in force — the authoritative answer, not the published mirror. See
+    /// `MicrophoneManager.isManagingSystemInput`.
+    public var isMicrophoneManagementEnabled: Bool {
+        get async { await microphone.isManagingSystemInput }
+    }
     public func pauseMicrophoneManagement() async { await microphone.pauseEnforcement() }
     public func resumeMicrophoneManagement() async { await microphone.resumeEnforcement() }
     public func setMicrophonePriority(_ order: [String]) async { await microphone.setPriorityOrder(order) }

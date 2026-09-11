@@ -24,6 +24,25 @@ struct ControlViewModelMicrophoneTests {
         return (directory, manager, api, ControlViewModel(api: api))
     }
 
+    /// A harness whose reconciler can be **held mid-pass**, so a command can be observed in flight
+    /// instead of being assumed to have been.
+    @available(macOS 15.0, *)
+    private func gatedHarness(devices: [AudioInputDevice], defaultInput: String?)
+        -> (FakeAudioDeviceDirectory, GatedClock, MicrophoneManager, ControlAPI, ControlViewModel) {
+        let directory = FakeAudioDeviceDirectory(devices: devices, defaultInput: defaultInput)
+        let clock = GatedClock()
+        let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                                 makeClock: { clock },
+                                                                 makeWakeCenter: { NotificationCenter() }))
+        manager.start()
+        manager.refreshInventory()
+        let api = ControlAPI(controller: ControllerHarness(label: "menu-gated").controller,
+                             microphone: manager)
+        let model = ControlViewModel(api: api)
+        model.refreshMicrophone()
+        return (directory, clock, manager, api, model)
+    }
+
     /// ⚠️ **Two clicks in one turn both read the same cached order**, and each built a whole new list
     /// from it — so adding two microphones persisted only one. The edit is an *intent* applied to the
     /// authoritative order at the moment it runs.
@@ -46,31 +65,75 @@ struct ControlViewModelMicrophoneTests {
             == ["USBAudioDevice_UID", "00-00-5E-00-53-01:input"])
     }
 
-    /// ⚠️ **An older Enable must not outlive a newer Off.** Each command awaited its work and then wrote
-    /// a *captured* flag into settings, so a slow Enable released after an Off persisted ON — and wrote
-    /// the Mac's default input again. The same reentrancy family Task 6 fixed, one layer above it.
-    @Test("an Enable completing after an Off does not re-enable management")
+    /// ⚠️ **An older Enable must not outlive a newer Off**, and the first version of this test did not
+    /// arrange that at all: both commands were queued in one main-actor turn, its "settled" condition
+    /// was already true at setup, and **replacing the entire command body with a no-op still passed it**
+    /// — a review measured that, three runs out of three. It asserted that a machine which had never
+    /// been enabled was not enabled.
+    ///
+    /// So the overlap is now built and *proved*: the reconciler is held parked on its verification
+    /// deadline, the hold itself is the evidence the Enable entered, and the Off is issued against a
+    /// genuinely enabled machine.
+    @Test("an Enable held in flight cannot re-enable after the Off that followed it")
     @available(macOS 15.0, *)
     func aStaleEnableDoesNotWin() async {
-        let (directory, manager, api, model) = harness()
-        directory.setDevices([.builtInMic(), .airPods()])
-        manager.refreshInventory()
-        model.refreshMicrophone()
+        let (directory, clock, manager, api, model) =
+            gatedHarness(devices: [.builtInMic(), .airPods()], defaultInput: "00-00-5E-00-53-01:input")
 
+        // ⚠️ The write must not settle, or verification converges on its first read and never sleeps —
+        // there would be nothing to hold, and the overlap would again be imaginary.
+        directory.setWritesTakeEffect(false)
+        clock.hold()
         model.setManagingSystemInput(true)
+
+        // ⚠️ The evidence the previous version lacked: the Enable is *in* the reconciler and parked.
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the Enable never reached the reconciler — nothing was overlapped")
+        #expect(directory.attemptedWrites.isEmpty == false,
+                "enforcement never wrote the Mac's input, so it was never really on")
+
         model.setManagingSystemInput(false)
+        clock.release()
 
         let settled = await awaitCondition {
             MainActor.assumeIsolated { api.settings.managesSystemDefaultInput } == false
-                && MainActor.assumeIsolated { model.microphone.managingSystemInput } == false
         }
-        #expect(settled, "the Off never settled")
+        #expect(settled, "the Off was never persisted — it returns on the next launch")
+        // ⚠️ Asked of the reconciler, and awaited: the Enable's own settings save is still working its
+        // way through the manager's apply chain at this point, so sampling once would be sampling a
+        // race rather than the outcome.
+        let disabled = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+        #expect(disabled, "the released Enable re-enabled management after the user's Off")
+    }
 
-        // And nothing re-enables afterwards.
-        for _ in 0 ..< 40 { await Task.yield() }
-        #expect(await manager.reconciler.isEnabled == false)
-        #expect(api.settings.managesSystemDefaultInput == false)
-        _ = directory
+    /// ⚠️ **Pause withdraws permission to write, and a revocation that waits for the operation it is
+    /// meant to interrupt is not one.** Every microphone command shared a single queue, so a Pause
+    /// clicked while a *Use now* was parked on its verification deadline did not reach the reconciler
+    /// until that pass had finished — and the pass then performed one more write, which is exactly what
+    /// the plan says Pause prevents. Found by review; the queue is now per decision kind.
+    @Test("Pause reaches the reconciler while a Use now is still parked")
+    @available(macOS 15.0, *)
+    func pauseInterruptsAnInflightUseNow() async {
+        let (directory, clock, manager, _, model) =
+            gatedHarness(devices: [.builtInMic(), .airPods()], defaultInput: "BuiltInMicrophoneDevice")
+        _ = await manager.enableManagement()
+        model.refreshMicrophone()
+
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        model.useMicrophoneNow("00-00-5E-00-53-01:input")
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the Use now never reached the reconciler — nothing was interrupted")
+
+        model.pauseMicrophoneManagement()
+        let paused = await awaitEnforcement(manager) { $0.status == .paused }
+        #expect(paused != nil, "Pause waited behind the very operation it exists to interrupt")
+
+        let writesAtPause = directory.attemptedWrites
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        #expect(directory.attemptedWrites == writesAtPause,
+                "the released pass wrote the Mac's input after the user had paused")
     }
 
     /// ⚠️ **An open idle menu observed nothing.** `states()` is driven by the recording controller, and
@@ -125,6 +188,87 @@ struct ControlViewModelMicrophoneTests {
 
         #expect(api.microphoneStatus.isComplete)
         #expect(model.microphone.devices.isEmpty)
+    }
+
+    /// ⚠️ **Two unrelated decisions must not cancel each other, and sharing one counter made them.**
+    /// A single supersession counter across every exclusive command meant that picking a microphone in
+    /// the same turn as switching management off **discarded the Off entirely**: it never ran, so Acta
+    /// went on holding the Mac's default input after the user told it to stop. Worse than the
+    /// reentrancy bug supersession was added to prevent, and reached by a shorter path.
+    @Test("choosing a microphone does not withdraw an Off issued just before it")
+    @available(macOS 15.0, *)
+    func aUseNowDoesNotCancelAManagementOff() async {
+        let (directory, manager, api, model) = harness()
+        directory.setDevices([.builtInMic(), .usbMic()])
+        manager.refreshInventory()
+        _ = await manager.enableManagement()
+        model.refreshMicrophone()
+        #expect(await manager.reconciler.isEnabled, "the test never got management switched on")
+
+        model.setManagingSystemInput(false)
+        model.useMicrophoneNow("USBAudioDevice_UID")
+
+        let settled = await awaitCondition {
+            MainActor.assumeIsolated { manager.capturePreference.priority.override } == "USBAudioDevice_UID"
+        }
+        #expect(settled, "the Use now never landed")
+        #expect(await manager.reconciler.isEnabled == false,
+                "the user's Off was discarded by an unrelated microphone choice")
+        #expect(api.settings.managesSystemDefaultInput == false,
+                "the Off was never persisted, so it returns on the next launch")
+    }
+
+    /// The mirror image of the same defect: a management toggle must not throw away the microphone the
+    /// user just picked.
+    @Test("switching management does not withdraw a Use now issued just before it")
+    @available(macOS 15.0, *)
+    func aManagementToggleDoesNotCancelAUseNow() async {
+        let (directory, manager, api, model) = harness()
+        directory.setDevices([.builtInMic(), .usbMic()])
+        manager.refreshInventory()
+        model.refreshMicrophone()
+
+        model.useMicrophoneNow("USBAudioDevice_UID")
+        model.setManagingSystemInput(true)
+
+        let settled = await awaitCondition {
+            MainActor.assumeIsolated { api.settings.managesSystemDefaultInput } == true
+        }
+        #expect(settled, "management never came on")
+        #expect(await manager.reconciler.isEnabled)
+        #expect(manager.capturePreference.priority.override == "USBAudioDevice_UID",
+                "the microphone the user picked was discarded by an unrelated management toggle")
+    }
+
+    /// ⚠️ **No HAL event accompanies a recording starting.** `recordingFrom` is read from the
+    /// controller, so the microphone stream — which listens to the device inventory and to enforcement —
+    /// cannot see it change. An open menu that subscribed and then watched only that stream showed the
+    /// pin it happened to hold forever: naming a microphone after the recording had stopped.
+    @Test("an open menu follows the recording pin, which no device event announces")
+    @available(macOS 15.0, *)
+    func anOpenMenuFollowsTheRecordingPin() async {
+        let controller = ControllerHarness(label: "menu-pin")
+        defer { controller.tearDown() }
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                           defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        let api = ControlAPI(controller: controller.controller, microphone: manager)
+        defer { api.finish() }
+        let model = ControlViewModel(api: api)
+        let subscription = Task { await model.subscribe() }
+        defer { subscription.cancel() }
+
+        api.start(title: "Pinned")
+        let pinned = await awaitCondition {
+            MainActor.assumeIsolated { model.microphone.recordingFrom?.uid } == "BuiltInMicrophoneDevice"
+        }
+        #expect(pinned, "the open menu never learned which microphone the recording came up on")
+
+        await api.stopAndWait()
+        let cleared = await awaitCondition {
+            MainActor.assumeIsolated { model.microphone.recordingFrom } == nil
+        }
+        #expect(cleared, "the menu went on naming a microphone after the recording had stopped")
     }
 
     /// ⚠️ The optimistic value is the **request**, and it never drives "recording from" — a title is

@@ -514,19 +514,19 @@ a human remembering to run `grep`. The new rule gets a test rather than joining 
 identity. If a future macOS diverges, everything still compiles and the wrong microphone is recorded —
 or capture fails outright, since a UID `SCStream` rejects is as broken as one it misroutes.
 
-- [ ] A probe that enumerates **both** APIs live and compares the devices present
-- [ ] ⚠️ **Deriving both sides from the HAL proves nothing**, and a fake or a recorded fixture cannot
+- [x] A probe that enumerates **both** APIs live and compares the devices present
+- [x] ⚠️ **Deriving both sides from the HAL proves nothing**, and a fake or a recorded fixture cannot
       detect future divergence. It must be two independent live observations
-- [ ] ⚠️ **Distinguish the two negative results, and never merge them.** A device that was enumerated
+- [x] ⚠️ **Distinguish the two negative results, and never merge them.** A device that was enumerated
       and expected but whose identity does **not** correspond across the APIs is a **failure**. Test
       hardware that is simply absent (no Bluetooth device connected) is **incomplete coverage**,
       reported visibly through `.enabled(if:)`. Classifying a genuine discrepancy as "missing — skip"
       is the one outcome that would defeat the probe's purpose
-- [ ] **Specify the matching procedure, the command that runs it, and the result categories** — the
+- [x] **Specify the matching procedure, the command that runs it, and the result categories** — the
       probe is only useful if a human can run it deliberately and read its verdict
-- [ ] It lives outside production sources, with its scope explicitly excluded from the Task 8
+- [x] It lives outside production sources, with its scope explicitly excluded from the Task 8
       confinement (it must import `AVFoundation` by design)
-- [ ] ⚠️ State the claim honestly in the test's own doc comment: "detects divergence on the devices
+- [x] ⚠️ State the claim honestly in the test's own doc comment: "detects divergence on the devices
       exercised", **not** "guarantees compatibility with future macOS". UID equality also does not
       prove ScreenCaptureKit captured the intended microphone — that stays in manual acceptance
 

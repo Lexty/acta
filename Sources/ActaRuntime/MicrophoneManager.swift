@@ -157,6 +157,17 @@ public final class MicrophoneManager {
         return seeded
     }
 
+    /// Whether feature (B) is actually in force, **asked of the reconciler rather than of the mirror**.
+    ///
+    /// ⚠️ `enforcement` is a published *mirror*, updated by its own task, so it lags a `configure`
+    /// that has only just returned. Persisting from it wrote the previous value: a user's Off was saved
+    /// as On, and — because saving re-applies the settings — the save then switched management back on.
+    /// This is the authoritative answer, and it accounts for `enforcementAdmitted` refusing an enable
+    /// during shutdown, which a captured flag never could.
+    public var isManagingSystemInput: Bool {
+        get async { await reconciler.isEnabled }
+    }
+
     public func disableManagement() async {
         await reconciler.configure(order: capturePreference.priority.order, enabled: false)
         await syncCapturePreference()

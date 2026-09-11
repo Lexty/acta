@@ -40,8 +40,11 @@ public final class ControlViewModel: ObservableObject {
         microphone = api.microphoneStatus
     }
 
-    /// Everything the microphone section renders. Refreshed on every state the façade publishes and on
-    /// every microphone command, which is what the menu already does for the recording state.
+    /// Everything the microphone section renders. Refreshed from three places, and all three are
+    /// needed: the microphone stream (device arrivals, the Mac's input moving, enforcement suspending),
+    /// every controller state the façade publishes (`recordingFrom` lives on the controller, and no HAL
+    /// event accompanies a recording starting or a watchdog adopting a device) and every microphone
+    /// command.
     @Published public private(set) var microphone: ControlAPI.MicrophoneStatus
 
     /// A microphone the user has just picked, held locally until the status reflects it.
@@ -90,61 +93,71 @@ public final class ControlViewModel: ObservableObject {
 
     // MARK: - Microphone commands
 
-    /// Every microphone command runs here, **in order**, and each checks whether it is still the
-    /// user's current intent before publishing or persisting anything.
+    /// Microphone commands run on **one queue per independent decision**, and that shape is the whole
+    /// mechanism — two earlier versions of it were defects.
     ///
     /// ⚠️ **Unowned `Task`s around a two-stage change were a reentrancy bug one layer above the one
     /// Task 6 fixed.** Enable and disable each awaited a command and *then* wrote a captured `Bool`
     /// into settings: hold an Enable, complete an Off, release the Enable, and it persisted ON and
     /// wrote the system default again — after the user had turned it off. Ordering the saves was not
     /// enough, because the stale continuation is the part that publishes.
-    private func command(_ body: @escaping @Sendable @MainActor () async -> Void) {
-        enqueue(supersedes: false, body)
-    }
-
-    /// A command whose **latest** value is the user's intent: switching management on and then off is
-    /// one decision, not two to be applied in turn.
     ///
-    /// ⚠️ **Not the same as a priority edit**, which is what my first version got wrong: one counter
-    /// for everything meant a second click cancelled the first, so adding two microphones persisted
-    /// only the second — the same loss as the stale-base bug it replaced, arriving from the other
-    /// direction. Superseding is right when a later value *replaces* an earlier one and wrong when both
-    /// are wanted.
-    private func exclusiveCommand(_ body: @escaping @Sendable @MainActor () async -> Void) {
-        enqueue(supersedes: true, body)
+    /// ⚠️ **One queue for everything was the next defect, and a worse one.** Pause exists to withdraw
+    /// permission to write *now*; queued behind a *Use now* that is parked on its verification deadline,
+    /// it did not reach the reconciler until that pass had finished — and the pass then performed one
+    /// more write. A revocation that waits for the operation it is meant to interrupt is not a
+    /// revocation. So a decision only ever waits for decisions **of its own kind**.
+    ///
+    /// ⚠️ **And supersession is gone.** A single "latest wins" counter shared across kinds meant an Off
+    /// followed by a *Use now* discarded the Off entirely: management stayed on, still writing the Mac's
+    /// input after the user switched it off. Scoping the counter per family would have fixed that, but
+    /// the mechanism never distinguished any test — the queue is what fixes the reentrancy — and it had
+    /// by then caused two real defects. Ordered execution is kept; "latest wins" is not.
+    private enum CommandQueue: Hashable {
+        /// Feature (B): on, off, pause, resume.
+        case management
+        /// Which microphone Acta records from — *Use now*, *Resume automatic*.
+        case selection
+        /// The priority list. ⚠️ Two edits are **both** wanted and neither replaces the other, which is
+        /// why they are ordered against each other and against nothing else.
+        case priority
     }
 
-    private func enqueue(supersedes: Bool, _ body: @escaping @Sendable @MainActor () async -> Void) {
-        if supersedes { exclusiveIntent &+= 1 }
-        let mine = exclusiveIntent
-        let previous = commandChain
-        commandChain = Task { @MainActor [weak self] in
+    private func enqueue(_ queue: CommandQueue,
+                         _ body: @escaping @Sendable @MainActor () async -> Void) {
+        let previous = chains[queue]
+        chains[queue] = Task { @MainActor [weak self] in
             await previous?.value
             guard let self else { return }
-            // A superseded command publishes and persists nothing; a queued edit always runs.
-            //
-            // ⚠️ **The queue is what fixes the reported bug, and this check is belt and braces.** With
-            // commands chained, an Off cannot overtake an Enable and its continuation cannot run out of
-            // order, so removing this line fails no test — I checked. It is kept because superseding is
-            // the right meaning for a switch, and a future path that does not go through the chain would
-            // need it; it is recorded as undistinguished rather than implied to be load-bearing.
-            guard !supersedes || mine == exclusiveIntent else { return }
             await body()
             refreshMicrophone()
         }
     }
 
-    private var exclusiveIntent: UInt64 = 0
-    private var commandChain: Task<Void, Never>?
+    private var chains: [CommandQueue: Task<Void, Never>] = [:]
+
+    /// The authoritative enablement, written into **every** settings save this adapter makes.
+    ///
+    /// ⚠️ A save carries the whole `RecordingSettings`, and saving re-applies them — so a command that
+    /// captured `api.settings` before a revocation and wrote it back afterwards would switch management
+    /// on again. Reading the reconciler at write time is what stops any queue from undoing another's
+    /// revocation, without an epoch nobody can see.
+    private func persist(_ mutate: @escaping @MainActor (inout RecordingSettings) -> Void) async {
+        var settings = api.settings
+        mutate(&settings)
+        settings.managesSystemDefaultInput = await api.isMicrophoneManagementEnabled
+        api.settings = settings
+        api.saveSettings()
+    }
 
     /// *Use now* — one action with two effects, and the menu shows which of them landed.
     public func useMicrophoneNow(_ uid: String) {
         pendingSelection = uid
-        exclusiveCommand { [weak self] in await self?.api.useMicrophoneNow(uid: uid) }
+        enqueue(.selection) { [weak self] in await self?.api.useMicrophoneNow(uid: uid) }
     }
 
     public func resumeAutomaticMicrophoneSelection() {
-        exclusiveCommand { [weak self] in await self?.api.resumeAutomaticMicrophoneSelection() }
+        enqueue(.selection) { [weak self] in await self?.api.resumeAutomaticMicrophoneSelection() }
     }
 
     public func moveMicrophone(_ uid: String, up: Bool) {
@@ -172,7 +185,7 @@ public final class ControlViewModel: ObservableObject {
     }
 
     private func editPriority(_ edit: @escaping @Sendable ([String]) -> [String]) {
-        command { [weak self] in
+        enqueue(.priority) { [weak self] in
             guard let self else { return }
             // ⚠️ Read from the façade rather than the cached copy — also belt and braces, for the same
             // reason: the chain already guarantees the previous edit has published before this one
@@ -180,34 +193,33 @@ public final class ControlViewModel: ObservableObject {
             // that true if the chain ever stops being the only path.
             let order = edit(api.microphoneStatus.priority)
             await api.setMicrophonePriority(order)
-            var settings = api.settings
-            settings.microphonePriority = api.microphoneStatus.priority
-            api.settings = settings
-            api.saveSettings()
+            let applied = api.microphoneStatus.priority
+            await persist { $0.microphonePriority = applied }
         }
     }
 
     public func setManagingSystemInput(_ on: Bool) {
-        exclusiveCommand { [weak self] in
+        enqueue(.management) { [weak self] in
             guard let self else { return }
             if on { await api.enableMicrophoneManagement() } else { await api.disableMicrophoneManagement() }
-            var settings = api.settings
-            // ⚠️ Read back rather than replayed from the captured flag: what was actually applied is
-            // what gets persisted.
-            let status = api.microphoneStatus
-            settings.managesSystemDefaultInput = status.managingSystemInput
-            settings.microphonePriority = status.priority
-            api.settings = settings
-            api.saveSettings()
+            // ⚠️ **Read back rather than replayed from the captured flag** — what was actually applied
+            // is what gets persisted, which is what makes an enable refused during shutdown persist as
+            // off. ⚠️ And read back from the **reconciler**, not from `microphoneStatus`: that field
+            // comes from a published mirror which lags the `configure` that just returned, so it
+            // answered with the *previous* value. Since saving re-applies the settings, an Off was
+            // persisted as On and the save then switched management back on — the user's decision
+            // undone by its own write. `persist` is where that read lives now, for every save.
+            let applied = api.microphoneStatus.priority
+            await persist { $0.microphonePriority = applied }
         }
     }
 
     public func pauseMicrophoneManagement() {
-        command { [weak self] in await self?.api.pauseMicrophoneManagement() }
+        enqueue(.management) { [weak self] in await self?.api.pauseMicrophoneManagement() }
     }
 
     public func resumeMicrophoneManagement() {
-        command { [weak self] in await self?.api.resumeMicrophoneManagement() }
+        enqueue(.management) { [weak self] in await self?.api.resumeMicrophoneManagement() }
     }
 
     public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
@@ -229,6 +241,13 @@ public final class ControlViewModel: ObservableObject {
             titleText = snapshot.title
         }
         state = snapshot
+        // ⚠️ **The microphone status is refreshed here too, and removing this was a real regression.**
+        // `recordingFrom` is read from the *controller* (`ControlAPI.microphoneStatus` takes it from
+        // `controller.recordingMicrophone`), so it changes when a recording starts or stops and when the
+        // watchdog adopts a different device — none of which is a CoreAudio `DeviceChange`, so
+        // `microphoneStatuses()` never fires for any of them. With this line gone an open menu showed a
+        // stale pin indefinitely: still naming a microphone after the recording had stopped.
+        applyMicrophone(api.microphoneStatus)
     }
 
     // MARK: - Title
