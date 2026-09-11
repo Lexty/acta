@@ -351,6 +351,20 @@ public final class ControlAPI {
         microphone.apply(field)
     }
 
+    /// Persist a change the caller has **already carried out**, and ask the microphone owner for
+    /// nothing.
+    ///
+    /// ⚠️ **An acknowledgement is not a command, and treating it as one was the root of a family of
+    /// defects.** A control that switches management on has already enabled it; routing the subsequent
+    /// save through `apply` ran the grant a *second* time, as fresh work, outside the permission fence
+    /// that governed the first — so a Pause issued in between was cleared by the completion of the very
+    /// Enable it was clicked on top of, and a management field captured before an Off wrote the Mac's
+    /// input after it. Every save the menu makes is of this kind: the command performed the change, the
+    /// save records it.
+    public func persistSettings() {
+        controller.saveSettings()
+    }
+
     /// The saved recordings, newest first.
     public var recordings: [MeetingStore.Recording] { controller.recordings }
 

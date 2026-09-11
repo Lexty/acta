@@ -605,3 +605,51 @@ func theDirectEnforcementSwitchesUpdateTheMirror() async {
     await manager.disableEnforcement()
     #expect(manager.managementEnabled == false)
 }
+
+/// ⚠️ **The manager's application queue is a second writer with its own timeline**, and the adapter's
+/// permission fence cannot reach it. A management field captured before an explicit Off — which is how
+/// the control protocol and the launch application deliver settings — wrote the Mac's input after the
+/// Off had been proved effective. A final persisted "off" does not undo an OS write that already
+/// escaped.
+@Test("a management field queued before an explicit Off does not write after it")
+@MainActor
+@available(macOS 15.0, *)
+func aQueuedManagementFieldDoesNotWriteAfterAnOff() async {
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic(), .usbMic()],
+                                             defaultInput: "BuiltInMicrophoneDevice")
+    let clock = GatedClock()
+    let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                             makeClock: { clock },
+                                                             makeWakeCenter: { NotificationCenter() }))
+    manager.start()
+    manager.refreshInventory()
+    await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+    _ = await manager.enableManagement()
+
+    // Something else takes the input, so the next pass has work, cannot converge, and parks.
+    directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+    directory.setWritesTakeEffect(false)
+    clock.hold()
+    manager.applySettings(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                            managesSystemDefaultInput: true))
+    let held = await awaitCondition { clock.isHoldingSleeper }
+    #expect(held, "no application parked — nothing was queued behind one")
+
+    // Captured while the feature is on, queued behind the parked application.
+    manager.apply(.managesSystemDefaultInput(true))
+
+    await manager.disableManagement()
+    #expect(await manager.reconciler.isEnabled == false, "the Off did not take effect")
+    let writesAtOff = directory.attemptedWrites
+
+    directory.setWritesTakeEffect(true)
+    clock.release()
+    await manager.reconciler.waitForQuiescence()
+
+    let wroteAgain = await awaitCondition(timeoutMilliseconds: 500) {
+        directory.attemptedWrites != writesAtOff
+    }
+    #expect(wroteAgain == false,
+            "a management field queued before the Off wrote the Mac's input after it")
+    #expect(await manager.reconciler.isEnabled == false)
+}

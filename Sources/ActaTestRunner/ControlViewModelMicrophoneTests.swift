@@ -430,6 +430,50 @@ struct ControlViewModelMicrophoneTests {
                 "the Mac's input was written after the user paused enforcement")
     }
 
+    /// ⚠️ **An acknowledgement is not a command, and this is the timeline that proves it.** Switching
+    /// the feature on enables it and then *saves* that fact; routing the save through the manager ran
+    /// the grant a second time, as fresh work outside the permission fence that governed the first — so
+    /// the completion of the very Enable a Pause was clicked on top of cleared that Pause, reset the
+    /// conflict budget and wrote the Mac's input again. Checking the fence before the command body
+    /// cannot cover a grant that has already entered it.
+    ///
+    /// ⚠️ **Two changes close this timeline and no test separates them** — measured, and recorded here
+    /// rather than implied away. The adapter no longer asks the manager to apply what it has already
+    /// done (`ControlAPI.persistSettings`), *and* `applyIntent` uses the pause-preserving enable. Revert
+    /// either one alone and this test still passes; revert both and it fails with the reported trace,
+    /// two writes and a cleared pause. They are kept as two because they answer different questions —
+    /// who may command, and what an enable means for a pause — not because each is separately proved.
+    @Test("persisting an Enable does not undo a Pause clicked on top of it")
+    @available(macOS 15.0, *)
+    func persistingAnEnableDoesNotUndoAPause() async {
+        let (directory, clock, manager, _, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "00-00-5E-00-53-01:input")
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        model.refreshMicrophone()
+
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        model.setManagingSystemInput(true)
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the Enable never parked — its completion could not overlap anything")
+
+        model.pauseMicrophoneManagement()
+        let paused = await awaitEnforcement(manager) { $0.status == .paused }
+        #expect(paused != nil, "the Pause never took effect")
+        #expect(await manager.reconciler.isEnabled, "the feature was not on, so pausing proved nothing")
+        let writesAtPause = directory.attemptedWrites
+
+        // Writes settle again, so a second attempt would both land and be visible.
+        directory.setWritesTakeEffect(true)
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+
+        let cleared = await awaitEnforcement(manager, timeout: .milliseconds(500)) { $0.status != .paused }
+        #expect(cleared == nil, "the Enable's own completion cleared the Pause that followed it")
+        #expect(directory.attemptedWrites == writesAtPause,
+                "the Mac's input was written after the user paused enforcement")
+    }
+
     /// ⚠️ **Pause is not Off, and the revocation fence must not treat it as one.** A revocation cancels
     /// grants issued before it — an Enable still queued when the user switches the feature off must not
     /// run afterwards. But Pause *presupposes* enforcement: cancelling the Enable behind it leaves a

@@ -194,7 +194,12 @@ public final class ControlViewModel: ObservableObject {
     /// `MicrophoneReconciler.enable(seedingWith:)`.
     private func persist(_ field: RecordingSettings.Field) {
         api.settings = api.settings.merging(field)
-        api.saveSettings(applying: field)
+        // ⚠️ **Persisted, not applied.** Every save this adapter makes follows a command that has
+        // already carried the change out — `setManagingSystemInput` enables before it saves,
+        // `editPriority` sets the order before it saves, `setCaptureChoice` sets the choice before it
+        // saves — so asking the manager to apply the field runs the same grant twice, the second time
+        // as fresh work outside the fence that governed the first. See `ControlAPI.persistSettings`.
+        api.persistSettings()
     }
 
     /// *Use now* — one action with two effects, and the menu shows which of them landed.
