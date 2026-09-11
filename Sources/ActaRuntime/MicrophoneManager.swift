@@ -275,6 +275,50 @@ public final class MicrophoneManager {
         }
     }
 
+    /// Apply **one changed field**, on the same ordered queue.
+    ///
+    /// ⚠️ **This exists because replaying a whole captured `RecordingSettings` is a write of every
+    /// microphone setting, by anyone who saves anything.** A queued snapshot is stale by construction:
+    /// one captured while the feature was on wrote the Mac's input again *after* the user had switched
+    /// it off, and the withdrawal's own save carried the pre-edit priority list and put it back — both
+    /// measured by review. Changing `api.settings` synchronously cannot fix that, because the stale
+    /// value was already captured.
+    ///
+    /// So a save from a control says what it **changed**, and nothing else is replayed. The whole-value
+    /// `applySettings` stays for the two places where the whole value genuinely is the intent: the
+    /// launch application, and a client setting settings over the control protocol.
+    public func apply(_ field: RecordingSettings.Field) {
+        let previous = applyTask
+        applyTask = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.applyIntent(field)
+        }
+    }
+
+    private func applyIntent(_ field: RecordingSettings.Field) async {
+        // Admission first, as in `apply(_:)`: a save requested before Quit must not reach the OS after.
+        guard started else { return }
+        switch field {
+        case .microphonePriority(let order):
+            await reconciler.setOrder(order)
+            await syncCapturePreference()
+        case .managesSystemDefaultInput(let on):
+            if on, enforcementAdmitted {
+                await reconciler.enable()
+            } else {
+                await reconciler.disable()
+            }
+            managementEnabled = await reconciler.isEnabled
+            await syncCapturePreference()
+        case .captureMicrophoneChoice(let choice):
+            setCaptureChoice(choice)
+        case .archivePath, .segmentSeconds, .deleteSegmentsAfterAssembly:
+            // Nothing here owns these. ⚠️ Enumerated rather than defaulted, so a new microphone field
+            // that forgets to be handled fails to compile instead of going quiet.
+            break
+        }
+    }
+
     private var applyTask: Task<Void, Never>?
 
     /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every

@@ -340,6 +340,17 @@ public final class ControlAPI {
         microphone.applySettings(controller.settings)
     }
 
+    /// Persist, and hand the microphone owner **only the field that changed**.
+    ///
+    /// ⚠️ See `MicrophoneManager.apply(_ field:)`: replaying a whole captured settings value makes every
+    /// save a writer of every microphone setting, and a queued snapshot is stale by construction. The
+    /// whole-value form above stays for the launch application and the control protocol, where the whole
+    /// value really is the intent.
+    public func saveSettings(applying field: RecordingSettings.Field) {
+        controller.saveSettings()
+        microphone.apply(field)
+    }
+
     /// The saved recordings, newest first.
     public var recordings: [MeetingStore.Recording] { controller.recordings }
 

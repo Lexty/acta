@@ -325,7 +325,109 @@ struct ControlViewModelMicrophoneTests {
             let complaint = "switching management off discarded the priority edit "
                 + "(iteration \(iteration)): \(persisted)"
             #expect(persisted.contains("USBAudioDevice_UID"), "\(complaint)")
+            // ⚠️ And in the reconciler, which is what actually selects a microphone. A settings value
+            // that still names the edit while the reconciler has been reset to the old list would be a
+            // pass over half the state.
+            let reverted = await awaitAsyncCondition(timeoutMilliseconds: 100) {
+                await manager.reconciler.priority.order.contains("USBAudioDevice_UID") == false
+            }
+            let lost = "the reconciler's list lost the edit even though the settings kept it "
+                + "(iteration \(iteration))"
+            #expect(reverted == false, "\(lost)")
         }
+    }
+
+    /// ⚠️ **A settings application captured *before* the Off still writes after it.** Writing the
+    /// withdrawal into `api.settings` synchronously governs every *later* merge and nothing that was
+    /// already captured: `applySettings` holds a whole `RecordingSettings` value, and a snapshot taken
+    /// while the feature was on replays `enabled: true` whenever it finally runs. Found by review, which
+    /// measured the forbidden write landing after the Off had been proved effective.
+    ///
+    /// The fix is not another queue: a save from a control now says which **field** it changed, and
+    /// nothing else is replayed. An unrelated setting — here the segment length — reaches the microphone
+    /// owner as nothing at all.
+    @Test("a settings save queued before an Off cannot write the Mac's input after it")
+    @available(macOS 15.0, *)
+    func anAlreadyQueuedSettingsSaveCannotWriteAfterOff() async {
+        let (directory, clock, manager, api, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "BuiltInMicrophoneDevice")
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        model.refreshMicrophone()
+
+        // ⚠️ The feature must be **on and persisted on** before anything parks: the defect is a snapshot
+        // captured while `managesSystemDefaultInput` was true, and a settings value that still said false
+        // would carry nothing to replay.
+        model.setManagingSystemInput(true)
+        let on = await awaitCondition {
+            MainActor.assumeIsolated { api.settings.managesSystemDefaultInput } == true
+        }
+        #expect(on, "the feature never got switched on and persisted")
+
+        // Something else takes the input, so the next pass has work, cannot converge, and parks.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        directory.emit(.defaultInputChanged)
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "no pass parked — nothing was queued behind one")
+
+        // ⚠️ An **unrelated** save, made while the feature is on, so its captured value says so. Through
+        // the menu, which is the path that matters: before this it queued a whole-settings application
+        // carrying `managesSystemDefaultInput = true`.
+        model.segmentSecondsBinding.wrappedValue = 11
+
+        model.setManagingSystemInput(false)
+        let revoked = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+        #expect(revoked, "the Off did not withdraw permission")
+        let writesAtRevocation = directory.attemptedWrites
+
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        let wroteAgain = await awaitCondition(timeoutMilliseconds: 500) {
+            directory.attemptedWrites != writesAtRevocation
+        }
+        #expect(wroteAgain == false,
+                "a settings application captured before the Off wrote the Mac's input after it")
+        #expect(api.settings.managesSystemDefaultInput == false)
+    }
+
+    /// ⚠️ **A Resume queued before a Pause must not run after it.** Pause withdraws permission to write;
+    /// a Resume issued earlier and still waiting behind a parked one would clear the pause, reset the
+    /// conflict budget and write the Mac's input again. Exempting Pause from the fence entirely — my
+    /// first correction — allowed exactly that. Pause and Off withdraw *different* permissions, and both
+    /// requirements have to hold at once.
+    @Test("a Resume queued before a Pause does not undo it")
+    @available(macOS 15.0, *)
+    func aQueuedResumeDoesNotUndoALaterPause() async {
+        let (directory, clock, manager, _, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "BuiltInMicrophoneDevice")
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        _ = await manager.enableManagement()
+        await manager.pauseEnforcement()
+        model.refreshMicrophone()
+
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+
+        model.resumeMicrophoneManagement()
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "the first Resume never parked — nothing was queued behind it")
+        model.resumeMicrophoneManagement()
+
+        model.pauseMicrophoneManagement()
+        let paused = await awaitEnforcement(manager) { $0.status == .paused }
+        #expect(paused != nil, "the Pause never took effect")
+        let writesAtPause = directory.attemptedWrites
+
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        let resumed = await awaitEnforcement(manager, timeout: .milliseconds(500)) {
+            $0.status != .paused
+        }
+        #expect(resumed == nil, "a Resume queued before the Pause cleared it afterwards")
+        #expect(directory.attemptedWrites == writesAtPause,
+                "the Mac's input was written after the user paused enforcement")
     }
 
     /// ⚠️ **Pause is not Off, and the revocation fence must not treat it as one.** A revocation cancels

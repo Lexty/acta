@@ -133,33 +133,46 @@ public final class ControlViewModel: ObservableObject {
         case priority
     }
 
-    /// - Parameter withdrawingPermission: whether this command **takes back** permission to hold the
-    ///   Mac's input, cancelling grants issued before it.
-    ///   ⚠️ **Being on the revocation queue is not the same thing, and conflating them was a defect I
-    ///   introduced.** Pause must be admitted immediately — that is what the queue is for — but it
-    ///   *presupposes* enforcement: cancelling an Enable behind it left the feature **off** rather than
-    ///   paused, persisted off, and made the following Resume resume nothing. Only switching the feature
-    ///   off withdraws permission.
+    /// **Two permissions, because Pause and Off withdraw different things.**
+    ///
+    /// ⚠️ An earlier version of this had one counter and a boolean called "withdrawing permission", and
+    /// both readings of it were wrong in turn. Treating every revocation as withdrawing everything made
+    /// Pause cancel a queued Enable, so the feature ended **off** rather than paused. Exempting Pause
+    /// entirely then let a Resume queued *before* the Pause run after it — clearing the pause, resetting
+    /// the conflict budget and writing the Mac's input again.
+    ///
+    /// The two requirements are separate and both must hold: **Pause withdraws permission to write**
+    /// while leaving management enabled; **Off withdraws both**, because it takes management away
+    /// altogether. So a grant declares which permission it is asking for, and a revocation declares
+    /// which ones it takes back.
+    private enum Permission: Hashable {
+        /// Feature (B) being on at all. Granted by Enable, withdrawn by Off.
+        case management
+        /// Leave to write the Mac's default input. Granted by Resume, withdrawn by Pause **and** Off.
+        case writing
+    }
+
     private func enqueue(_ queue: CommandQueue,
-                         withdrawingPermission: Bool = false,
+                         granting: Permission? = nil,
+                         withdrawing: Set<Permission> = [],
                          _ body: @escaping @Sendable @MainActor () async -> Void) {
         // Bumped synchronously, at the moment the user acts — not when the command runs, which is the
         // whole point: the grant it cancels may not have started.
-        if withdrawingPermission { revocations &+= 1 }
-        let issuedAfter = revocations
+        for permission in withdrawing { withdrawals[permission, default: 0] &+= 1 }
+        let issuedAfter = granting.map { withdrawals[$0, default: 0] }
         let previous = chains[queue]
         chains[queue] = Task { @MainActor [weak self] in
             await previous?.value
             guard let self else { return }
-            // A grant issued before a revocation does not get to run after it.
-            if queue == .grant, issuedAfter != revocations { return }
+            // A grant issued before a revocation of the permission it asks for does not run after it.
+            if let granting, issuedAfter != self.withdrawals[granting, default: 0] { return }
             await body()
             refreshMicrophone()
         }
     }
 
     private var chains: [CommandQueue: Task<Void, Never>] = [:]
-    private var revocations: UInt64 = 0
+    private var withdrawals: [Permission: UInt64] = [:]
 
     /// The one place this adapter writes settings — **one field at a time, merged into the
     /// authoritative value, with no suspension inside**.
@@ -181,7 +194,7 @@ public final class ControlViewModel: ObservableObject {
     /// `MicrophoneReconciler.enable(seedingWith:)`.
     private func persist(_ field: RecordingSettings.Field) {
         api.settings = api.settings.merging(field)
-        api.saveSettings()
+        api.saveSettings(applying: field)
     }
 
     /// *Use now* — one action with two effects, and the menu shows which of them landed.
@@ -234,16 +247,20 @@ public final class ControlViewModel: ObservableObject {
 
     public func setManagingSystemInput(_ on: Bool) {
         if !on {
-            // ⚠️ **The revocation lands in the settings synchronously, at the moment the user acts.**
-            // A queue is not enough, because a settings *save* is another granting path: an unrelated
-            // command — a capture choice, a priority edit — merges its own field into a value that still
-            // says `managesSystemDefaultInput = true`, and saving re-applies the whole value, which
-            // re-enables the reconciler while the Off is still completing. Measured 20 runs in 20 by a
-            // review. Writing the field here, before anything is enqueued, means every later merge
-            // carries the withdrawal with it.
+            // ⚠️ **The revocation lands in the settings synchronously, at the moment the user acts**, so
+            // that a sibling save made afterwards merges into a value that already says off rather than
+            // carrying a stale `true` back.
+            // ⚠️ **It governs later merges and nothing already captured** — an earlier version of this
+            // comment claimed it covered "every queued settings application", which is false and was
+            // shown to be: a whole-settings value captured while the feature was on replays
+            // `enabled: true` whenever it finally runs, and wrote the Mac's input after an Off had been
+            // proved effective. What closes that is `MicrophoneManager.apply(_ field:)` — a save says
+            // which field it changed and nothing else is replayed — not this line.
             persist(.managesSystemDefaultInput(false))
         }
-        enqueue(on ? .grant : .revocation, withdrawingPermission: !on) { [weak self] in
+        enqueue(on ? .grant : .revocation,
+                granting: on ? .management : nil,
+                withdrawing: on ? [] : [.management, .writing]) { [weak self] in
             guard let self else { return }
             if on {
                 await api.enableMicrophoneManagement()
@@ -264,11 +281,15 @@ public final class ControlViewModel: ObservableObject {
     }
 
     public func pauseMicrophoneManagement() {
-        enqueue(.revocation) { [weak self] in await self?.api.pauseMicrophoneManagement() }
+        enqueue(.revocation, withdrawing: [.writing]) { [weak self] in
+            await self?.api.pauseMicrophoneManagement()
+        }
     }
 
     public func resumeMicrophoneManagement() {
-        enqueue(.grant) { [weak self] in await self?.api.resumeMicrophoneManagement() }
+        enqueue(.grant, granting: .writing) { [weak self] in
+            await self?.api.resumeMicrophoneManagement()
+        }
     }
 
     public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
