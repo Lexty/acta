@@ -3,7 +3,7 @@
 > **Status:** specification for autonomous implementation (executor — ralphex).
 > Self-contained: decisions are fixed, acceptance criteria are verifiable.
 > When in doubt, pick the option that minimises dependencies and maximises recording reliability.
-> **Language:** English only across UI, code, docs and git — see `CLAUDE.md`.
+> **Language:** English only across UI, code, docs and git — see `AGENTS.md`.
 
 ## 1. What this is and why
 
@@ -59,7 +59,7 @@ silently follow something nobody chose.
 `AVCaptureDevice.uniqueID` are the same string — **measured on this machine, documented by Apple
 nowhere as a single identity**. If a future macOS diverges, everything still compiles and either the
 wrong microphone is recorded or capture fails. `Scripts/probe-microphone-identity.sh` checks it against
-real hardware; see `CLAUDE.md` for what that probe can and cannot claim.
+real hardware; see `AGENTS.md` for what that probe can and cannot claim.
 
 **Definition of Done (v1):** start/stop from the menu bar; system audio and microphone written as
 separate streaming segment tracks; after `kill -9`/restart the recorded segments survive and are
@@ -150,7 +150,7 @@ acta/
   Sources/ActaTestRunner/           # where tests actually live (swift-testing @Test)
   Resources/{Info.plist, Acta.entitlements}
   Scripts/{bundle.sh, run.sh, lint.sh, test.sh}
-  CLAUDE.md, SPEC.md, .swiftlint.yml
+  AGENTS.md, CLAUDE.md, SPEC.md, .swiftlint.yml
 ```
 
 ## 6. Storage format
