@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import ActaKit
 import ActaRuntime
@@ -47,6 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The deferred hosting of the socket — see `applicationDidFinishLaunching`.
     private var hostingTask: Task<Void, Never>?
 
+    /// The reminder machinery: the rules, the poll, and the floating panel they drive.
+    ///
+    /// ⚠️ **App-lifetime, like the microphone manager and for the same reason.** `MenuBarExtra(.window)`
+    /// builds its content on the first click, so anything that waits for the menu has already missed
+    /// every call that started since launch — and this feature's whole promise is that it notices one
+    /// without being asked.
+    private var reminders: AnyObject?
+    private var reminderObserver: AnyCancellable?
+    /// Type-erased for the same reason `socketHost` is: the panel is macOS 15+ and this delegate is not
+    /// gated.
+    private var reminderPanelBox: AnyObject?
+
     /// Whether quit has begun. ⚠️ **The reason hosting is deferred is the reason this exists**: a bind
     /// that completes after `applicationShouldTerminate` has already torn the socket down would leave a
     /// live endpoint for the whole finalisation window — the exact window the quit-time teardown exists
@@ -75,6 +88,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // client connecting in that window would get a recording resolved against the initial empty
             // priority list — "follow my list" silently meaning "whatever the Mac prefers", which is the
             // one failure this feature exists to prevent.
+            // The reminders start after the microphone policy is applied and before the socket is
+            // hosted: they read settings and state, and never write either without a click.
+            let coordinator = ReminderCoordinator.live()
+            reminders = coordinator
+            reminderPanelBox = ReminderPanelController()
+            reminderObserver = coordinator.$prompt.sink { [weak self] prompt in
+                guard let self else { return }
+                guard let panel = self.reminderPanelBox as? ReminderPanelController else { return }
+                if let prompt {
+                    panel.present(prompt, coordinator: coordinator)
+                } else {
+                    panel.dismiss()
+                }
+            }
+            coordinator.start()
+
             hostingTask = Task { @MainActor [weak self] in
                 await ControlAPI.shared.microphone.settlePendingApplication()
                 guard let self, !self.isTerminating else { return }
@@ -98,6 +127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         isTerminating = true
         hostingTask?.cancel()
+        reminderObserver?.cancel()
+        if #available(macOS 15.0, *) {
+            (reminders as? ReminderCoordinator)?.stop()
+            (reminderPanelBox as? ReminderPanelController)?.dismiss()
+        }
         if #available(macOS 15.0, *) {
             (socketHost as? ControlSocketHost)?.teardown()
         }
@@ -746,15 +780,13 @@ struct MenuContent: View {
 
     // MARK: - Status presentation
 
-    /// The status header is derived from `ControlState`, reproducing today's phase-driven header: a
-    /// lifecycle failure reads as "Error" (a fatal stall shows it while the operation is still
-    /// `.saving`, exactly as `phase == .error` did); otherwise the operation drives it, and
-    /// `.starting` keeps the idle header just as the controller kept `phase == .idle` during a start.
+    /// The status header is derived from `ControlState`: a lifecycle failure reads as "Error" (a fatal
+    /// stall shows it while the operation is still `.saving`), and otherwise the operation drives it.
     private var statusIcon: String {
         if state.lifecycleFailure != nil { return "exclamationmark.triangle.fill" }
         switch state.operation {
-        case .idle, .starting: return "waveform"
-        case .recording: return "record.circle.fill"
+        case .idle: return "waveform"
+        case .starting, .recording: return "record.circle.fill"
         case .saving: return "square.and.arrow.down"
         }
     }
@@ -762,15 +794,21 @@ struct MenuContent: View {
     private var statusColor: Color {
         if state.lifecycleFailure != nil { return .red }
         switch state.operation {
-        case .idle, .starting, .saving: return .secondary
-        case .recording: return .red
+        case .idle, .saving: return .secondary
+        case .starting, .recording: return .red
         }
     }
 
+    /// ⚠️ **`.starting` used to say "Ready to record", and that was a lie the panel told about itself.**
+    /// Capture is already writing segments during a start — the button two centimetres below already
+    /// said "Starting…" — so the header claimed no recording was under way while one was. The comment
+    /// this replaces defended it as reproducing the old phase-driven header; reproducing a defect
+    /// faithfully is still shipping it.
     private var statusText: String {
         if state.lifecycleFailure != nil { return "Error" }
         switch state.operation {
-        case .idle, .starting: return "Ready to record"
+        case .idle: return "Ready to record"
+        case .starting: return "Starting…"
         case .recording: return "Recording"
         case .saving: return "Saving…"
         }
