@@ -149,7 +149,9 @@ public final class MicrophoneManager {
     /// ⚠️ Seeding goes through `MicrophoneSeeding.seeded`, which refuses to overwrite an existing list,
     /// so a disable/re-enable cycle cannot cost a user their hand-made order.
     public func enableManagement() async -> [String] {
-        managementGeneration &+= 1
+        // Seeding can change the list, so this speaks for the order as well as for management.
+        authority.management &+= 1
+        authority.order &+= 1
         // ⚠️ Only the *proposal* is computed here. Whether it is used at all is decided by the
         // reconciler against its own list, in one turn — see `MicrophoneReconciler.enable(seedingWith:)`.
         // Seeding from `capturePreference` and writing the result back lost an explicit priority edit
@@ -190,7 +192,7 @@ public final class MicrophoneManager {
     public private(set) var managementEnabled = false
 
     public func disableManagement() async {
-        managementGeneration &+= 1
+        authority.management &+= 1
         // ⚠️ **No order is supplied, and that is the fix.** Passing `capturePreference.priority.order`
         // made switching the feature off a *writer* of the list: a priority edit that reached the
         // reconciler while this copy was in hand was replaced by the stale one, losing the user's
@@ -208,6 +210,7 @@ public final class MicrophoneManager {
     /// not change what Acta records from: they are different promises and the plan forbids sharing a
     /// switch between them.
     public func setCaptureChoice(_ choice: CaptureMicrophoneChoice) {
+        authority.choice &+= 1
         capturePreference.set(.init(priority: capturePreference.priority, choice: choice))
     }
 
@@ -219,10 +222,10 @@ public final class MicrophoneManager {
     /// pinned to their preferred microphone. Applying one without the other is how the two promises
     /// start sharing a switch, which the plan forbids.
     public func apply(_ settings: RecordingSettings) async {
-        await apply(settings, managementIssuedAt: managementGeneration)
+        await apply(settings, issuedAt: authority)
     }
 
-    private func apply(_ settings: RecordingSettings, managementIssuedAt: UInt64) async {
+    private func apply(_ settings: RecordingSettings, issuedAt: Authority) async {
         settingsRevision &+= 1
         let revision = settingsRevision
         let epoch = lifetimeEpoch
@@ -240,14 +243,22 @@ public final class MicrophoneManager {
         // newer one had settled.
         // ⚠️ Enforcement is admitted, not merely current. A queued save that starts after the quit
         // sequence began applies its list and leaves the feature off.
-        if managementIssuedAt == managementGeneration {
+        // ⚠️ Each field on its own authority. `configure` stays the **atomic** path when both survive:
+        // setting the order and then flipping the switch separately is how switching the feature off
+        // once wrote the Mac's input on its way out.
+        let mayManage = issuedAt.management == authority.management
+        let mayOrder = issuedAt.order == authority.order
+        if mayManage, mayOrder {
             await reconciler.configure(order: settings.microphonePriority,
                                        enabled: settings.managesSystemDefaultInput && enforcementAdmitted)
-        } else {
-            // ⚠️ An explicit management command was issued after this value was captured, so its enable
-            // flag is stale and re-applying it is a write the user countermanded. The **list** is still
-            // this application's intent and is applied on its own.
+        } else if mayOrder {
             await reconciler.setOrder(settings.microphonePriority)
+        } else if mayManage {
+            if settings.managesSystemDefaultInput, enforcementAdmitted {
+                _ = await reconciler.enable(seedingWith: [])
+            } else {
+                await reconciler.disable()
+            }
         }
 
         // ⚠️ **Checked after the await, not only before it.** A newer application may have settled while
@@ -272,7 +283,12 @@ public final class MicrophoneManager {
         let enabled = await reconciler.isEnabled
         guard revision == settingsRevision, epoch == lifetimeEpoch, started else { return }
         managementEnabled = enabled
-        capturePreference.set(.init(priority: priority, choice: settings.captureMicrophoneChoice))
+        // ⚠️ **Re-checked here, after the suspensions above.** The choice is published last, so it is the
+        // field most exposed to a newer intent landing mid-application — and republishing a stale one
+        // means a recording resolves under a policy the user did not choose and did save.
+        let choice = issuedAt.choice == authority.choice ? settings.captureMicrophoneChoice
+                                                         : capturePreference.snapshot.choice
+        capturePreference.set(.init(priority: priority, choice: choice))
     }
 
     /// Apply settings as **owned, ordered work**.
@@ -281,11 +297,11 @@ public final class MicrophoneManager {
     /// other and nothing could wait for one at shutdown. Chaining them here gives both: applications run
     /// in the order they were requested, and `shutdown()` can join the last one instead of racing it.
     public func applySettings(_ settings: RecordingSettings) {
-        let issuedAt = managementGeneration
+        let issuedAt = authority
         let previous = applyTask
         applyTask = Task { @MainActor [weak self] in
             await previous?.value
-            await self?.apply(settings, managementIssuedAt: issuedAt)
+            await self?.apply(settings, issuedAt: issuedAt)
         }
     }
 
@@ -302,25 +318,26 @@ public final class MicrophoneManager {
     /// `applySettings` stays for the two places where the whole value genuinely is the intent: the
     /// launch application, and a client setting settings over the control protocol.
     public func apply(_ field: RecordingSettings.Field) {
-        let issuedAt = managementGeneration
+        let issuedAt = authority
         let previous = applyTask
         applyTask = Task { @MainActor [weak self] in
             await previous?.value
-            await self?.applyIntent(field, managementIssuedAt: issuedAt)
+            await self?.applyIntent(field, issuedAt: issuedAt)
         }
     }
 
-    private func applyIntent(_ field: RecordingSettings.Field, managementIssuedAt: UInt64) async {
+    private func applyIntent(_ field: RecordingSettings.Field, issuedAt: Authority) async {
         // Admission first, as in `apply(_:)`: a save requested before Quit must not reach the OS after.
         guard started else { return }
         switch field {
         case .microphonePriority(let order):
+            guard issuedAt.order == authority.order else { return }
             await reconciler.setOrder(order)
             await syncCapturePreference()
         case .managesSystemDefaultInput(let on):
             // ⚠️ Superseded by an explicit command issued after this was queued — applying it now would
             // be a write the user has already countermanded.
-            guard managementIssuedAt == managementGeneration else { return }
+            guard issuedAt.management == authority.management else { return }
             if on, enforcementAdmitted {
                 // ⚠️ `enable(seedingWith:)`, not `enable()`: the plain enable clears Pause and the
                 // conflict budget unconditionally, so persisting an enable cleared a Pause issued after
@@ -332,6 +349,7 @@ public final class MicrophoneManager {
             managementEnabled = await reconciler.isEnabled
             await syncCapturePreference()
         case .captureMicrophoneChoice(let choice):
+            guard issuedAt.choice == authority.choice else { return }
             setCaptureChoice(choice)
         case .archivePath, .segmentSeconds, .deleteSegmentsAfterAssembly:
             // Nothing here owns these. ⚠️ Enumerated rather than defaulted, so a new microphone field
@@ -342,14 +360,27 @@ public final class MicrophoneManager {
 
     private var applyTask: Task<Void, Never>?
 
-    /// Bumped by every **explicit** management command (enable, disable, quit).
+    /// Who last spoke for each setting this owner writes.
     ///
-    /// ⚠️ A settings application captured before one of those carries a stale enable flag, and applying
-    /// it later is a write the user has already countermanded — the defect the adapter's own fence could
-    /// not reach, because this queue is a second writer with its own timeline. A deferred application
-    /// whose generation has moved applies the **list only** and leaves enablement to the command that
-    /// superseded it.
-    private var managementGeneration: UInt64 = 0
+    /// ⚠️ **Per field, because the writers are per field.** Two paths write these: a direct command
+    /// (the menu, already carried out) and a whole-settings application (launch, or a client over the
+    /// control protocol), and the second is deferred, so its value is stale by construction. Giving only
+    /// *management* a submission-time authority left the other two: an application in flight republished
+    /// its `captureMicrophoneChoice` over a newer one the user had just picked and saved, and a queued
+    /// application's list-only branch reset a list a newer edit had already changed.
+    ///
+    /// ⚠️ **It invalidates a field, never an application.** Dropping a whole application would break the
+    /// converse — a whole-settings request submitted *after* a direct edit must still win — and
+    /// invalidating unrelated fields would throw away intent nobody countermanded. So an application
+    /// captures all three counters when it is **submitted** and re-checks each one **after every
+    /// suspension**, applying only the fields still current.
+    private struct Authority: Equatable {
+        var management: UInt64 = 0
+        var order: UInt64 = 0
+        var choice: UInt64 = 0
+    }
+
+    private var authority = Authority()
 
     /// The revision of the most recent settings application. ⚠️ Bumped before the first await so every
     /// continuation can tell whether it is still the current intent.
@@ -457,7 +488,7 @@ public final class MicrophoneManager {
         // after `stopEnforcement` had returned, with no user action after Quit at all.
         enforcementAdmitted = false
         settingsRevision &+= 1
-        managementGeneration &+= 1
+        authority.management &+= 1
         await reconciler.disable()
         managementEnabled = await reconciler.isEnabled
     }
@@ -689,11 +720,13 @@ public final class MicrophoneManager {
     // only some of the paths that change enablement update is a mirror that lies on the others. A
     // review found `stopEnforcement()` leaving it `true` while the reconciler was disabled.
     public func enableEnforcement() async {
+        authority.management &+= 1
         await reconciler.enable()
         managementEnabled = await reconciler.isEnabled
     }
 
     public func disableEnforcement() async {
+        authority.management &+= 1
         await reconciler.disable()
         managementEnabled = await reconciler.isEnabled
     }
@@ -704,6 +737,7 @@ public final class MicrophoneManager {
     public func resumeEnforcement() async { await reconciler.resume() }
 
     public func setPriorityOrder(_ order: [String]) async {
+        authority.order &+= 1
         await reconciler.setOrder(order)
         await syncCapturePreference()
     }

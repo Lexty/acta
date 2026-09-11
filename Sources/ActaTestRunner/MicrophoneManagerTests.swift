@@ -653,3 +653,71 @@ func aQueuedManagementFieldDoesNotWriteAfterAnOff() async {
             "a management field queued before the Off wrote the Mac's input after it")
     #expect(await manager.reconciler.isEnabled == false)
 }
+
+/// ⚠️ **Feature (B)'s promise, through the entry point production actually uses.** `ActaApp` hands the
+/// persisted settings to `applySettings` at launch — the *queued* form — and every other test drives
+/// the direct `apply`. After several rounds of rework around that queue (a management generation, a
+/// field-scoped variant, an acknowledgement path that deliberately applies nothing), the one thing none
+/// of them checked was that a user who had switched the feature on still gets it switched on when the
+/// app starts.
+@Test("launching with management persisted on enforces the saved list")
+@MainActor
+@available(macOS 15.0, *)
+func launchingWithManagementOnEnforcesTheSavedList() async {
+    let directory = FakeAudioDeviceDirectory(devices: [.builtInMic(), .airPods()],
+                                             defaultInput: "00-00-5E-00-53-01:input")
+    let clock = TestClock()
+    let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                             makeClock: { clock },
+                                                             makeWakeCenter: { NotificationCenter() }))
+    manager.start()
+    manager.refreshInventory()
+
+    // Exactly what the app does on launch: the whole persisted value, through the queued form.
+    manager.applySettings(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
+                                            managesSystemDefaultInput: true))
+
+    let enforced = await awaitCondition {
+        directory.attemptedWrites == ["BuiltInMicrophoneDevice"]
+    }
+    let wrote = "launching did not put the Mac's input back on the saved list: "
+        + "\(directory.attemptedWrites)"
+    #expect(enforced, "\(wrote)")
+    let enabled = await awaitAsyncCondition { await manager.reconciler.isEnabled }
+    #expect(enabled, "the feature was persisted on and did not come on at launch")
+    // ⚠️ Awaited, not sampled: `managementEnabled` is assigned at the *end* of the application, after
+    // the reconciler is already enforcing, so reading it the moment enforcement starts reads the gap
+    // rather than the outcome. The mirror is synchronous to read, not instantaneous to update.
+    let mirrored = await awaitCondition { MainActor.assumeIsolated { manager.managementEnabled } }
+    #expect(mirrored, "the synchronous mirror never caught up with the launch application")
+}
+
+/// ⚠️ **The converse of the per-field authority, and the thing it could plausibly break.** Invalidating
+/// a field whose intent has moved must not turn into "a direct command always beats a settings
+/// application": one submitted *after* the edit is the newer intent and has to win. Without this, the
+/// authority would quietly make the control protocol and the launch application unable to change
+/// anything the menu had ever touched.
+@Test("a settings application submitted after a direct edit still wins")
+@MainActor
+@available(macOS 15.0, *)
+func aSettingsApplicationSubmittedAfterADirectEditWins() async {
+    let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .usbMic()],
+                                                       defaultInput: "BuiltInMicrophoneDevice")
+    manager.start()
+    manager.refreshInventory()
+
+    // Direct commands first — the menu's path.
+    await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+    manager.setCaptureChoice(.followPriority)
+
+    // Then a whole-settings application, submitted afterwards: the newer intent for both fields.
+    manager.applySettings(RecordingSettings(microphonePriority: ["USBAudioDevice_UID"],
+                                            managesSystemDefaultInput: false,
+                                            captureMicrophoneChoice: .systemDefault))
+
+    let applied = await awaitAsyncCondition {
+        guard await manager.reconciler.priority.order == ["USBAudioDevice_UID"] else { return false }
+        return await MainActor.run { manager.capturePreference.snapshot.choice == .systemDefault }
+    }
+    #expect(applied, "a settings application submitted after a direct edit was discarded as stale")
+}

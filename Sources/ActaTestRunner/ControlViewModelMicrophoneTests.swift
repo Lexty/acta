@@ -474,6 +474,97 @@ struct ControlViewModelMicrophoneTests {
                 "the Mac's input was written after the user paused enforcement")
     }
 
+    /// ⚠️ **An application already in flight republished its capture choice over a newer one.** The
+    /// choice is the last thing a whole-settings application publishes, so it is the field most exposed
+    /// to an intent landing while the application is suspended — and once the adapter correctly stopped
+    /// re-applying its own acknowledgements, nothing restored the user's choice afterwards. A recording
+    /// would then resolve under a policy the user had not chosen and *had* saved.
+    @Test("an application in flight does not republish a stale capture choice")
+    @available(macOS 15.0, *)
+    func anInFlightApplicationDoesNotOverwriteANewerCaptureChoice() async {
+        let (directory, clock, manager, api, model) =
+            gatedHarness(devices: [.builtInMic(), .airPods()], defaultInput: "00-00-5E-00-53-01:input")
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        model.refreshMicrophone()
+
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        var on = api.settings
+        on.microphonePriority = ["BuiltInMicrophoneDevice"]
+        on.managesSystemDefaultInput = true
+        on.captureMicrophoneChoice = .followPriority
+        api.settings = on
+        api.saveSettings()
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "no application parked — nothing was in flight to overwrite anything")
+
+        model.setCaptureChoice(.systemDefault)
+        #expect(manager.capturePreference.snapshot.choice == .systemDefault,
+                "the choice never took effect, so the overwrite could not be observed")
+        #expect(api.settings.captureMicrophoneChoice == .systemDefault, "the choice was never saved")
+
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        let reverted = await awaitCondition(timeoutMilliseconds: 300) {
+            MainActor.assumeIsolated { manager.capturePreference.snapshot.choice } == .followPriority
+        }
+        #expect(reverted == false,
+                "the released application republished its stale capture choice over the user's")
+        #expect(api.settings.captureMicrophoneChoice == .systemDefault)
+    }
+
+    /// ⚠️ **And the list-only branch applied a list a newer edit had already superseded.** Giving
+    /// *management* a submission-time authority was right and incomplete: an application whose enable
+    /// flag is stale still wrote its `microphonePriority`, which is only this application's intent until
+    /// a newer list intent arrives. The persisted settings kept the edit while the reconciler — the
+    /// thing that actually selects a microphone — was reset behind it.
+    @Test("a queued application does not restore a list a newer edit replaced")
+    @available(macOS 15.0, *)
+    func aQueuedApplicationDoesNotRestoreASupersededList() async {
+        let (directory, clock, manager, api, model) =
+            gatedHarness(devices: [.builtInMic(), .usbMic()], defaultInput: "00-00-5E-00-53-01:input")
+        await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
+        _ = await manager.enableManagement()
+        var on = api.settings
+        on.microphonePriority = ["BuiltInMicrophoneDevice"]
+        on.managesSystemDefaultInput = true
+        api.settings = on
+        model.refreshMicrophone()
+
+        // ⚠️ The enable above already converged, so the next pass would settle instantly and park
+        // nothing. Something else has to take the input first for the application to have work.
+        directory.setDefaultInput(.device(uid: "00-00-5E-00-53-01:input"))
+        directory.setWritesTakeEffect(false)
+        clock.hold()
+        api.saveSettings()
+        let held = await awaitCondition { clock.isHoldingSleeper }
+        #expect(held, "no application parked — nothing was queued behind one")
+        api.saveSettings()   // queued, and carrying the pre-edit list
+
+        model.togglePreferred("USBAudioDevice_UID")
+        // ⚠️ Two reads, and neither may borrow the other's isolation: the reconciler is an actor and
+        // the settings are main-actor state, so `assumeIsolated` inside this non-isolated closure traps.
+        let edited = await awaitAsyncCondition {
+            guard await manager.reconciler.priority.order.contains("USBAudioDevice_UID") else {
+                return false
+            }
+            return await MainActor.run { api.settings.microphonePriority.contains("USBAudioDevice_UID") }
+        }
+        #expect(edited, "the edit never completed, so nothing could supersede anything")
+
+        model.setManagingSystemInput(false)
+        let off = await awaitAsyncCondition { await manager.reconciler.isEnabled == false }
+        #expect(off, "the Off never took effect")
+
+        clock.release()
+        await manager.reconciler.waitForQuiescence()
+        let lost = await awaitAsyncCondition(timeoutMilliseconds: 300) {
+            await manager.reconciler.priority.order.contains("USBAudioDevice_UID") == false
+        }
+        #expect(lost == false, "the released application restored the list the user's edit had replaced")
+        #expect(api.settings.microphonePriority.contains("USBAudioDevice_UID"))
+    }
+
     /// ⚠️ **Pause is not Off, and the revocation fence must not treat it as one.** A revocation cancels
     /// grants issued before it — an Enable still queued when the user switches the feature off must not
     /// run afterwards. But Pause *presupposes* enforcement: cancelling the Enable behind it leaves a
