@@ -1191,7 +1191,7 @@ struct MicrophoneOverrideClaimTests {
         let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), .usbMic()],
                             priority: ["BuiltInMicrophoneDevice"], override: "USBAudioDevice_UID")
         #expect(status.overrideStanding == .nextSelection)
-        #expect(status.listExplanation.contains("the next recording will use it"))
+        #expect(status.listExplanation.contains("the next time capture starts"))
     }
 
     /// ⚠️ **A running recording outranks a failed inventory read.** A failed refresh does not stop a
@@ -1239,7 +1239,7 @@ struct MicrophoneOverrideClaimTests {
                                                  recordingFrom: .builtInMic())
         #expect(status.captureSummary == "Recording from MacBook Pro Microphone")
         #expect(status.overrideStanding == .nextSelection)
-        #expect(status.listExplanation.contains("the next recording will use it"))
+        #expect(status.listExplanation.contains("the next time capture starts"))
         #expect(status.listExplanation.contains("the recording is using it") == false,
                 "a next candidate was described as the microphone the recording is on")
     }
@@ -1296,6 +1296,16 @@ struct MicrophoneClaimInvariantTests {
             ("clean", nil, nil, []), ("enumeration failed", "e", nil, []),
             ("default read failed", nil, "d", []), ("incomplete", nil, nil, ["x"]),
         ]
+        // ⚠️ **The dimension this matrix was missing, and its absence made two of the invariants
+        // wrong.** Every status was built with no recording, so the `.recording` branch was never
+        // exercised — deleting the production check that produces it left all three of these tests
+        // green — and both oracles below quietly assumed that naming a device requires a *next*
+        // selection and that a failed enumeration replaces the summary. Neither holds while a capture
+        // is running, which is precisely the behaviour the commit under test protects.
+        let recordings: [(String, AudioInputDevice?)] = [
+            ("idle", nil), ("recording on the override", .usbMic()),
+            ("recording on another", .builtInMic()),
+        ]
 
         var out: [(String, ControlAPI.MicrophoneStatus)] = []
         for (dLabel, devices) in deviceSets {
@@ -1304,14 +1314,17 @@ struct MicrophoneClaimInvariantTests {
                     for choice in choices {
                         for (sLabel, systemDefault) in defaults {
                             for (fLabel, enumFailure, defaultFailure, uninspectable) in failures {
-                                let label = "\(dLabel) / \(pLabel) / \(oLabel) / \(choice) / "
-                                    + "\(sLabel) / \(fLabel)"
-                                out.append((label, ControlAPI.MicrophoneStatus(
-                                    devices: devices, priority: priority, override: override,
-                                    systemDefault: systemDefault, captureChoice: choice,
-                                    enumerationFailure: enumFailure,
-                                    defaultReadFailure: defaultFailure,
-                                    uninspectable: uninspectable)))
+                                for (rLabel, recordingFrom) in recordings {
+                                    let label = "\(dLabel) / \(pLabel) / \(oLabel) / \(choice) / "
+                                        + "\(sLabel) / \(fLabel) / \(rLabel)"
+                                    out.append((label, ControlAPI.MicrophoneStatus(
+                                        devices: devices, priority: priority, override: override,
+                                        systemDefault: systemDefault,
+                                        recordingFrom: recordingFrom, captureChoice: choice,
+                                        enumerationFailure: enumFailure,
+                                        defaultReadFailure: defaultFailure,
+                                        uninspectable: uninspectable)))
+                                }
                             }
                         }
                     }
@@ -1327,6 +1340,16 @@ struct MicrophoneClaimInvariantTests {
     @available(macOS 15.0, *)
     func useIsOnlyClaimedFromTheSelection() {
         for (label, status) in Self.statuses() {
+            // ⚠️ **Both directions, and the first version had only one.** Asserting "if it says
+            // `.recording` then the recording is on it" fires on nothing when the bug is that it never
+            // *says* `.recording`: deleting the production check left this suite green even after the
+            // recording dimension was added. An invariant stated one way round is half an invariant.
+            if let override = status.override, status.recordingFrom?.uid == override {
+                #expect(status.overrideStanding == .recording,
+                        "\(label): the recording is on the chosen microphone and it was not said so")
+                #expect(status.listExplanation.contains("the recording is using it"),
+                        "\(label): the recording is on the chosen microphone and the text denies it")
+            }
             switch status.overrideStanding {
             case .recording:
                 #expect(status.recordingFrom?.uid == status.override,
@@ -1357,6 +1380,14 @@ struct MicrophoneClaimInvariantTests {
     @available(macOS 15.0, *)
     func namingADeviceMeansOneWasSelected() {
         for (label, status) in Self.statuses() {
+            // ⚠️ **A running recording is named from the pin, not from a selection**, and the first
+            // version of this oracle demanded a pinned next selection before any device could be
+            // named — a requirement that contradicts the behaviour it was meant to protect.
+            if let recording = status.recordingFrom {
+                #expect(status.captureSummary == "Recording from \(recording.name)",
+                        "\(label): a running recording was not named from its own pin")
+                continue
+            }
             let names = status.devices.map(\.name)
             let mentions = names.first { status.captureSummary.contains($0) }
             if let mentions {
@@ -1378,7 +1409,10 @@ struct MicrophoneClaimInvariantTests {
         for (label, status) in Self.statuses() {
             #expect(status.isComplete == (status.enumerationFailure == nil && status.uninspectable.isEmpty),
                     "\(label): completeness was decided by something other than the enumeration")
-            if status.enumerationFailure != nil {
+            // ⚠️ Scoped to an idle machine: a failed enumeration does not stop a healthy capture, so it
+            // must not replace a summary that is reporting one. Demanding it unconditionally was the
+            // second oracle this matrix got wrong by never building a recording.
+            if status.enumerationFailure != nil, status.recordingFrom == nil {
                 #expect(status.captureSummary.contains("could not be read"),
                         "\(label): a failed enumeration was summarised as a fact about the hardware")
             }

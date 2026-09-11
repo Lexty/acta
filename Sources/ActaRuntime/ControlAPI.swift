@@ -337,7 +337,9 @@ public final class ControlAPI {
                 return "A microphone is chosen for now, and the recording is using it. "
                     + resumeSentence
             case .nextSelection:
-                return "A microphone is chosen for now, so the next recording will use it. "
+                // ⚠️ "the next time capture starts", not "the next recording": a watchdog restart can
+                // adopt the choice inside *this* recording, which the explanation above already says.
+                return "A microphone is chosen for now, so it will be used the next time capture starts. "
                     + resumeSentence
             case .unavailable:
                 return "A microphone is chosen for now but is not available. " + resumeSentence

@@ -479,7 +479,7 @@ struct MenuContent: View {
                     case .recording:
                         Text("using now").font(.caption2).foregroundStyle(.orange)
                     case .nextSelection:
-                        Text("chosen for the next recording").font(.caption2).foregroundStyle(.orange)
+                        Text("chosen for the next capture start").font(.caption2).foregroundStyle(.orange)
                     case .unavailable:
                         Text("chosen, but not available").font(.caption2).foregroundStyle(.secondary)
                     case .unknown:
