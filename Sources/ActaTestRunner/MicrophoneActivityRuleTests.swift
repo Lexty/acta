@@ -339,6 +339,41 @@ struct MicrophoneActivityRuleTests {
         #expect(rule.observe(both, at: Self.at(12), context: context) == .none)
     }
 
+    @Test("a partial held reading followed by an unreadable complete one is still a baseline")
+    func aQualificationFromBeforeTheBaselineDoesNotSurviveIt() {
+        // ⚠️ Codex's trace: the first list is partial and shows the application holding, so no baseline
+        // is taken; the first *complete* list cannot read the property. The key was mid-qualification
+        // from before the baseline, and carrying that across it asks about a call that was already
+        // running when Acta launched.
+        var rule = MicrophoneActivityRule()
+        let context = MicrophoneActivityRule.Context()
+        let partialHeld = AudioProcessSnapshot(
+            processes: [AudioProcessObservation(pid: 501, bundleID: Self.slack, isRunningInput: true)],
+            isComplete: false)
+        let completeUnknown = AudioProcessSnapshot(
+            processes: [AudioProcessObservation(pid: 501, bundleID: Self.slack, isRunningInput: nil)],
+            isComplete: true)
+        #expect(rule.observe(partialHeld, at: Self.start, context: context) == .none)
+        #expect(rule.observe(completeUnknown, at: Self.at(1), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(2), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(5), context: context) == .none)
+        #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(300), context: context) == .none)
+    }
+
+    @Test("an episode baselined from an unreadable reading is live but not actionable")
+    func aBaselinedUnknownIsNotReportedAsHeld() {
+        // ⚠️ The half that keeps the new predicate honest: "we could not rule out a call" must not be
+        // rendered as "a call is in progress", or a click would be admitted on evidence nobody has.
+        var rule = MicrophoneActivityRule()
+        let context = MicrophoneActivityRule.Context()
+        let completeUnknown = AudioProcessSnapshot(
+            processes: [AudioProcessObservation(pid: 501, bundleID: Self.slack, isRunningInput: nil)],
+            isComplete: true)
+        _ = rule.observe(completeUnknown, at: Self.start, context: context)
+        // Episode 1 is the one the baseline minted for that key.
+        #expect(rule.isEpisodeActionable(1) == false)
+    }
+
     // MARK: - Suppression
 
     @Test("an excluded application never offers, and stays spent when the exclusion is lifted")

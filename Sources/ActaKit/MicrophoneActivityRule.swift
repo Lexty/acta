@@ -263,8 +263,14 @@ public struct MicrophoneActivityRule: Sendable {
                 switch phase {
                 case .holding:
                     phases[key] = .spent(episodeID: mintEpisodeID())
-                case .unreadable(let previous) where Self.isUnseen(previous):
-                    phases[key] = .spent(episodeID: mintEpisodeID())
+                case .unreadable:
+                    // ⚠️ **Every unreadable key, whatever it was before, and still unreadable.** A key
+                    // whose property failed in the baseline reading cannot be ruled out as already in a
+                    // call — including one seen holding in an earlier *partial* list, which is how a
+                    // qualification from before the baseline used to survive it. And it is wrapped
+                    // rather than flattened: converting unknown straight to `.spent` would make
+                    // `isEpisodeActionable` report a held input that was never positively observed.
+                    phases[key] = .unreadable(previous: .spent(episodeID: mintEpisodeID()))
                 default:
                     break
                 }
