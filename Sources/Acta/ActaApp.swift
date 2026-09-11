@@ -469,8 +469,13 @@ struct MenuContent: View {
                     Text(device.name).font(.callout)
                 }
                 .toggleStyle(.checkbox)
+                // ⚠️ **"using now" is a claim about what is in force, not about what is stored.** Shown
+                // for any stored override, one row could say "using now" and "unavailable" at once —
+                // while the selection had correctly fallen back to the list.
                 if device.uid == mic.override {
-                    Text("using now").font(.caption2).foregroundStyle(.orange)
+                    Text(mic.overrideInForce ? "using now" : "chosen, but not available")
+                        .font(.caption2)
+                        .foregroundStyle(mic.overrideInForce ? .orange : .secondary)
                 }
                 // ⚠️ **One click can legitimately land on only one of the two promises**, and the menu
                 // has to say which. Capture does not filter on `canBeSystemDefault` and the system

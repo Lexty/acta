@@ -1108,3 +1108,106 @@ struct MicrophoneSummaryMappingTests {
         #expect(api.microphoneStatus.captureSummary == "The audio devices could not be read")
     }
 }
+
+/// The three claims a stored preference must not license.
+@Suite("Menu adapter: what a stored choice does and does not prove")
+struct MicrophoneOverrideClaimTests {
+    /// ⚠️ A function rather than a stored property, and the suite carries no type-level `@available`:
+    /// swift-testing refuses `@Suite` on an availability-annotated type, so the annotation lives on each
+    /// member — which is the pattern the other suites in this file already use.
+    private static func deadUSB() -> AudioInputDevice {
+        AudioInputDevice(uid: "USBAudioDevice_UID", name: "USB Microphone",
+                         transport: .usb, inputChannels: 1,
+                         canBeSystemDefault: .yes, isAlive: .no, isRunningSomewhere: false)
+    }
+
+    /// ⚠️ **A usable *Use now* needs no facts about the Mac's input.** The selection puts an override
+    /// above the standing choice, and the observation wrapper asked about the default input first — so a
+    /// user who had pointed at a present, recordable microphone could not start a recording because an
+    /// unrelated read had failed.
+    @Test("a usable Use now survives a failed default-input read")
+    @available(macOS 15.0, *)
+    func aUsableOverrideSurvivesAFailedDefaultRead() {
+        let resolution = MicrophonePolicy.resolveCapture(
+            CaptureObservation(devices: [.builtInMic(), .usbMic()],
+                               systemDefault: .device(uid: "BuiltInMicrophoneDevice"),
+                               defaultReadFailure: "the default read failed"),
+            priority: MicrophonePriority(order: ["BuiltInMicrophoneDevice"],
+                                         override: "USBAudioDevice_UID"),
+            choice: .systemDefault)
+        guard case .pinned(let device, _) = resolution else {
+            Issue.record("an explicit, present microphone was refused: \(resolution)"); return
+        }
+        #expect(device.uid == "USBAudioDevice_UID")
+    }
+
+    /// ⚠️ The converse, which is why the read may not simply be skipped: with **no usable** override,
+    /// following the Mac's input while that read failed is still refused — a cached uid is not an answer.
+    @Test("without a usable override a failed default-input read still refuses")
+    @available(macOS 15.0, *)
+    func withoutAUsableOverrideTheFailedReadStillRefuses() {
+        let observation = CaptureObservation(devices: [.builtInMic()],
+                                             systemDefault: .device(uid: "BuiltInMicrophoneDevice"),
+                                             defaultReadFailure: "the default read failed")
+        #expect(MicrophonePolicy.resolveCapture(observation, priority: .empty, choice: .systemDefault)
+            == .unavailable(.systemDefaultUnreadable("the default read failed")))
+        // An override naming a device that is gone proves nothing either.
+        #expect(MicrophonePolicy.resolveCapture(
+            observation,
+            priority: MicrophonePriority(order: [], override: "USBAudioDevice_UID"),
+            choice: .systemDefault) == .unavailable(.systemDefaultUnreadable("the default read failed")))
+    }
+
+    /// ⚠️ And a failed **enumeration** still blocks everything, override or not: the list was never
+    /// described, so nothing in it can be believed.
+    @Test("a failed enumeration blocks even a usable-looking override")
+    @available(macOS 15.0, *)
+    func aFailedEnumerationBlocksAnOverride() {
+        let resolution = MicrophonePolicy.resolveCapture(
+            CaptureObservation(devices: [.usbMic()], enumerationFailure: "scripted"),
+            priority: MicrophonePriority(order: [], override: "USBAudioDevice_UID"),
+            choice: .followPriority)
+        #expect(resolution == .unavailable(.systemDefaultUnreadable("scripted")))
+    }
+
+    /// ⚠️ **A stored override is not a used one.** With the chosen device listed but not alive, the
+    /// selection correctly falls back to the list — and both the explanation and the row label used to
+    /// assert it was being used anyway, so one row could say "using now" and "unavailable" at once.
+    @Test("an unusable stored choice is not described as in use")
+    @available(macOS 15.0, *)
+    func anUnusableStoredChoiceIsNotInUse() {
+        let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), Self.deadUSB()],
+                            priority: ["BuiltInMicrophoneDevice"], override: "USBAudioDevice_UID")
+        #expect(status.captureSummary == "Will use MacBook Pro Microphone")
+        #expect(status.overrideInForce == false)
+        #expect(status.listExplanation.contains("is not available"))
+        #expect(status.listExplanation.contains("used instead of your list") == false,
+                "a stored but unusable choice was described as bypassing the list")
+    }
+
+    @Test("a usable stored choice is described as in use")
+    @available(macOS 15.0, *)
+    func aUsableStoredChoiceIsInUse() {
+        let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), .usbMic()],
+                            priority: ["BuiltInMicrophoneDevice"], override: "USBAudioDevice_UID")
+        #expect(status.overrideInForce)
+        #expect(status.listExplanation.contains("used instead of your list"))
+    }
+
+    /// ⚠️ Completeness is about the **device list**. A failed default-input read and a lost subscription
+    /// are neither of them evidence about a list that was read successfully — and taken as such, an
+    /// absent microphone was labelled "not readable" instead of "not connected".
+    @Test("an unrelated failure does not make a successful enumeration incomplete")
+    @available(macOS 15.0, *)
+    func completenessIsAboutTheListAlone() {
+        #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], defaultReadFailure: "the default read failed")
+            .isComplete, "a failed default-input read made the device list incomplete")
+        #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], observationDegraded: "no subscription").isComplete,
+                "a lost subscription made an already-read list incomplete")
+        #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], enumerationFailure: "scripted").isComplete == false)
+        #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], uninspectable: ["x"]).isComplete == false)
+        // The warning still combines them — display was never the problem.
+        #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], defaultReadFailure: "the default read failed")
+            .inventoryFailure == "the default read failed")
+    }
+}

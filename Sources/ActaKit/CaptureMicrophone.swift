@@ -181,8 +181,21 @@ public extension MicrophonePolicy {
             return .unavailable(.systemDefaultUnreadable(reason))
         }
 
+        // ⚠️ **A usable *Use now* is resolved before any default-input fact is required.** The selection
+        // below already puts an override above the standing choice — "a Use now outranks the choice, not
+        // just the list" — and asking about the Mac's input first quietly contradicted that: a user who
+        // had pointed at a present, recordable microphone could not start a recording because an
+        // unrelated read had failed. The winning choice needed that read not at all.
+        //
+        // ⚠️ Narrow on purpose. It skips the default-input *facts*, never the enumeration failure above,
+        // and only for an override that is actually present and recordable — a stored override naming a
+        // device that is gone proves nothing and must not license following a default nobody could read.
+        let overrideIsUsable = priority.override.map { uid in
+            observation.devices.contains { $0.uid == uid && $0.isCaptureCandidate }
+        } ?? false
+
         var systemDefault: String?
-        if case .systemDefault = choice {
+        if case .systemDefault = choice, !overrideIsUsable {
             if let reason = observation.defaultReadFailure {
                 return .unavailable(.systemDefaultUnreadable(reason))
             }

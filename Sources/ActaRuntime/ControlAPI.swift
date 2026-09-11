@@ -330,6 +330,10 @@ public final class ControlAPI {
         /// feature must not be the thing that misdescribes it, so it lives here where it is tested
         /// rather than in the view, where nothing checks a string.
         public var listExplanation: String {
+            if override != nil, !overrideInForce {
+                return "A microphone is chosen for now but is not available, so it is not being used. "
+                    + "Resume automatic selection to retire the choice."
+            }
             if override != nil {
                 return captureChoice == .systemDefault
                     ? "A microphone is chosen for now, so it is used instead of the Mac's input. "
@@ -354,7 +358,26 @@ public final class ControlAPI {
             }
         }
 
-        public var isComplete: Bool { inventoryFailure == nil && uninspectable.isEmpty }
+        /// Whether the **device list** was described completely.
+        ///
+        /// ⚠️ It asks about the enumeration and nothing else. Built from the combined warning it also
+        /// took a failed default-input read and a lost subscription as evidence about the list — so a
+        /// perfectly described machine reported an absent microphone as "not readable" rather than "not
+        /// connected", and a successful enumeration that found nothing said the devices could not be
+        /// read. Neither failure is evidence about a list that was read successfully.
+        public var isComplete: Bool { enumerationFailure == nil && uninspectable.isEmpty }
+
+        /// Whether a stored *Use now* is the device a recording would actually come up on.
+        ///
+        /// ⚠️ **A stored override is not a used one**, and saying otherwise was an unsupported claim in
+        /// two places: the explanation said the list was being bypassed, and the row said "using now" —
+        /// while the selection had correctly fallen back to the list because the chosen device was
+        /// unusable. One row could say "using now" and "unavailable" at once.
+        public var overrideInForce: Bool {
+            guard let override else { return false }
+            if case .pinned(let device, _) = captureSelection { return device.uid == override }
+            return false
+        }
 
         public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,
                     preferred: String? = nil, systemDefault: ObservedDefaultInput = .unread,
