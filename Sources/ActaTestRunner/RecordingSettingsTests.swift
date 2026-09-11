@@ -230,3 +230,75 @@ func settingsDecodeWithRemovedKeysPreservesNonDefaultValues() throws {
     #expect(decoded.archivePath == "~/Meetings")
     #expect(!decoded.deleteSegmentsAfterAssembly)
 }
+
+// MARK: - Reminders
+
+/// A config written before the reminders existed opens with them defaulted — the same state a fresh
+/// install is in, and the same migration rule the microphone fields follow.
+@Test
+func settingsDecodedFromAConfigWithoutRemindersGetsTheDefaults() throws {
+    let json = Data(#"{"segmentSeconds":45,"archivePath":"~/Meetings"}"#.utf8)
+    let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
+    #expect(decoded.offersRecordingWhenMicrophoneBusy)
+    #expect(decoded.offersStopWhenQuiet)
+    #expect(decoded.reminderExcludedBundleIDs.isEmpty)
+    #expect(decoded.quietMinutesBeforeStopOffer == RecordingSettings.defaultQuietMinutes)
+    // ...without disturbing what the old config did carry.
+    #expect(decoded.segmentSeconds == 45)
+    #expect(decoded.archivePath == "~/Meetings")
+}
+
+/// ⚠️ Stated in both directions on purpose. "Defaults when absent" alone would also pass if the
+/// decoder ignored the keys entirely, which is the defect that would silently discard a user's choice
+/// on every launch.
+@Test
+func settingsDecodedWithRemindersPresentKeepsThem() throws {
+    let json = Data((#"{"segmentSeconds":45,"offersRecordingWhenMicrophoneBusy":false,"#
+        + #""offersStopWhenQuiet":false,"reminderExcludedBundleIDs":["com.google.Chrome"],"#
+        + #""quietMinutesBeforeStopOffer":12}"#).utf8)
+    let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
+    #expect(!decoded.offersRecordingWhenMicrophoneBusy)
+    #expect(!decoded.offersStopWhenQuiet)
+    #expect(decoded.reminderExcludedBundleIDs == ["com.google.Chrome"])
+    #expect(decoded.quietMinutesBeforeStopOffer == 12)
+}
+
+@Test
+func normalizingClampsTheQuietIntervalAtBothEnds() {
+    #expect(RecordingSettings(quietMinutesBeforeStopOffer: 0).normalized()
+        .quietMinutesBeforeStopOffer == RecordingSettings.minQuietMinutes)
+    #expect(RecordingSettings(quietMinutesBeforeStopOffer: 9_000).normalized()
+        .quietMinutesBeforeStopOffer == RecordingSettings.maxQuietMinutes)
+    // A value already inside the range is left alone rather than snapped to a default.
+    #expect(RecordingSettings(quietMinutesBeforeStopOffer: 12).normalized()
+        .quietMinutesBeforeStopOffer == 12)
+}
+
+/// The anti-clobber primitive has to cover the new fields too: each one merges alone and leaves its
+/// siblings untouched.
+@Test
+func mergingOneReminderFieldLeavesTheOthersAlone() {
+    let base = RecordingSettings(offersRecordingWhenMicrophoneBusy: true,
+                                 reminderExcludedBundleIDs: ["com.apple.Safari"],
+                                 offersStopWhenQuiet: true,
+                                 quietMinutesBeforeStopOffer: 8)
+
+    let a = base.merging(.offersRecordingWhenMicrophoneBusy(false))
+    #expect(!a.offersRecordingWhenMicrophoneBusy)
+    #expect(a.offersStopWhenQuiet)
+    #expect(a.reminderExcludedBundleIDs == ["com.apple.Safari"])
+    #expect(a.quietMinutesBeforeStopOffer == 8)
+
+    let b = base.merging(.reminderExcludedBundleIDs(["com.google.Chrome", "com.apple.Safari"]))
+    #expect(b.reminderExcludedBundleIDs == ["com.google.Chrome", "com.apple.Safari"])
+    #expect(b.offersRecordingWhenMicrophoneBusy)
+    #expect(b.offersStopWhenQuiet)
+
+    let c = base.merging(.offersStopWhenQuiet(false))
+    #expect(!c.offersStopWhenQuiet)
+    #expect(c.offersRecordingWhenMicrophoneBusy)
+
+    let d = base.merging(.quietMinutesBeforeStopOffer(20))
+    #expect(d.quietMinutesBeforeStopOffer == 20)
+    #expect(d.offersStopWhenQuiet)
+}

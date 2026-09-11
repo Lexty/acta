@@ -294,14 +294,27 @@ public final class ControlDispatcher: ControlRequestHandling {
     /// process that can reach it can do far more directly; what this rule buys is that a client which
     /// round-trips `settings_get` → edit → `settings_set` cannot silently carry the machine's audio
     /// configuration along with the field it meant to change.
+    /// ⚠️ **The reminder preferences are substituted for every confinement, trusted included, and the
+    /// reason is different from the one above.** `WireSettings` has no place to carry them: they are
+    /// preferences about Acta's own prompts, and keeping them off the schema is what makes "the socket
+    /// cannot switch the reminders off, or empty the exclusion list" a property of the protocol rather
+    /// than a rule someone has to remember. The cost is that `RecordingSettings(wire)` **fabricates**
+    /// them from its defaults, and a fabricated value is not a value a caller supplied — writing it
+    /// through would silently reset a user's preferences on any `settings_set`, including one that
+    /// meant to change the segment length. So they are always restored from the authoritative side,
+    /// and no confinement may write them.
     private func appliedSettings(from wire: WireSettings) -> RecordingSettings {
         var applied = RecordingSettings(wire)
+        let authoritative = service.settings
         if confinement == .socket {
-            let authoritative = service.settings
             applied.archivePath = authoritative.archivePath
             applied.microphonePriority = authoritative.microphonePriority
             applied.managesSystemDefaultInput = authoritative.managesSystemDefaultInput
         }
+        applied.offersRecordingWhenMicrophoneBusy = authoritative.offersRecordingWhenMicrophoneBusy
+        applied.reminderExcludedBundleIDs = authoritative.reminderExcludedBundleIDs
+        applied.offersStopWhenQuiet = authoritative.offersStopWhenQuiet
+        applied.quietMinutesBeforeStopOffer = authoritative.quietMinutesBeforeStopOffer
         return applied
     }
 

@@ -164,6 +164,72 @@ func aTrustedSettingsSetWritesTheMicrophoneFieldsThrough() async {
     #expect(fake.settings.managesSystemDefaultInput == true)
 }
 
+// MARK: - Reminder preferences
+
+// ⚠️ **A different boundary from the two above, and it is structural rather than policed.** The
+// reminder preferences are not on `WireSettings` at all, so a caller has no way to express one. What
+// that costs is that `RecordingSettings(wire)` fabricates them from its defaults on every
+// `settings_set`, and writing a fabricated value through would reset preferences the user set in the
+// Settings window — silently, as a side effect of a command that meant to change something else.
+// Hence the substitution, and hence it applies to **every** confinement: there is no confinement in
+// which the wire carried a real value to honour.
+
+@MainActor
+@available(macOS 15.0, *)
+@Test
+func aSocketSettingsSetCannotChangeTheReminderPreferences() async {
+    let (dispatcher, fake) = makeSocketDispatcher()
+    fake.settings = RecordingSettings(archivePath: "/Users/me/Acta",
+                                      segmentSeconds: 30,
+                                      offersRecordingWhenMicrophoneBusy: false,
+                                      reminderExcludedBundleIDs: ["com.google.Chrome"],
+                                      offersStopWhenQuiet: false,
+                                      quietMinutesBeforeStopOffer: 17)
+
+    let wire = wireSettings(microphonePriority: [],
+                            managesSystemDefaultInput: false,
+                            captureMicrophoneChoice: .systemDefault)
+    #expect(await dispatcher.handle(.settingsSet(wire)).result == .ok)
+
+    // Every reminder preference survives the round trip, including the two the defaults would have
+    // flipped back on.
+    #expect(fake.settings.offersRecordingWhenMicrophoneBusy == false)
+    #expect(fake.settings.offersStopWhenQuiet == false)
+    #expect(fake.settings.reminderExcludedBundleIDs == ["com.google.Chrome"])
+    #expect(fake.settings.quietMinutesBeforeStopOffer == 17)
+    // ...and the command still did the thing it was for.
+    #expect(fake.settings.segmentSeconds == 15)
+}
+
+@MainActor
+@available(macOS 15.0, *)
+@Test
+func aTrustedSettingsSetCannotChangeTheReminderPreferencesEither() async {
+    // ⚠️ Not a weaker restatement of the test above: it is the half that says the rule is about the
+    // **schema**, not about trust. A trusted caller is no more able to name a reminder preference than
+    // a socket one, so writing the fabricated default through would corrupt the settings for the one
+    // caller we do trust.
+    let fake = FakeControlServing()
+    let dispatcher = ControlDispatcher(service: fake, confinement: .trusted)
+    fake.settings = RecordingSettings(offersRecordingWhenMicrophoneBusy: false,
+                                      reminderExcludedBundleIDs: ["com.tinyspeck.slackmacgap"],
+                                      offersStopWhenQuiet: false,
+                                      quietMinutesBeforeStopOffer: 21)
+
+    let wire = wireSettings(microphonePriority: ["SomeDevice"],
+                            managesSystemDefaultInput: true,
+                            captureMicrophoneChoice: .followPriority)
+    #expect(await dispatcher.handle(.settingsSet(wire)).result == .ok)
+
+    #expect(fake.settings.offersRecordingWhenMicrophoneBusy == false)
+    #expect(fake.settings.offersStopWhenQuiet == false)
+    #expect(fake.settings.reminderExcludedBundleIDs == ["com.tinyspeck.slackmacgap"])
+    #expect(fake.settings.quietMinutesBeforeStopOffer == 21)
+    // A trusted caller *may* still write the microphone fields — that distinction is the point.
+    #expect(fake.settings.microphonePriority == ["SomeDevice"])
+    #expect(fake.settings.managesSystemDefaultInput == true)
+}
+
 // MARK: - Helper
 
 @MainActor
