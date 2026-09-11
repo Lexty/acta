@@ -90,7 +90,51 @@ struct MicrophoneSettingsTests {
         #expect(settings.archivePath == "~/Old")
         #expect(settings.microphonePriority.isEmpty)
         #expect(settings.managesSystemDefaultInput == false)
-        #expect(settings.captureMicrophoneChoice == .followPriority)
+        // ⚠️ `.systemDefault`, the same value a fresh install starts from — see the next two tests. A
+        // config that predates the field belongs to a user who never chose, and starting them where the
+        // old default put them is starting them at a refusal.
+        #expect(settings.captureMicrophoneChoice == .systemDefault)
+    }
+
+    // MARK: - Out of the box, the first recording must start
+
+    /// ⚠️ **The defect this pins: a fresh install could not record at all.** Nothing chosen and an empty
+    /// list is the state every new user is in, and under `.followPriority` that resolves `.noneConfigured`
+    /// — *Start Recording* refused with "No microphone selected", on a MacBook whose built-in microphone
+    /// was sitting right there. The default is the one setting nobody opts into, so it has to work.
+    @Test("a fresh install pins a microphone without the user choosing anything")
+    func aFreshInstallResolvesAMicrophone() {
+        let settings = RecordingSettings.default
+        let builtIn = AudioInputDevice.builtInMic()
+
+        let resolution = MicrophonePolicy.resolveCapture(
+            CaptureObservation(devices: [builtIn], systemDefault: .device(uid: builtIn.uid)),
+            priority: MicrophonePriority(order: settings.microphonePriority, override: nil),
+            choice: settings.captureMicrophoneChoice
+        )
+
+        #expect(resolution == .pinned(builtIn, alternatives: []))
+    }
+
+    /// ⚠️ **Resolve-then-pin is what makes that default legitimate**, and it is worth an assertion of its
+    /// own: the default is *read* at start and the recording is pinned to that concrete UID. This is the
+    /// difference between Acta's default and the silent inheritance `SCStream` gives an unset device —
+    /// a headset arriving later does not move a recording that has already resolved.
+    @Test("the out-of-the-box default pins a uid rather than following the OS")
+    func theDefaultPinsRatherThanFollows() {
+        let builtIn = AudioInputDevice.builtInMic()
+        let headset = AudioInputDevice.airPods()
+
+        // The machine at the moment the recording starts.
+        let atStart = MicrophonePolicy.resolveCapture(
+            CaptureObservation(devices: [builtIn, headset], systemDefault: .device(uid: builtIn.uid)),
+            priority: .empty,
+            choice: RecordingSettings.default.captureMicrophoneChoice
+        )
+
+        #expect(atStart == .pinned(builtIn, alternatives: []))
+        // ⚠️ Asserted through the uid, not the name: the pin is what a rename must not be able to move.
+        if case .pinned(let device, _) = atStart { #expect(device.uid == builtIn.uid) }
     }
 
     // MARK: - The anti-clobber primitive covers the new fields

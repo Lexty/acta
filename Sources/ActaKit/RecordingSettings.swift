@@ -36,6 +36,23 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     /// here rather than in Task 7 for one reason worth stating: Task 5 made "use the system default" an
     /// explicit resolve-then-pin *choice*, and a choice that resets at every relaunch is not a setting.
     /// Adding it later would also mean a second protocol bump for a field that could ride this one.
+    ///
+    /// ⚠️ **`.systemDefault` out of the box, and the alternative shipped broken.** With `.followPriority`
+    /// as the default the priority list a fresh install has is empty, so the very first *Start Recording*
+    /// resolved `.noneConfigured` and refused — "No microphone selected. Choose one in Acta's menu" before
+    /// the user had been given any reason to visit that menu. A recorder that cannot record until it is
+    /// configured is not what a default is for.
+    ///
+    /// ⚠️ This is **not** the silent inheritance `CaptureMicrophoneChoice` exists to end, and the
+    /// difference is resolve-then-pin: the default is read at start and the recording is pinned to that
+    /// concrete UID, so a headset connecting mid-meeting still does not move it. What changes is only
+    /// where an unconfigured user *starts*. The moment they rank anything, `.followPriority` is one click
+    /// away and the list is theirs.
+    ///
+    /// ⚠️ It changes nothing for anyone who already chose: `SettingsStore` encodes the whole struct, so
+    /// every config saved even once carries this field explicitly and decodes to what its owner picked.
+    /// The default is reached only by a config that predates the field — which is the same population as
+    /// a fresh install, and in the same broken state.
     public var captureMicrophoneChoice: CaptureMicrophoneChoice
 
     public init(archivePath: String = "",
@@ -43,7 +60,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
                 deleteSegmentsAfterAssembly: Bool = true,
                 microphonePriority: [String] = [],
                 managesSystemDefaultInput: Bool = false,
-                captureMicrophoneChoice: CaptureMicrophoneChoice = .followPriority) {
+                captureMicrophoneChoice: CaptureMicrophoneChoice = .systemDefault) {
         self.archivePath = archivePath
         self.segmentSeconds = segmentSeconds
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly

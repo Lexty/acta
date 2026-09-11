@@ -75,11 +75,18 @@ struct MicrophoneSeedingTests {
 
     // MARK: - The startup flows, both with feature (B) off
 
-    /// ⚠️ **A fresh install with feature (B) never enabled must still be able to record.** The list
-    /// defaults empty and capture refuses an unresolved microphone, so without a defined flow this user
-    /// falls into a state nobody specified. The answer: they pick a microphone, or ask for the system
-    /// default — and neither turns on management of the Mac's input.
-    @Test("a fresh install can choose a recording microphone without enabling management")
+    /// ⚠️ **A fresh install with feature (B) never enabled must be able to record immediately.** This
+    /// test used to assert the opposite half of that sentence — that an untouched install resolves
+    /// `.noneConfigured` until the user ranks something — and shipping it proved the state nobody wants:
+    /// the first *Start Recording* on a new machine failed with "No microphone selected", pointing at a
+    /// menu the user had no reason to have opened. The default is now `.systemDefault`, so the flow
+    /// starts by working; see `RecordingSettings.captureMicrophoneChoice`.
+    ///
+    /// ⚠️ **What this test is actually guarding is unchanged, and it is the harder half**: recording out
+    /// of the box must cost the user nothing of feature (B). Management stays off and **not one write
+    /// reaches the Mac's input** — a default that recorded by quietly taking over the system input would
+    /// be a worse bug than the refusal it replaced.
+    @Test("a fresh install records out of the box without enabling management")
     @MainActor
     func aFreshInstallCanRecordWithoutManagement() async {
         let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
@@ -89,17 +96,28 @@ struct MicrophoneSeedingTests {
         #expect(manager.capturePreference.priority.order.isEmpty)
         #expect(await manager.reconciler.isEnabled == false)
 
-        // Before choosing, a recording has nothing to pin — and says so rather than silently following
-        // the system default.
-        let unresolved = manager.captureResolver.resolve()
-        #expect(unresolved == .unavailable(.noneConfigured))
+        // Nothing chosen, nothing ranked — and a recording still has a device to pin: the one the Mac
+        // prefers, read now and pinned to that uid.
+        guard case .pinned(let outOfTheBox, _) = manager.captureResolver.resolve() else {
+            Issue.record("a fresh install could not resolve a microphone"); return
+        }
+        #expect(outOfTheBox == .airPods())
+        #expect(await manager.reconciler.isEnabled == false)
+        #expect(directory.attemptedWrites.isEmpty)
 
-        // The user picks one. Feature (B) stays off and nothing is written to the Mac's input.
+        // The list is still theirs to take over, and taking it over is two acts rather than one: rank a
+        // device, then say recordings follow the list. ⚠️ **Ranking alone deliberately does not move
+        // capture** while the choice is the Mac's input — the chooser says so in `listExplanation`
+        // ("not this list"), because a list edit silently overriding a policy the user picked is the
+        // same silent switch in the other direction.
         await manager.setPriorityOrder(["BuiltInMicrophoneDevice"])
-        guard case .pinned(let device, _) = manager.captureResolver.resolve() else {
+        #expect(manager.captureResolver.resolve() == .pinned(.airPods(), alternatives: [.builtInMic()]))
+
+        manager.setCaptureChoice(.followPriority)
+        guard case .pinned(let chosen, _) = manager.captureResolver.resolve() else {
             Issue.record("choosing a microphone did not resolve one"); return
         }
-        #expect(device == .builtInMic())
+        #expect(chosen == .builtInMic())
         #expect(await manager.reconciler.isEnabled == false)
         #expect(directory.attemptedWrites.isEmpty)
     }
@@ -159,8 +177,13 @@ struct MicrophoneSeedingTests {
         let (directory, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic(), .airPods()],
                                                                    defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
+        // ⚠️ The choice is stated, not inherited: this test is about the **list** still deciding while
+        // enforcement is paused, and the shipped default is `.systemDefault` — under which the list is
+        // a fallback order rather than the selection, and the assertion below would be testing the Mac's
+        // input instead of what the test is named for.
         await manager.apply(RecordingSettings(microphonePriority: ["BuiltInMicrophoneDevice"],
-                                              managesSystemDefaultInput: true))
+                                              managesSystemDefaultInput: true,
+                                              captureMicrophoneChoice: .followPriority))
         await manager.pauseEnforcement()
         let writesAtPause = directory.attemptedWrites
 
