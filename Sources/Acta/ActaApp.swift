@@ -472,10 +472,21 @@ struct MenuContent: View {
                 // ⚠️ **"using now" is a claim about what is in force, not about what is stored.** Shown
                 // for any stored override, one row could say "using now" and "unavailable" at once —
                 // while the selection had correctly fallen back to the list.
+                // ⚠️ Three facts, three labels. Only a recording that came up on this device may be
+                // described in the present tense, and only a complete observation may call it absent.
                 if device.uid == mic.override {
-                    Text(mic.overrideInForce ? "using now" : "chosen, but not available")
-                        .font(.caption2)
-                        .foregroundStyle(mic.overrideInForce ? .orange : .secondary)
+                    switch mic.overrideStanding {
+                    case .recording:
+                        Text("using now").font(.caption2).foregroundStyle(.orange)
+                    case .nextSelection:
+                        Text("chosen for the next recording").font(.caption2).foregroundStyle(.orange)
+                    case .unavailable:
+                        Text("chosen, but not available").font(.caption2).foregroundStyle(.secondary)
+                    case .unknown:
+                        Text("chosen — availability unknown").font(.caption2).foregroundStyle(.secondary)
+                    case .none:
+                        EmptyView()
+                    }
                 }
                 // ⚠️ **One click can legitimately land on only one of the two promises**, and the menu
                 // has to say which. Capture does not filter on `canBeSystemDefault` and the system

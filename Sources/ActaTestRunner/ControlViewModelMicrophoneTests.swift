@@ -1179,10 +1179,10 @@ struct MicrophoneOverrideClaimTests {
         let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), Self.deadUSB()],
                             priority: ["BuiltInMicrophoneDevice"], override: "USBAudioDevice_UID")
         #expect(status.captureSummary == "Will use MacBook Pro Microphone")
-        #expect(status.overrideInForce == false)
+        #expect(status.overrideStanding == .unavailable)
         #expect(status.listExplanation.contains("is not available"))
-        #expect(status.listExplanation.contains("used instead of your list") == false,
-                "a stored but unusable choice was described as bypassing the list")
+        #expect(status.listExplanation.contains("will use it") == false,
+                "a stored but unusable choice was described as the one the next recording uses")
     }
 
     @Test("a usable stored choice is described as in use")
@@ -1190,8 +1190,58 @@ struct MicrophoneOverrideClaimTests {
     func aUsableStoredChoiceIsInUse() {
         let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), .usbMic()],
                             priority: ["BuiltInMicrophoneDevice"], override: "USBAudioDevice_UID")
-        #expect(status.overrideInForce)
-        #expect(status.listExplanation.contains("used instead of your list"))
+        #expect(status.overrideStanding == .nextSelection)
+        #expect(status.listExplanation.contains("the next recording will use it"))
+    }
+
+    /// ⚠️ **A running recording outranks a failed inventory read.** A failed refresh does not stop a
+    /// healthy capture, so a device Acta is demonstrably recording from must never be described as not
+    /// being used — the summary said "Recording from USB Microphone" while the explanation said that
+    /// very device was not in use.
+    @Test("a device the recording came up on is never called unused")
+    @available(macOS 15.0, *)
+    func aRecordingOutranksAFailedInventoryRead() {
+        let status = ControlAPI.MicrophoneStatus(devices: [], priority: ["BuiltInMicrophoneDevice"],
+                                                 override: "USBAudioDevice_UID",
+                                                 recordingFrom: .usbMic(),
+                                                 enumerationFailure: "the refresh failed")
+        #expect(status.captureSummary == "Recording from USB Microphone")
+        #expect(status.overrideStanding == .recording)
+        #expect(status.listExplanation.contains("the recording is using it"))
+        #expect(status.listExplanation.contains("not available") == false,
+                "the device the recording came up on was described as unavailable")
+    }
+
+    /// ⚠️ **An unreadable observation establishes nothing**, in either direction. Calling the choice
+    /// unavailable because the machine could not be described is a claim the read never made.
+    @Test("an unreadable observation says unknown, not unavailable")
+    @available(macOS 15.0, *)
+    func anUnreadableObservationSaysUnknown() {
+        let status = ControlAPI.MicrophoneStatus(devices: [], priority: ["BuiltInMicrophoneDevice"],
+                                                 override: "USBAudioDevice_UID",
+                                                 enumerationFailure: "the refresh failed")
+        #expect(status.overrideStanding == .unknown)
+        #expect(status.listExplanation.contains("is unknown"))
+        #expect(status.listExplanation.contains("not available") == false,
+                "an unreadable machine was used as proof the choice is unavailable")
+    }
+
+    /// ⚠️ **The next candidate is not the running recording.** Reachable whenever the chosen device
+    /// refused to open and capture fell back: the override stays stored, the directory still lists the
+    /// device as eligible, and the row claimed present-tense use while the summary correctly named the
+    /// device the recording had actually come up on.
+    @Test("the next candidate is phrased as intent while a recording is on something else")
+    @available(macOS 15.0, *)
+    func theNextCandidateIsNotTheRunningRecording() {
+        let status = ControlAPI.MicrophoneStatus(devices: [.builtInMic(), .usbMic()],
+                                                 priority: ["BuiltInMicrophoneDevice"],
+                                                 override: "USBAudioDevice_UID",
+                                                 recordingFrom: .builtInMic())
+        #expect(status.captureSummary == "Recording from MacBook Pro Microphone")
+        #expect(status.overrideStanding == .nextSelection)
+        #expect(status.listExplanation.contains("the next recording will use it"))
+        #expect(status.listExplanation.contains("the recording is using it") == false,
+                "a next candidate was described as the microphone the recording is on")
     }
 
     /// ⚠️ Completeness is about the **device list**. A failed default-input read and a lost subscription
@@ -1209,5 +1259,129 @@ struct MicrophoneOverrideClaimTests {
         // The warning still combines them — display was never the problem.
         #expect(ControlAPI.MicrophoneStatus(devices: [.builtInMic()], defaultReadFailure: "the default read failed")
             .inventoryFailure == "the default read failed")
+    }
+}
+
+/// The invariants that tie the menu's three claims to the data underneath them.
+///
+/// ⚠️ **Every finding in this area has been the same shape** — a string or a flag claiming more than
+/// the snapshot supports: a stored override reported as used, an aggregated warning taken as evidence
+/// about the device list, a suspension given a cause it did not have, an incomplete read reported as an
+/// absence. Each was fixed as a case. This checks the *property* across a combinatorial matrix, so the
+/// next way of claiming too much fails here rather than in a user's menu.
+@Suite("Menu adapter: claims never exceed the data")
+struct MicrophoneClaimInvariantTests {
+    @available(macOS 15.0, *)
+    private static func statuses() -> [(String, ControlAPI.MicrophoneStatus)] {
+        let dead = AudioInputDevice(uid: "USBAudioDevice_UID", name: "USB Microphone",
+                                    transport: .usb, inputChannels: 1, canBeSystemDefault: .yes,
+                                    isAlive: .no, isRunningSomewhere: false)
+        let deviceSets: [(String, [AudioInputDevice])] = [
+            ("empty", []), ("builtIn", [.builtInMic()]),
+            ("builtIn+usb", [.builtInMic(), .usbMic()]), ("builtIn+deadUsb", [.builtInMic(), dead]),
+        ]
+        let priorities: [(String, [String])] = [
+            ("no list", []), ("builtIn", ["BuiltInMicrophoneDevice"]), ("usb", ["USBAudioDevice_UID"]),
+        ]
+        let overrides: [(String, String?)] = [
+            ("no override", nil), ("override usb", "USBAudioDevice_UID"),
+            ("override absent", "SomethingGone"),
+        ]
+        let choices: [CaptureMicrophoneChoice] = [.followPriority, .systemDefault]
+        let defaults: [(String, ObservedDefaultInput)] = [
+            ("unread", .unread), ("none", .noDefault),
+            ("builtIn", .device(uid: "BuiltInMicrophoneDevice")),
+        ]
+        let failures: [(String, String?, String?, [String])] = [
+            ("clean", nil, nil, []), ("enumeration failed", "e", nil, []),
+            ("default read failed", nil, "d", []), ("incomplete", nil, nil, ["x"]),
+        ]
+
+        var out: [(String, ControlAPI.MicrophoneStatus)] = []
+        for (dLabel, devices) in deviceSets {
+            for (pLabel, priority) in priorities {
+                for (oLabel, override) in overrides {
+                    for choice in choices {
+                        for (sLabel, systemDefault) in defaults {
+                            for (fLabel, enumFailure, defaultFailure, uninspectable) in failures {
+                                let label = "\(dLabel) / \(pLabel) / \(oLabel) / \(choice) / "
+                                    + "\(sLabel) / \(fLabel)"
+                                out.append((label, ControlAPI.MicrophoneStatus(
+                                    devices: devices, priority: priority, override: override,
+                                    systemDefault: systemDefault, captureChoice: choice,
+                                    enumerationFailure: enumFailure,
+                                    defaultReadFailure: defaultFailure,
+                                    uninspectable: uninspectable)))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// ⚠️ **A claim of use must come from the selection, never from the storage.** This is the invariant
+    /// behind the row that once said "using now" and "unavailable" at the same time.
+    @Test("nothing claims a microphone is in use unless the selection picked it")
+    @available(macOS 15.0, *)
+    func useIsOnlyClaimedFromTheSelection() {
+        for (label, status) in Self.statuses() {
+            switch status.overrideStanding {
+            case .recording:
+                #expect(status.recordingFrom?.uid == status.override,
+                        "\(label): claimed the recording is on the override when it is not")
+            case .nextSelection:
+                guard case .pinned(let device, _) = status.captureSelection else {
+                    Issue.record("\(label): named a next selection with nothing selected"); continue
+                }
+                #expect(device.uid == status.override,
+                        "\(label): named the override as next while \(device.uid) was selected")
+            case .unavailable:
+                // ⚠️ A negative claim needs a complete observation behind it.
+                #expect(status.isComplete,
+                        "\(label): called the override unavailable from an incomplete observation")
+            case .none, .unknown:
+                break
+            }
+            if status.listExplanation.contains("recording is using it") {
+                #expect(status.overrideStanding == .recording,
+                        "\(label): said the recording uses the override when it does not")
+            }
+        }
+    }
+
+    /// ⚠️ **A summary may name a device only when one was actually selected**, and must never name one
+    /// while reporting that the machine could not be read.
+    @Test("a named device in the summary means a device was selected")
+    @available(macOS 15.0, *)
+    func namingADeviceMeansOneWasSelected() {
+        for (label, status) in Self.statuses() {
+            let names = status.devices.map(\.name)
+            let mentions = names.first { status.captureSummary.contains($0) }
+            if let mentions {
+                guard case .pinned = status.captureSelection else {
+                    Issue.record("\(label): named \(mentions) with nothing selected"); continue
+                }
+            }
+            if status.captureSummary.contains("could not be read") {
+                #expect(mentions == nil, "\(label): named a device while reporting an unreadable machine")
+            }
+        }
+    }
+
+    /// ⚠️ **Completeness is about the device list and nothing else**, and an unreadable machine is never
+    /// summarised as an empty one.
+    @Test("only the enumeration decides whether the list was described")
+    @available(macOS 15.0, *)
+    func onlyTheEnumerationDecidesCompleteness() {
+        for (label, status) in Self.statuses() {
+            #expect(status.isComplete == (status.enumerationFailure == nil && status.uninspectable.isEmpty),
+                    "\(label): completeness was decided by something other than the enumeration")
+            if status.enumerationFailure != nil {
+                #expect(status.captureSummary.contains("could not be read"),
+                        "\(label): a failed enumeration was summarised as a fact about the hardware")
+            }
+        }
     }
 }

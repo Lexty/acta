@@ -330,16 +330,22 @@ public final class ControlAPI {
         /// feature must not be the thing that misdescribes it, so it lives here where it is tested
         /// rather than in the view, where nothing checks a string.
         public var listExplanation: String {
-            if override != nil, !overrideInForce {
-                return "A microphone is chosen for now but is not available, so it is not being used. "
-                    + "Resume automatic selection to retire the choice."
-            }
-            if override != nil {
-                return captureChoice == .systemDefault
-                    ? "A microphone is chosen for now, so it is used instead of the Mac's input. "
-                        + "Resume automatic selection to go back to your recording setting."
-                    : "A microphone is chosen for now, so it is used instead of your list. "
-                        + "Resume automatic selection to go back to the list."
+            switch overrideStanding {
+            case .none:
+                break
+            case .recording:
+                return "A microphone is chosen for now, and the recording is using it. "
+                    + resumeSentence
+            case .nextSelection:
+                return "A microphone is chosen for now, so the next recording will use it. "
+                    + resumeSentence
+            case .unavailable:
+                return "A microphone is chosen for now but is not available. " + resumeSentence
+            case .unknown:
+                // ⚠️ Not "unavailable": the machine could not be described, and an unread snapshot
+                // establishes nothing about a device either way.
+                return "A microphone is chosen for now; whether it can be used is unknown while the "
+                    + "audio devices cannot be read. " + resumeSentence
             }
             if captureChoice == .systemDefault {
                 return "Recordings currently use the Mac's input at the time they start, not this list. "
@@ -348,6 +354,13 @@ public final class ControlAPI {
             return priority.isEmpty
                 ? "Tick a microphone to put it on your list. Recordings use the highest one available."
                 : "Recordings use the highest one available. Use the arrows to reorder."
+        }
+
+        /// What resuming automatic selection goes back to — the *setting*, which is not always the list.
+        private var resumeSentence: String {
+            captureChoice == .systemDefault
+                ? "Resume automatic selection to go back to your recording setting."
+                : "Resume automatic selection to go back to the list."
         }
 
         /// Whether that state is one the user should act on rather than merely be told about.
@@ -367,16 +380,46 @@ public final class ControlAPI {
         /// read. Neither failure is evidence about a list that was read successfully.
         public var isComplete: Bool { enumerationFailure == nil && uninspectable.isEmpty }
 
-        /// Whether a stored *Use now* is the device a recording would actually come up on.
+        /// What is actually known about a stored *Use now* — **three facts, not one flag**.
         ///
-        /// ⚠️ **A stored override is not a used one**, and saying otherwise was an unsupported claim in
-        /// two places: the explanation said the list was being bypassed, and the row said "using now" —
-        /// while the selection had correctly fallen back to the list because the chosen device was
-        /// unusable. One row could say "using now" and "unavailable" at once.
-        public var overrideInForce: Bool {
-            guard let override else { return false }
-            if case .pinned(let device, _) = captureSelection { return device.uid == override }
-            return false
+        /// ⚠️ **The first version was a `Bool`, and it collapsed three different things.** "The
+        /// recording came up on it", "it is what the next capture would use" and "the machine could not
+        /// be described" are not the same claim, and folding them produced contradictions in both
+        /// directions: `false` was read as proof of unavailability, so a device Acta was demonstrably
+        /// *recording from* was described as not being used when an inventory refresh failed; and `true`
+        /// was read as present-tense use, so a row said "using now" while the summary correctly said the
+        /// recording was on something else — reachable whenever the chosen device refused to open and
+        /// capture fell back.
+        ///
+        /// Only `.recording` licenses a present-tense claim, and only a **complete** observation
+        /// licenses a negative one.
+        public enum OverrideStanding: Equatable, Sendable {
+            case none
+            /// The running recording came up on it. The one present-tense fact.
+            case recording
+            /// What the next capture would use. Intent, not fact.
+            case nextSelection
+            /// The selection went elsewhere, and the machine was described completely enough to say so.
+            case unavailable
+            /// The machine could not be described, so nothing about it is established.
+            case unknown
+        }
+
+        public var overrideStanding: OverrideStanding {
+            guard let override else { return .none }
+            // ⚠️ Asked first, and of the recording rather than of the inventory: a failed inventory read
+            // does not stop a healthy capture, and must not be allowed to contradict it.
+            if recordingFrom?.uid == override { return .recording }
+            switch captureSelection {
+            case .pinned(let device, _) where device.uid == override:
+                return .nextSelection
+            case .pinned:
+                return isComplete ? .unavailable : .unknown
+            case .unavailable(.snapshotIncomplete), .unavailable(.systemDefaultUnreadable):
+                return .unknown
+            case .unavailable:
+                return isComplete ? .unavailable : .unknown
+            }
         }
 
         public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,
