@@ -220,6 +220,44 @@ public final class ControlAPI {
         public var uninspectable: [String]
 
         /// Whether the machine was described completely.
+        /// What a recording started **now** would be pinned to.
+        ///
+        /// ⚠️ **Derived from this snapshot, not by asking the resolver again.** The menu needs one
+        /// honest line for "which microphone will be used", and the two wrong ways to get it are
+        /// restating the policy in view code — where nothing tests it — and calling the live resolver a
+        /// second time, which other code counts. `MicrophonePolicy.resolveCapture` is the same pure
+        /// decision the recorder makes, so this is that answer rather than an impression of it.
+        public var captureSelection: CaptureMicrophoneResolution {
+            MicrophonePolicy.resolveCapture(
+                from: devices,
+                priority: MicrophonePriority(order: priority, override: override),
+                choice: captureChoice,
+                systemDefault: systemDefault.uid)
+        }
+
+        /// The same answer as a short phrase for the menu's always-visible summary.
+        ///
+        /// ⚠️ It never says a microphone is in use because one is *preferred*: "recording from" comes
+        /// from what actually came up, and everything else is phrased as intent.
+        public var captureSummary: String {
+            if let recording = recordingFrom { return "Recording from \(recording.name)" }
+            switch captureSelection {
+            case .pinned(let device, _):
+                return override == device.uid ? "Will use \(device.name) — chosen for now"
+                                              : "Will use \(device.name)"
+            case .unavailable(.noneConfigured):
+                return "No microphone chosen yet"
+            case .unavailable(.noPreferredDeviceAvailable):
+                return "None of your microphones is connected"
+            case .unavailable(.noEligibleDevice):
+                return "No microphone available"
+            case .unavailable(.systemDefaultUnreadable):
+                return "The Mac's input could not be read"
+            case .unavailable(.snapshotIncomplete):
+                return "The audio devices could not be read"
+            }
+        }
+
         public var isComplete: Bool { inventoryFailure == nil && uninspectable.isEmpty }
 
         public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,

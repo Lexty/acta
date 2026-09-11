@@ -115,6 +115,11 @@ struct MenuContent: View {
     // pipeline — every read is on `state`, every action is a `ControlAPI` command.
     @StateObject private var model = ControlViewModel()
     @State private var settingsExpanded = false
+    /// ⚠️ Collapsed by default. The chooser is six rows plus a picker plus the management
+    /// controls, and shown unconditionally it pushed the menu off the bottom of the screen —
+    /// on a laptop, with only six devices attached. What a user needs at a glance is which
+    /// microphone will be used, not the whole apparatus for deciding it.
+    @State private var microphoneExpanded = false
 
     /// The current typed state — the single thing every view below reads.
     private var state: ControlState { model.state }
@@ -251,21 +256,58 @@ struct MenuContent: View {
     private var microphoneSection: some View {
         let mic = model.microphone
         VStack(alignment: .leading, spacing: 6) {
-            Text("Microphone").font(.headline)
-
+            // ⚠️ **Outside the disclosure on purpose.** "I could not read the audio devices" must not be
+            // something the user has to open a section to discover.
             if let failure = mic.inventoryFailure {
-                // ⚠️ "I could not look" is never rendered as "there is nothing here".
                 Label(failure, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            DisclosureGroup(isExpanded: $microphoneExpanded) {
+                microphoneChooser(mic)
+            } label: {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Microphone").font(.headline)
+                    // The one fact worth showing without opening anything.
+                    Text(mic.captureSummary).font(.caption).foregroundStyle(.secondary)
+                    // ⚠️ Feature (B) changes every other app's input, so *that it is on* stays visible
+                    // even when its controls are folded away. Only the controls collapse, never the
+                    // statement of what Acta is doing to the machine.
+                    if mic.managingSystemInput {
+                        Text(mic.enforcement == .paused
+                             ? "Holding the Mac's input — paused"
+                             : "Holding the Mac's input on your list")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Everything behind the disclosure: the list, how it is ranked, and feature (B).
+    @ViewBuilder
+    private func microphoneChooser(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             microphoneStates(mic)
+
+            // ⚠️ **The list was unexplained and therefore invisible.** With no entries every device sat
+            // under "Available" behind an unlabelled circle, the ranking arrows appear only once
+            // something is *already* ranked, and the only explanation was a hover tooltip — so the way
+            // to make the first entry had to be guessed. Manual acceptance found this immediately;
+            // nothing in the suite could, because rendering is the one thing it does not see.
+            Text(mic.priority.isEmpty
+                 ? "Tick a microphone to put it on your list. Acta records from the highest one that is connected."
+                 : "Acta records from the highest one that is connected. Use the arrows to reorder.")
+                .font(.caption2).foregroundStyle(.secondary)
 
             // ⚠️ **Priority order first, including entries whose device is absent.** Iterating the
             // device list rendered rows in enumeration order while the arrows moved a different list —
             // so the numbers and the rows disagreed — and a preferred microphone that was unplugged
             // vanished from the menu while staying in the persistent list, which left the user unable
             // to see or remove a preference without reconnecting the device.
+            if !mic.priority.isEmpty {
+                Text("Your list").font(.caption2).foregroundStyle(.secondary)
+            }
             ForEach(Array(mic.priority.enumerated()), id: \.element) { index, uid in
                 microphoneRow(device(uid, in: mic), rank: index, in: mic)
             }
@@ -295,10 +337,6 @@ struct MenuContent: View {
             }
             .font(.caption)
 
-            // ⚠️ **The split the menu never explained.** A list edit reaches a running recording only
-            // at its next start or recovery — a healthy capture is not preempted — while enabled
-            // management of the Mac's input reconciles immediately. Conflating them would make the menu
-            // lie about one of the two promises.
             Text("Changes apply the next time capture starts — a new recording, or one this recording "
                  + "restarts by itself. If Acta manages the Mac's input, that changes right away.")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -308,15 +346,12 @@ struct MenuContent: View {
                     .font(.caption)
             }
 
-            Divider().padding(.vertical, 2)
+            Divider()
             managementControls(mic)
         }
+        .padding(.top, 4)
     }
 
-    /// ⚠️ **Three lines, never one.** System Settings showing the right default does not prove Acta's
-    /// capture followed, and Acta recording from a device says nothing about what the Mac prefers.
-    /// Collapsing them hides the disagreement, which is the only time anyone reads this.
-    @ViewBuilder
     private func microphoneStates(_ mic: ControlAPI.MicrophoneStatus) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if let recording = mic.recordingFrom {

@@ -830,3 +830,77 @@ struct ControlViewModelMicrophoneTests {
         #expect(manager.capturePreference.priority.override == "00-00-5E-00-53-01:input")
     }
 }
+
+/// The one line the menu shows without opening anything.
+///
+/// ⚠️ **It exists because the whole chooser had to be collapsed** — six devices, a picker and the
+/// management controls pushed the menu off the bottom of the screen — and a summary is only worth
+/// collapsing behind if it is true. Rendering stays manual; *what it says* does not have to.
+@Suite("Menu adapter: the microphone summary")
+@MainActor
+struct MicrophoneSummaryTests {
+    @available(macOS 15.0, *)
+    private func status(devices: [AudioInputDevice] = [.builtInMic(), .airPods()],
+                        priority: [String] = [],
+                        override: String? = nil,
+                        recordingFrom: AudioInputDevice? = nil,
+                        choice: CaptureMicrophoneChoice = .followPriority,
+                        systemDefault: ObservedDefaultInput = .device(uid: "BuiltInMicrophoneDevice"))
+        -> ControlAPI.MicrophoneStatus {
+        ControlAPI.MicrophoneStatus(devices: devices, priority: priority, override: override,
+                                    preferred: nil, systemDefault: systemDefault,
+                                    recordingFrom: recordingFrom, managingSystemInput: false,
+                                    captureChoice: choice, enforcement: .disabled)
+    }
+
+    /// ⚠️ **"Recording from" is never said about a preference.** A title is true the moment it is typed
+    /// and a microphone is not true until capture succeeds on it, so only what actually came up may be
+    /// phrased in the present tense.
+    @Test("a preference is phrased as intent, and only a live capture as fact")
+    @available(macOS 15.0, *)
+    func aPreferenceIsNotAFact() {
+        #expect(status(priority: ["BuiltInMicrophoneDevice"]).captureSummary
+            == "Will use MacBook Pro Microphone")
+        #expect(status(priority: ["BuiltInMicrophoneDevice"], recordingFrom: .builtInMic())
+            .captureSummary == "Recording from MacBook Pro Microphone")
+    }
+
+    @Test("a Use now says it is temporary")
+    @available(macOS 15.0, *)
+    func aUseNowSaysSo() {
+        #expect(status(priority: ["BuiltInMicrophoneDevice"], override: "00-00-5E-00-53-01:input")
+            .captureSummary == "Will use AirPods Pro — chosen for now")
+    }
+
+    /// ⚠️ The state a fresh install is in, and the one the collapsed menu most needs to name: nothing
+    /// is chosen, so nothing will be recorded from until the user says.
+    @Test("an empty list says nothing is chosen, not that nothing is available")
+    @available(macOS 15.0, *)
+    func anEmptyListSaysNothingIsChosen() {
+        #expect(status().captureSummary == "No microphone chosen yet")
+    }
+
+    /// ...and a list whose devices have all gone is a different sentence again. Collapsing these two
+    /// would tell a user with an unplugged microphone that they never picked one.
+    @Test("a list with nothing connected is not an empty list")
+    @available(macOS 15.0, *)
+    func anAbsentDeviceIsNotAnEmptyList() {
+        #expect(status(devices: [.builtInMic()], priority: ["USBAudioDevice_UID"]).captureSummary
+            == "None of your microphones is connected")
+    }
+
+    @Test("asking for the Mac's input names the device it resolves to")
+    @available(macOS 15.0, *)
+    func theSystemDefaultChoiceNamesTheDevice() {
+        #expect(status(choice: .systemDefault).captureSummary == "Will use MacBook Pro Microphone")
+    }
+
+    /// ⚠️ A machine whose devices could not be read must not be summarised as a machine with no
+    /// microphones — the same distinction the probe and the inventory keep everywhere else.
+    @Test("an unreadable machine is not an empty one")
+    @available(macOS 15.0, *)
+    func anUnreadableMachineIsNotEmpty() {
+        #expect(status(devices: [], choice: .systemDefault, systemDefault: .unread).captureSummary
+            == "No microphone available")
+    }
+}
