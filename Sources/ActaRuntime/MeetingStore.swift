@@ -123,8 +123,7 @@ public struct MeetingStore {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: Self.frontMatterReadLimit),
-              let text = String(data: data, encoding: .utf8),
-              let info = MeetingInfo.parse(text), !info.isEmpty else { return nil }
+              let info = MeetingInfo.parse(prefix: data), !info.isEmpty else { return nil }
         return info
     }
 

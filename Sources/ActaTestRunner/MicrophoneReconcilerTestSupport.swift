@@ -217,20 +217,32 @@ final class GatedClock: SelfCheckClock, @unchecked Sendable {
     }
 }
 
-/// Wait until `condition` holds, or give up. Bounded so a regression fails instead of hanging.
-@MainActor
-/// ⚠️ **The default stays short on purpose.** Several callers use this bound to assert an *absence* —
-/// "the forbidden thing did not happen within it" — and raising it globally makes every one of those
-/// wait longer for nothing. A caller waiting for something that must arrive raises its own bound.
-/// ⚠️ **The default bound is five seconds, and the number was measured rather than chosen.** At two
-/// seconds the suite was 2 failing runs in 12 as soon as twenty more tests joined the parallel pool —
-/// not because anything they test is slow (the work in them benchmarks under 50 ms in total) but
-/// because swift-testing runs suites concurrently, and a main-actor hop chain waiting on a pool that
-/// twenty more tasks are sharing does not always complete inside two seconds. The control that
-/// established it: the same production changes with those twenty tests removed failed 0 runs in 12.
+/// The window a test gives a **forbidden** outcome to appear in.
 ///
-/// A bound exists so a broken test **fails instead of hanging**; it is not a performance assertion,
-/// and five seconds still fails fast. Anything that genuinely needs longer says so at the call site.
+/// ⚠️ **A negative assertion always pays its whole bound**, because nothing ever satisfies it — so the
+/// two kinds of wait want opposite numbers, and conflating them is what made the default contentious.
+/// A positive wait wants a generous bound (it returns the instant the thing arrives, and the bound is
+/// only there so a regression fails instead of hanging); a negative wait wants the *shortest* window
+/// in which the forbidden thing would plausibly have shown up, and every millisecond beyond that is
+/// paid on every run for nothing. Two seconds is what the negative sites were validated at before the
+/// default moved, so that is what they keep, named rather than inherited.
+let forbiddenOutcomeWindow = 2000
+
+/// Wait until `condition` holds, or give up. Bounded so a regression fails instead of hanging.
+///
+/// ⚠️ **The default is five seconds, and the number is measured — but the *mechanism* is not.** What
+/// was measured: adding twenty pure tests took the gate from 0 failing runs in 12 to 2 in 12, and the
+/// control (the same production changes with those twenty tests removed) was 0 in 12; at five seconds
+/// it is 0 in 12 again. The work inside those tests benchmarks under 50 ms in total, so they are not
+/// slow in themselves. That associates the failures with the added workload. It does **not** establish
+/// contention for the cooperative pool as the cause, and it does not rule out a latent ordering race
+/// in the affected waits that a longer bound merely hides. An earlier version of this comment asserted
+/// the mechanism; it had not been measured, and saying so here is cheaper than someone later trusting
+/// it.
+///
+/// A bound exists so a broken test **fails instead of hanging**; it is not a performance assertion.
+/// Negative assertions do not use this default — see `forbiddenOutcomeWindow`.
+@MainActor
 func awaitCondition(timeoutMilliseconds: Int = 5000,
                     _ condition: @escaping @Sendable () -> Bool) async -> Bool {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000

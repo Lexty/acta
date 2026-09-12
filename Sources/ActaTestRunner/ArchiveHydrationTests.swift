@@ -105,6 +105,51 @@ struct ArchiveHydrationTests {
         }
     }
 
+    /// ⚠️ **A multi-byte character straddling the read boundary must not cost the header.** Found by
+    /// Codex: the prefix used to be decoded whole before the fence was looked for, so a single `é` in
+    /// the *body* landing across byte 8192 made `String(data:encoding:.utf8)` nil and threw away a
+    /// valid header sitting a few hundred bytes earlier. The fence is now found in bytes and only the
+    /// header slice is decoded.
+    @Test("a character split by the read boundary does not cost the metadata")
+    func multibyteAtTheBoundary() throws {
+        try withArchive([]) { store, root in
+            let folder = root.appendingPathComponent("2026-09-08_1000__split", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let header = MeetingInfo(title: "Valid title", date: Date(), source: "",
+                                     durationSeconds: 61, status: .done).rendered()
+            // Pad with ASCII so the next character begins at the last byte of the bounded read.
+            let padding = String(repeating: "a",
+                                 count: MeetingStore.frontMatterReadLimit - 1 - header.utf8.count)
+            let text = header + padding + "é"
+            try text.write(to: folder.appendingPathComponent(MeetingArchive.infoFileName),
+                           atomically: true, encoding: .utf8)
+
+            // The premise, asserted: the prefix genuinely does not decode on its own.
+            let prefix = Data(text.utf8).prefix(MeetingStore.frontMatterReadLimit)
+            #expect(String(data: prefix, encoding: .utf8) == nil,
+                    "the boundary no longer splits a character; this fixture proves nothing")
+
+            #expect(store.listRecordings(hydratingFirst: 5).first?.info?.title == "Valid title")
+        }
+    }
+
+    /// ⚠️ **Malformed bytes inside the front matter are refused, never repaired.** Lossy decoding
+    /// would turn a corrupted title into a plausible-looking one, which is the outcome this reader
+    /// exists to prevent.
+    @Test("invalid UTF-8 inside the header yields no metadata rather than repaired text")
+    func headerBytesAreNotRepaired() throws {
+        try withArchive([]) { store, root in
+            let folder = root.appendingPathComponent("2026-09-09_1000__bad", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var bytes = Data("---\ntitle: \"Cor".utf8)
+            bytes.append(contentsOf: [0xFF, 0xFE])          // not UTF-8 in any encoding of the title
+            bytes.append(contentsOf: Data("rupt\"\n---\n".utf8))
+            try bytes.write(to: folder.appendingPathComponent(MeetingArchive.infoFileName))
+
+            #expect(store.listRecordings(hydratingFirst: 5).first?.info == nil)
+        }
+    }
+
     /// ⚠️ One constant for two jobs: the rows the menu draws and the files the refresh reads. Two
     /// constants would drift, and the drift shows as a row with no title — indistinguishable from a
     /// damaged recording.

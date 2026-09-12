@@ -232,6 +232,45 @@ public struct ArchivedMeetingInfo: Equatable, Sendable {
 }
 
 extension MeetingInfo {
+    /// Parse the front matter out of a **bounded prefix of the file's bytes**.
+    ///
+    /// ⚠️ **Why this exists rather than decoding the prefix and calling `parse(_:)`.** A prefix cut at
+    /// a fixed byte count can land in the middle of a multi-byte character *in the body* — one `é`
+    /// straddling the boundary makes `String(data:encoding:.utf8)` return nil for the whole prefix, and
+    /// a perfectly valid header a few hundred bytes earlier is lost with it. Found by Codex and
+    /// reproduced here before the fix. So the closing fence is located **in bytes**, and only the slice
+    /// up to it is decoded — a slice that ends on a line boundary and therefore never splits a
+    /// character.
+    ///
+    /// ⚠️ **Strictly decoded, never repaired.** If the front matter itself is not valid UTF-8 the
+    /// answer is nil. Replacing malformed bytes with `U+FFFD` would turn a corrupted title into a
+    /// plausible-looking one, which is the outcome this whole reader exists to avoid.
+    public static func parse(prefix data: Data) -> ArchivedMeetingInfo? {
+        let newline = UInt8(ascii: "\n")
+        let fence: [UInt8] = [UInt8(ascii: "-"), UInt8(ascii: "-"), UInt8(ascii: "-")]
+        let bytes = Array(data)
+
+        // Line boundaries, as byte ranges, so nothing here has to decode to find a fence.
+        var lines: [Range<Int>] = []
+        var start = 0
+        for (index, byte) in bytes.enumerated() where byte == newline {
+            lines.append(start..<index)
+            start = index + 1
+        }
+        // A final line with no terminator cannot be a *closing* fence in a file we are reading a
+        // prefix of: we could not tell a complete `---` from the first three dashes of something else.
+        func isFence(_ range: Range<Int>) -> Bool { Array(bytes[range]) == fence }
+
+        guard let opening = lines.firstIndex(where: { !$0.isEmpty }),
+              isFence(lines[opening]),
+              let closing = lines[(opening + 1)...].firstIndex(where: isFence) else {
+            return nil
+        }
+        let slice = Data(bytes[lines[opening].lowerBound..<lines[closing].upperBound])
+        guard let text = String(data: slice, encoding: .utf8) else { return nil }
+        return parse(text)
+    }
+
     /// Parse the front matter `rendered()` writes. Returns nil when there is no front-matter block —
     /// which is a different answer from "a block with nothing in it we understood".
     ///
@@ -281,33 +320,49 @@ extension MeetingInfo {
         return info
     }
 
-    /// Undo `quote(_:)`. An unquoted scalar is returned as written; a quoted one has its escapes
-    /// resolved. A value that opens a quote and never closes it is **not** a string we understood.
+    /// Undo `quote(_:)` — **and accept nothing else**.
+    ///
+    /// ⚠️ **The supported form is the one this file writes, exactly.** `quote(_:)` always emits a
+    /// double-quoted scalar and escapes precisely five characters, so a value that is not quoted, that
+    /// carries an escape we never produce, or that has anything but whitespace after its closing quote
+    /// is a line we have misread — not a title. Returning a plausible string from it is the failure
+    /// mode that matters here: the menu would state a fact, confidently, about a file it did not
+    /// understand.
+    ///
+    /// Each of these was a real answer before this was tightened: `"A\qB"` came back as `AqB` with the
+    /// backslash quietly dropped, `"Real" garbage` came back as `Real`, and a YAML block indicator
+    /// (`title: |`) came back as the title `|`.
+    ///
+    /// ⚠️ Not applied to `date` and `status`: those are written unquoted and are validated by
+    /// `ISO8601DateFormatter` and `Status(rawValue:)`, each of which refuses what it does not know.
     static func unquote(_ value: String) -> String? {
-        guard value.hasPrefix("\"") else { return value }
+        var characters = Substring(value)
+        guard characters.first == "\"" else { return nil }
+        characters = characters.dropFirst()
         var result = ""
-        var escaping = false
-        var closed = false
-        for character in value.dropFirst() {
-            if escaping {
-                switch character {
+        while let character = characters.first {
+            characters = characters.dropFirst()
+            switch character {
+            case "\"":
+                // Only whitespace may follow the closing quote — `rendered()` writes none at all.
+                return characters.allSatisfy(\.isWhitespace) ? result : nil
+            case "\\":
+                guard let escaped = characters.first else { return nil }
+                characters = characters.dropFirst()
+                switch escaped {
                 case "n": result.append("\n")
                 case "r": result.append("\r")
                 case "t": result.append("\t")
-                default: result.append(character)
+                case "\\", "\"": result.append(escaped)
+                // An escape `quote(_:)` does not emit. We do not know what the writer meant.
+                default: return nil
                 }
-                escaping = false
-            } else if character == "\\" {
-                escaping = true
-            } else if character == "\"" {
-                closed = true
-                break
-            } else {
+            default:
                 result.append(character)
             }
         }
-        // A trailing backslash that never got its escapee is a truncated value, not a valid one.
-        return closed && !escaping ? result : nil
+        // Ran out of characters without a closing quote: a truncated value, not a valid one.
+        return nil
     }
 
     /// `HH:MM:SS` back to seconds. Anything else — an empty string, two fields, a negative, a word,

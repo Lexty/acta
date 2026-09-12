@@ -251,7 +251,7 @@ struct ReminderCoordinatorTests {
         coordinator.tick()
 
         gate.release()
-        let started = await awaitCondition {
+        let started = await awaitCondition(timeoutMilliseconds: forbiddenOutcomeWindow) {
             MainActor.assumeIsolated { harness.controller.phase } == .recording
         }
         #expect(!started, "an acceptance survived the rule that minted its episode")

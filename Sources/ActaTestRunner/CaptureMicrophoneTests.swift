@@ -794,7 +794,9 @@ struct RecordingMicrophoneLossTests {
             // ⚠️ **Waited for, not yielded at.** A queued restart is an async lifecycle operation; a
             // fixed number of yields can finish before it does, and the test then passes because it
             // looked too early rather than because nothing happened.
-            let preempted = await awaitCondition { source.startedMicrophoneIDs.count > 2 }
+            let preempted = await awaitCondition(timeoutMilliseconds: forbiddenOutcomeWindow) {
+                source.startedMicrophoneIDs.count > 2
+            }
             #expect(preempted == false,
                     "a queued loss restart tore down the capture that replaced it")
             #expect(fatals.failures.isEmpty,

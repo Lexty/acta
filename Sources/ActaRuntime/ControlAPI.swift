@@ -365,11 +365,37 @@ public final class ControlAPI {
                 : "Recordings use the highest one available. Use the arrows to reorder."
         }
 
+        /// Pause or Resume — never both, and never neither while management is on.
+        ///
+        /// ⚠️ Pause suspends **global enforcement only**. Acta's own recording selection keeps working
+        /// while paused: two different promises, and they must not share a switch.
+        public enum ManagementAction: Equatable, Sendable {
+            case pause
+            case resume
+        }
+
         /// What resuming automatic selection goes back to — the *setting*, which is not always the list.
         private var resumeSentence: String {
             captureChoice == .systemDefault
                 ? "Resume automatic selection to go back to your recording setting."
                 : "Resume automatic selection to go back to the list."
+        }
+
+        /// The one immediate decision the panel offers about enforcement, or nil when Acta is not
+        /// managing the Mac's input at all.
+        ///
+        /// ⚠️ **One projection, because there were two conditionals and they had drifted.** The
+        /// collapsed menu row was gated on `managementNeedsAttention`, which is *false* for both
+        /// `.enforcing` and `.paused` — so ordinary working enforcement offered no Pause and a paused
+        /// one offered no Resume, with the chooser collapsed, which is how it opens. Meanwhile the
+        /// expanded chooser had the correct pause/resume logic in a second `if`. Acta changes a
+        /// system-wide setting other applications share, and the answer to that must never require
+        /// opening a section: the rule is **visible whenever management is on**, not only when it is
+        /// in trouble.
+        public var managementAction: ManagementAction? {
+            guard managingSystemInput else { return nil }
+            if case .paused = enforcement { return .resume }
+            return .pause
         }
 
         /// Whether that state is one the user should act on rather than merely be told about.

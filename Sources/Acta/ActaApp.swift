@@ -526,12 +526,15 @@ struct MenuContent: View {
                 .disclosureRow { microphoneExpanded.toggle() }
             }
 
-            // ⚠️ **A state that needs acting on must not require opening a section to act on.** When
-            // enforcement has stopped or been refused, the two decisions that answer it stay reachable
-            // with the chooser still collapsed.
-            if mic.managementNeedsAttention, !microphoneExpanded {
+            // ⚠️ **Acta is changing a system-wide setting, so the way out of it is never behind a
+            // disclosure.** This row appears whenever management is on — not only when it has gone
+            // wrong — because the chooser is collapsed by default and a working enforcement the user
+            // cannot pause is as much a trap as a broken one they cannot turn off. Which verb it
+            // offers comes from `managementAction`, the same projection the expanded chooser uses, so
+            // the two cannot drift again.
+            if !microphoneExpanded, let action = mic.managementAction {
                 HStack(spacing: 8) {
-                    Button("Pause") { model.pauseMicrophoneManagement() }
+                    managementActionButton(action)
                     Button("Turn off") { model.setManagingSystemInput(false) }
                 }
                 .font(.caption)
@@ -692,17 +695,24 @@ struct MenuContent: View {
             HStack {
                 Text(enforcementText(mic.enforcement)).font(.caption)
                 Spacer()
-                // ⚠️ Pause suspends **global enforcement only**. Acta's own recording selection keeps
-                // working while paused — different promises, and they must not share a switch.
-                if case .paused = mic.enforcement {
-                    Button("Resume") { model.resumeMicrophoneManagement() }.font(.caption)
-                } else {
-                    Button("Pause") { model.pauseMicrophoneManagement() }.font(.caption)
+                // The same projection the collapsed row reads: one decision, decided in one place.
+                if let action = mic.managementAction {
+                    managementActionButton(action).font(.caption)
                 }
             }
         } else {
             Text("Acta is not changing your Mac's input.")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// The verb for `managementAction`, in the one place it is spelled.
+    @ViewBuilder
+    private func managementActionButton(_ action: ControlAPI.MicrophoneStatus.ManagementAction)
+        -> some View {
+        switch action {
+        case .pause: Button("Pause") { model.pauseMicrophoneManagement() }
+        case .resume: Button("Resume") { model.resumeMicrophoneManagement() }
         }
     }
 

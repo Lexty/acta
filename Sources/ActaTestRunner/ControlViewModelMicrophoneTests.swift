@@ -993,6 +993,32 @@ struct ManagementSummaryTests {
                                     enforcement: enforcement)
     }
 
+    /// ⚠️ **The way out of a system-wide change is never conditional on that change having failed.**
+    /// The collapsed menu row used to be gated on `managementNeedsAttention`, which is false for both
+    /// `.enforcing` and `.paused` — so a working enforcement offered no Pause and a paused one offered
+    /// no Resume, with the chooser collapsed, which is how it opens. Found by Codex.
+    @Test("management always offers exactly one immediate verb while it is on")
+    @available(macOS 15.0, *)
+    func everyManagedStateOffersItsVerb() {
+        // The two states the old gate hid, and they are the ordinary ones.
+        #expect(status(.enforcing(uid: "BuiltInMicrophoneDevice")).managementAction == .pause)
+        #expect(status(.paused).managementAction == .resume)
+        // The states that always did offer it still do.
+        #expect(status(.waitingForPreferredDevice).managementAction == .pause)
+        #expect(status(.writesRefused(uids: ["BuiltInMicrophoneDevice"])).managementAction == .pause)
+        #expect(status(.suspended(.repeatedReversals(3))).managementAction == .pause)
+        #expect(status(.degraded(reason: "the audio devices could not be read")).managementAction == .pause)
+        #expect(status(.uncertain(uid: "BuiltInMicrophoneDevice")).managementAction == .pause)
+        #expect(status(.noEligibleDevice).managementAction == .pause)
+    }
+
+    /// ⚠️ Off is off: nothing to pause and nothing to resume, so the row must not appear at all.
+    @Test("management that is off offers no verb")
+    @available(macOS 15.0, *)
+    func disabledOffersNothing() {
+        #expect(status(.disabled).managementAction == nil)
+    }
+
     @Test("only a verified enforcement claims to hold a device, and it names it")
     @available(macOS 15.0, *)
     func onlyEnforcingClaimsToHold() {

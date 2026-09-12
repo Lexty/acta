@@ -116,6 +116,32 @@ struct MeetingInfoReadingTests {
         #expect(parsed.status == nil)
     }
 
+    /// ⚠️ **The supported subset is exactly what `quote(_:)` emits, and nothing else.** Found by
+    /// Codex against this commit's source: an unknown escape came back with the backslash silently
+    /// dropped, trailing junk after the closing quote was ignored, and a YAML block indicator was
+    /// returned as if it were a title. Each of those turns a file we do not understand into a
+    /// confident, wrong sentence in the menu.
+    @Test("scalars we did not write are refused rather than interpreted")
+    func refusesScalarFormsWeNeverWrite() throws {
+        func title(_ line: String) throws -> String? {
+            try #require(MeetingInfo.parse("---\n\(line)\n---")).title
+        }
+        // An escape the writer never emits: not silently swallowed into "AqB".
+        #expect(try title(#"title: "A\qB""#) == nil)
+        // Anything but whitespace after the closing quote means we misread the line.
+        #expect(try title(#"title: "Real" garbage"#) == nil)
+        // A YAML block scalar is not a title that happens to be "|".
+        #expect(try title("title: |") == nil)
+        #expect(try title("title: >-") == nil)
+        // A plain unquoted scalar is not a form this writer produces for a title.
+        #expect(try title("title: plain") == nil)
+        // What we *do* write still reads, including trailing whitespace after the quote.
+        #expect(try title(#"title: "Kept"  "#) == "Kept")
+        #expect(try title(#"title: "a \"quoted\" thing""#) == #"a "quoted" thing"#)
+        #expect(try title(#"title: "back\\slash""#) == #"back\slash"#)
+        #expect(try title(#"title: "line\nbreak""#) == "line\nbreak")
+    }
+
     @Test("an unterminated quoted scalar is not a string we understood")
     func refusesUnterminatedQuote() throws {
         let parsed = try #require(MeetingInfo.parse("---\ntitle: \"never closed\nsource: \"ok\"\n---"))
