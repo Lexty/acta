@@ -575,7 +575,8 @@ these hold, each of which has a test and a negative control (`OwnerReleaseOfferT
 `ReminderPanel.swift` acknowledges only once the window server reports the panel visible, reports a
 lock or a display sleep as a lost presentation, and acknowledges nothing while one is still in force — until
 its own counterpart (unlock, wake, session active) is observed — is human acceptance — see "Not verified
-automatically".
+automatically". The lock pair is registered with `.deliverImmediately`: coalesced while the app is inactive, a
+lock flushed after its unlock would hold for the rest of the process.
 
 Keep Recording, a dismissal, a displacement by another prompt, the preference being switched off and quit
 all end the countdown without acting. **The panel's own expiry is not a dismissal here**

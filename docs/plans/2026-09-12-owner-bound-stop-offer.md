@@ -710,7 +710,9 @@ when `isVisible && occlusionState.contains(.visible)` — right after `orderFron
 pass — holds each of those as a suppression until its own counterpart (`didWake`, `screensDidWake`,
 `sessionDidBecomeActive`, `com.apple.screenIsUnlocked`), acknowledging nothing meanwhile: the release stays
 qualified behind a lock, so a fresh offer is raised onto the still-locked screen, and whether occlusion
-calls that panel visible is unmeasured. The coordinator ignores a loss
+calls that panel visible is unmeasured. The lock pair is registered with `.deliverImmediately`: the default
+suspension behaviour coalesces while the app is inactive and flushes the two names in no fixed order, which
+could hold the lock suppression for good (third review pass). The coordinator ignores a loss
 for a presentation that carries no countdown, so existing prompts behave as before.
 
 Revocation points: `dismiss()` (`.dismissed`), `present` of anything (`.replaced` — and the new prompt's

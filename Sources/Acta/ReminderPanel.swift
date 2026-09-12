@@ -194,28 +194,43 @@ final class ReminderPanelController: ReminderPresenting {
     /// locked screen. Each state is held by the notification that began it and cleared only by its own
     /// counterpart — a wake does not unlock — and while any is held nothing is acknowledged. A counterpart
     /// that never arrives leaves offers unacknowledged, which keeps recording.
+    ///
+    /// ⚠️ **The lock pair is registered to deliver immediately.** A distributed registration without an
+    /// explicit suspension behaviour coalesces (`NSDistributedNotificationCenter.h`), and NSApplication
+    /// suspends distributed delivery while the app is inactive — which a menu-bar app nearly always is.
+    /// Coalesced, a lock and an unlock are held separately and flushed in no fixed order, so a lock
+    /// delivered after its unlock would hold `.screenLocked` for the rest of the process and no offer
+    /// would ever be acknowledged again.
     private func watchForLostPresentation() {
         let workspace = NSWorkspace.shared.notificationCenter
-        let distributed = DistributedNotificationCenter.default()
-        let pairs: [(NotificationCenter, Notification.Name, Notification.Name, Suppression)] = [
-            (workspace, NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, .systemSleep),
-            (workspace, NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
-             .displaySleep),
-            (workspace, NSWorkspace.sessionDidResignActiveNotification,
-             NSWorkspace.sessionDidBecomeActiveNotification, .sessionInactive),
-            (distributed, Notification.Name("com.apple.screenIsLocked"),
-             Notification.Name("com.apple.screenIsUnlocked"), .screenLocked),
+        let pairs: [(Notification.Name, Notification.Name, Suppression)] = [
+            (NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, .systemSleep),
+            (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification, .displaySleep),
+            (NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification,
+             .sessionInactive),
         ]
-        for (center, began, ended, suppression) in pairs {
-            let beganToken = center.addObserver(forName: began, object: nil, queue: .main) { [weak self] _ in
+        for (began, ended, suppression) in pairs {
+            let beganToken = workspace.addObserver(forName: began, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.suppress(suppression) }
             }
-            let endedToken = center.addObserver(forName: ended, object: nil, queue: .main) { [weak self] _ in
+            let endedToken = workspace.addObserver(forName: ended, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.resume(suppression) }
             }
-            observers.append((center, beganToken))
-            observers.append((center, endedToken))
+            observers.append((workspace, beganToken))
+            observers.append((workspace, endedToken))
         }
+
+        let distributed = DistributedNotificationCenter.default()
+        let locked = MainQueueRelay { [weak self] in self?.suppress(.screenLocked) }
+        let unlocked = MainQueueRelay { [weak self] in self?.resume(.screenLocked) }
+        distributed.addObserver(locked, selector: #selector(MainQueueRelay.fire(_:)),
+                                name: Notification.Name("com.apple.screenIsLocked"), object: nil,
+                                suspensionBehavior: .deliverImmediately)
+        distributed.addObserver(unlocked, selector: #selector(MainQueueRelay.fire(_:)),
+                                name: Notification.Name("com.apple.screenIsUnlocked"), object: nil,
+                                suspensionBehavior: .deliverImmediately)
+        observers.append((distributed, locked))
+        observers.append((distributed, unlocked))
     }
 
     private func suppress(_ suppression: Suppression) {
@@ -264,6 +279,21 @@ final class ReminderPanelController: ReminderPresenting {
             [weak self] _ in
             Task { @MainActor in self?.coordinator?.dismiss(prompt) }
         }
+    }
+}
+
+/// A selector target for a registration the block API cannot express — a distributed observer with an
+/// explicit suspension behaviour. Each delivery is queued onto the main queue, which keeps posting order.
+private final class MainQueueRelay: NSObject, Sendable {
+    private let action: @MainActor @Sendable () -> Void
+
+    init(_ action: @escaping @MainActor @Sendable () -> Void) {
+        self.action = action
+    }
+
+    @objc func fire(_ notification: Notification) {
+        let action = self.action
+        DispatchQueue.main.async { MainActor.assumeIsolated { action() } }
     }
 }
 
