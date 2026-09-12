@@ -499,19 +499,20 @@ struct MenuContent: View {
                 // heading was `.headline` — the same 13 pt bold as the app's own name at the top of
                 // the panel — which made a subsection look like a second application. What a person
                 // needs here is the answer, not the name of the question.
+                // ⚠️ **No mic glyph here, and the chevron is why.** `DisclosureGroup` puts its chevron
+                // on the left, so a glyph after it made this the only row in the panel with two marks
+                // before its label — and pushed that label to a third left edge, past both the Settings
+                // row and the Recent list. One leading sign per row: the chevron says this one opens in
+                // place, the gear below says that one is the Settings window. The chevron is not
+                // decoration to work around; it is the sign that carries the meaning here.
                 VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "mic")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        // Already distinguishes "Recording from X" from "Will use X": what is happening
-                        // now and what is promised next are different sentences.
-                        Text(mic.captureSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
+                    // Already distinguishes "Recording from X" from "Will use X": what is happening
+                    // now and what is promised next are different sentences.
+                    Text(mic.captureSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     // ⚠️ Feature (B) changes every other app's input, so *that it is on* stays visible
                     // even when its controls are folded away. Only the controls collapse, never the
                     // statement of what Acta is doing to the machine.
@@ -519,10 +520,13 @@ struct MenuContent: View {
                     // refused enforcement is a feature that has stopped doing what it promised, and
                     // saying so belongs in the line that does not collapse.
                     if let summary = mic.managementSummary {
+                        // ⚠️ The 19 pt indent that used to be here was measuring the mic glyph plus
+                        // its spacing, so that this line began under the summary's text. With the glyph
+                        // gone the offset would be indenting against nothing — subordinate content
+                        // aligned to a mark that no longer exists.
                         Text(summary)
                             .font(.caption2)
                             .foregroundStyle(mic.managementNeedsAttention ? .orange : .secondary)
-                            .padding(.leading, 19)
                     }
                 }
                 .disclosureRow { microphoneExpanded.toggle() }
