@@ -450,6 +450,39 @@ truth (250 ms)                        Acta (1 Hz)
 - The bundle identifier is present and the display name absent (`display=<none>`, `process=Slack
   Helper`), now confirmed by **Acta's own reader** rather than only by the probe.
 
+### What the flap actually is: the pre-join screen
+
+Explained by the user on 2026-09-12, and it reinterprets every trace above. **The first hold is Slack's
+pre-join dialog** — the screen offering microphone and camera settings before you create or join — and
+the microphone is already requested there. The gap is the transition, and the second hold is the live
+huddle.
+
+That immediately explains the one number that had looked erratic. The first hold measured 1.90 s,
+1.37 s, 6.21 s and 2.22 s across four huddles: **those are how long a person spent looking at a
+dialog**, not a device behaviour. Nothing needed explaining about the variance.
+
+⚠️ **In one of the four, the pre-join screen alone exceeded the 3 s offer threshold** — 6.21 s at
+13:38. So on a healthy instance Acta would have offered to record a call that had not started, and
+might never have. That is the "microphone-test screen" false positive, no longer hypothetical.
+
+**And it is largely fine, which is the correction to how this was first written up.** For the manual
+prompt it is arguably an improvement: the offer arrives while the user is still in the dialog, so
+pressing Start catches the *beginning* of the meeting rather than its third second. If they abandon the
+dialog, the cost is one dismissed toast, or twenty seconds until it expires.
+
+For automatic start the cost is a stray short recording, and the proposal already answers it: the
+"recording has started" notice carries Cancel, which stops and deletes. Even ignored, the dialog
+closing releases the input and the release-stop path ends it.
+
+The case genuinely worth handling is **someone who opens the dialog often without joining** — each time
+costs a recording — and even that is bounded by the re-arm. So this is a cost to be aware of when
+choosing the enrolment defaults, not a blocker, and the first version of this section overstated it as
+something that "has to be answered before it ships".
+
+⚠️ It does sharpen the central finding, though: the boundary between the pre-join screen and the live
+call, and the boundary caused by a device switch, are **the same event on the wire** — 539 ms in one
+trace, 824 ms in another. The meaning is in the context, and the context is not observable.
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
