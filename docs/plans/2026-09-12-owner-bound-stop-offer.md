@@ -455,19 +455,66 @@ frozen admission boundary.
 `Sources/ActaTestRunner/MicrophoneOwnershipRuleTests.swift`, Create
 `Sources/ActaTestRunner/MicrophoneOwnershipFixtures.swift`
 
-- [ ] implement the four phases and `observe`, consuming Task 3's reduction
-- [ ] implement `ownerReturned`: a positive same-owner observation cancels and requires a full new
+- [x] implement the four phases and `observe`, consuming Task 3's reduction
+- [x] implement `ownerReturned`: a positive same-owner observation cancels and requires a full new
       interval
-- [ ] encode the recorded traces as event lists and a replayer that samples at a period **and phase
+- [x] encode the recorded traces as event lists and a replayer that samples at a period **and phase
       offset** — ⚠️ with the assumption labelled in the file
-- [ ] write tests: a single false sample does not qualify; `unknown` revokes; a return at 4.9 s requires
+- [x] write tests: a single false sample does not qualify; `unknown` revokes; a return at 4.9 s requires
       a full new 5 s; other applications never affect the owner
-- [ ] write ownership fixtures Codex asked for: partial enumeration with a visible idle sibling;
+- [x] write ownership fixtures Codex asked for: partial enumeration with a visible idle sibling;
       same-key positive sibling; **disappearance**; unresolved identity; an observation gap **during a
       visible countdown**
-- [ ] replay every trace at several offsets: no flap qualifies, the genuine release does
-- [ ] **negative control**: delete `maxSampleGap` → the skipped-poll test fails, and nothing else
-- [ ] run `bash Scripts/test.sh`
+- [x] replay every trace at several offsets: no flap qualifies, the genuine release does
+- [x] **negative control**: delete `maxSampleGap` → the skipped-poll test fails, and nothing else
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 895 tests pass (877 before; 18 new). The rule consumes `AudioProcessReadings.Evidence`, not a
+snapshot, so completeness and own-process dropping stay in the shared fold and the coordinator can fold
+once per tick for both rules (Task 6). It starts `held` at the binding's `observedAt`, because a binding
+is only minted from positive evidence for that key.
+
+Decided here, because the plan did not specify it: `ownerReturned` is emitted when a held observation
+follows a release candidate or a qualified release, and **not** when leaving `unknown`, since nothing is
+left to cancel there. `evidenceLost` is emitted only when a *qualified* release is revoked; an unqualified
+candidate is revoked silently, because nothing could have been shown for it. A timestamp that runs
+backwards counts as a gap.
+
+⚠️ **An unresolved identity needed no pid tracking in the rule.** `AudioProcessProjection` already turns
+a bundle-identifier read that fails for a pid it never identified into an incomplete snapshot with no
+input evidence, which the fold reads as `unreadable`. The fixture encodes exactly that. The dependency is
+written in the rule's doc: a reader that reported such a process under a pid key in a *complete* list
+would make the owner look absent, which is a release.
+
+**The traces** are the 13:22 two-huddle run and the 15:22 probe-against-Acta huddle, transcribed with
+timestamps, plus the seven reported gaps placed after the four reported pre-join holds. That placement is
+invented and labelled so in the file. Each trace is replayed at 1 Hz and at 250 ms, 16 phase offsets each
+(sixteenths of a period, so every timestamp is exact in binary). The machine in every replay is the
+Slack helper plus CoreSpeech holding. The oracle works from the trace, in both directions: no
+qualification without the full interval of truth-released behind it; every release that lasted
+interval + period qualifies exactly once, within a period of the earliest instant it could; a return is
+reported at the first sample that sees it. A precondition check rejects any release whose qualification
+would depend on phase.
+
+**Negative controls, run:**
+- Deleting `maxSampleGap` (keeping only the backwards-clock half) failed **two** tests, not one: the named
+  `a skipped poll is not a continuous release`, and `an observation gap during a visible countdown`.
+  That second fixture is the same rule by construction, so "and nothing else" cannot hold for it.
+  ⚠️ A first version of the backwards-clock test used a 5 s forward step and failed this control as well.
+  It was rewritten to use only 1 s steps, and it now fails only under its own control, which deletes the
+  `interval < 0` half.
+- Letting an unknown observation keep an accumulating candidate failed the unknown-revokes test, the
+  partial-list fixture and the unresolved-identity fixture.
+- Letting a return keep a release candidate failed the replay at every offset (245 issues), plus the
+  single-false-sample test and the 4.9 s return test.
+- ⚠️ **The replay does not pin the 5 s.** With the interval set to 1 s it stayed green, because its oracle
+  reads the configured interval and every recorded flap is under a second. Thirteen unit tests pinned the
+  number instead. `the recorded traces would have stopped the call under a naive rule` proves that the
+  fixture can fail at all.
+
+⚠️ **Not checked:** `bash Scripts/lint.sh` could not run, because `swiftlint` is not installed on this
+machine. Line lengths were checked by hand against the 140-column warning.
 
 ### Task 6: One snapshot per tick, feeding both rules
 
