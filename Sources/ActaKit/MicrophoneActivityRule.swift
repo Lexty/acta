@@ -202,12 +202,9 @@ public struct MicrophoneActivityRule: Sendable {
 
     /// What a key is: an application when we can name one, a process when we cannot.
     ///
-    /// ⚠️ **Coalescing is by bundle identifier**, so the several processes an Electron application or a
-    /// browser runs are one episode and raise one prompt rather than three.
-    private enum Key: Hashable {
-        case bundle(String)
-        case process(Int32)
-    }
+    /// ⚠️ **Shared with the ownership rule**, so the two cannot disagree about what one holder is. See
+    /// `AudioProcessReadings`; this alias keeps the rest of the file reading as it did.
+    private typealias Key = AudioProcessKey
 
     private var configuration: Configuration
     private var phases: [Key: Phase] = [:]
@@ -331,53 +328,18 @@ public struct MicrophoneActivityRule: Sendable {
 
     // MARK: - Transitions
 
-    private enum Reading: Equatable {
-        case held
-        case released
-        case unreadable
-    }
+    private typealias Reading = MicrophoneInputReading
 
-    /// Fold the snapshot into one reading per key. Several processes of one application are one key, and
-    /// **held wins over released**: a browser whose helper is recording while another helper is not is
-    /// holding the microphone.
+    /// Fold the snapshot into one reading per key.
     ///
-    /// ⚠️ Acta's own processes are dropped here rather than filtered later, so its own capture can never
-    /// create, extend or re-arm an episode.
-    // swiftlint:disable:next cyclomatic_complexity
+    /// ⚠️ **The fold itself lives in `AudioProcessReadings` and is shared with the ownership rule.**
+    /// What stays here is only the translation from this rule's `Context` to the set of processes the
+    /// fold has to pretend it never saw.
     private static func readings(from snapshot: AudioProcessSnapshot,
                                  context: Context) -> [Key: Reading] {
-        var readings: [Key: Reading] = [:]
-        for process in snapshot.processes {
-            if context.ownPIDs.contains(process.pid) { continue }
-            if let bundleID = process.bundleID, context.ownBundleIDs.contains(bundleID) { continue }
-            let key: Key = process.bundleID.map { Key.bundle($0) } ?? .process(process.pid)
-            let reading: Reading
-            switch process.isRunningInput {
-            case .some(true): reading = .held
-            case .some(false): reading = .released
-            case .none: reading = .unreadable
-            }
-            readings[key] = Self.stronger(readings[key], reading)
-        }
-        // ⚠️ **A partial list cannot say that anything stopped**, and a visible idle sibling does not
-        // make it able to. The process that actually held the input is exactly the one that can be
-        // missing, so a key with no positively-held process in an incomplete snapshot is unreadable,
-        // never released. Positive evidence still counts: a process seen holding is holding.
-        if !snapshot.isComplete {
-            for (key, reading) in readings where reading == .released {
-                readings[key] = .unreadable
-            }
-        }
-        return readings
-    }
-
-    /// `held` beats `unreadable` beats `released`: a key is idle only when every process of it was seen
-    /// to be idle.
-    private static func stronger(_ lhs: Reading?, _ rhs: Reading) -> Reading {
-        guard let lhs else { return rhs }
-        if lhs == .held || rhs == .held { return .held }
-        if lhs == .unreadable || rhs == .unreadable { return .unreadable }
-        return .released
+        AudioProcessReadings.reduce(snapshot,
+                                    dropping: .init(bundleIDs: context.ownBundleIDs,
+                                                    pids: context.ownPIDs))
     }
 
     private mutating func apply(_ reading: Reading, to key: Key, at now: Date) {

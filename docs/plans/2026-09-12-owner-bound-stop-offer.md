@@ -344,13 +344,30 @@ stopped" is what will diverge. Extract it once; neither rule reimplements it.
 `Sources/ActaKit/MicrophoneActivityRule.swift`, Create
 `Sources/ActaTestRunner/AudioProcessReadingsTests.swift`
 
-- [ ] extract the fold into a pure helper: one `ProcessKey`, own-pid/own-bundle dropping, held-wins,
+- [x] extract the fold into a pure helper: one `ProcessKey`, own-pid/own-bundle dropping, held-wins,
       and the partial-enumeration rule that turns `released` into `unreadable`
-- [ ] have `MicrophoneActivityRule` consume it with **no behaviour change**
-- [ ] write tests: held wins over an unreadable sibling of the same key; a partial list with a visible
+- [x] have `MicrophoneActivityRule` consume it with **no behaviour change**
+- [x] write tests: held wins over an unreadable sibling of the same key; a partial list with a visible
       idle sibling yields unreadable, never released; confirmed absence in a *complete* list is release
-- [ ] **negative control**: delete the partial-list rule → the visible-idle-sibling test fails
-- [ ] run `bash Scripts/test.sh` — ⚠️ all 854 must still pass: this task changes no behaviour
+- [x] **negative control**: delete the partial-list rule → the visible-idle-sibling test fails
+- [x] run `bash Scripts/test.sh` — ⚠️ all 854 must still pass: this task changes no behaviour
+
+
+**Done.** 871 tests pass (860 before; 11 new). `MicrophoneActivityRule` changed no behaviour — its
+`Key` and `Reading` are now `typealias`es onto the shared `AudioProcessKey` and `MicrophoneInputReading`,
+and its `readings(from:context:)` is three lines translating a `Context` into the set of processes the
+fold must pretend it never saw.
+
+⚠️ **The plan's name for the reading type was already taken.** `AudioProcessReading` is the *reader
+protocol* in `ActaRuntime` — the thing `ScriptedReader` conforms to. The fold's per-key verdict is
+`MicrophoneInputReading`; the file keeps the plan's name, `AudioProcessReadings.swift`.
+
+**Negative control:** deleting the incomplete-enumeration rule failed **three** tests, not one — the
+named `a partial list with a visible idle sibling is unreadable, never released`, its sibling
+`a partial list may still say that something is holding`, and the *pre-existing*
+`a partial list whose visible sibling is idle does not release the application` in
+`MicrophoneActivityRuleTests`. The third is the useful one: it proves the extraction really does feed
+the old rule rather than sitting beside it.
 
 ### Task 4: Owner selection from the triggering prompt
 
