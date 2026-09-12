@@ -190,6 +190,39 @@ an enrolment actually depends on.
 same pid. A system speech service, not a meeting — a live instance of the false-positive class, and
 evidence that holding can be *long*, not only brief.
 
+### Slack, measured on a live huddle — the question this item existed to answer
+
+⚠️ **This is the result that decides the item, and it is positive.** Measured 2026-09-12 on this
+machine, Slack running, with `Scripts/probe-audio-process-objects.swift` and a transition watcher:
+
+| state | holder of `IsRunningInput` | duration observed |
+|---|---|---|
+| in a huddle | `com.tinyspeck.slackmacgap.helper` (pid 81379) | 90 s, **continuous, zero transitions** |
+| Slack running, no huddle | *(nothing from Slack)* | 180 s, the helper **never appeared** |
+
+Three things follow.
+
+- **The durable key exists for Slack.** The holder is a helper, and it carries its own bundle
+  identifier — `com.tinyspeck.slackmacgap.helper`, distinct from the app's
+  `com.tinyspeck.slackmacgap`, with a third object (pid 81380, "Slack Helper", accessory) present but
+  not holding. So the original worry, that a huddle would be held by something keyed only by pid, is
+  **wrong here**. A mode can be remembered against that string.
+- **Holding discriminates the call.** In a huddle it holds without a gap; outside one it does not hold
+  at all. That is exactly the signal the proposal's auto-start and auto-stop need, and it is a stronger
+  result than "an identifier exists".
+- **The unverified claim is refuted for this version.** The secondary source's "Slack opens brief audio
+  sessions outside huddles, for the mute button and device availability" did not happen in three
+  minutes of a running, idle Slack. Treat it as false here rather than as generally false: one machine,
+  one Slack build, no attempt at the mic-settings screen or a device switch.
+
+⚠️ **The release edge itself was not captured.** The watcher's first sample already found the helper
+released, so what exists is two observed *states*, not a recorded transition. Auto-stop fires on the
+edge, so it is worth seeing once directly — along with what happens to the pid, since a helper that
+restarts between calls would break a pid-keyed design and leave a bundle-keyed one intact.
+
+Still unmeasured for Slack: mute/unmute, a device handoff mid-huddle, the microphone-test screen, and
+whether a second huddle reuses pid 81379 or spawns a new helper.
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
