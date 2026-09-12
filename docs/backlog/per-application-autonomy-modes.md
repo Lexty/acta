@@ -379,6 +379,47 @@ meeting is a loss.
 
 
 
+### The user's resolution: the boundary is a human decision, not a detected fact
+
+Decided by the user on 2026-09-12, after the three-indistinguishable-situations finding above, and it
+is the right shape: **since the signal cannot tell the cases apart, Acta must not decide — it asks, and
+it never does the irreversible thing without an answer.**
+
+- Leaving a call raises a prompt saying the recording **is about to be stopped**.
+- **Cancel** keeps it running — this is the reconnect case, and it is the *default* outcome if nothing
+  is pressed, because keeping one recording is the recoverable error.
+- **Stop now** ends it immediately — this is the "I am going straight into another call" case, and it
+  removes the wait the countdown would otherwise impose.
+- A third button, "stop and start a new one", was considered and **rejected by the user as overloading
+  the prompt**. Recorded so nobody adds it back without a reason.
+
+⚠️ **This also disposes of the countdown-length argument.** The debate about whether the release
+qualification should be long (for reconnects) or short (for back-to-back calls) does not have to be
+settled by a number, because both answers are on the prompt. The countdown only needs to be long enough
+to be *readable and cancellable*; it is not trying to be right about what happened.
+
+### Responsiveness after a long recording — a constraint with numbers
+
+The user's requirement: after stopping a multi-hour recording, the next one must be startable **at
+once**.
+
+⚠️ **It is not satisfied today.** `ControlState.canStart` is `operation == .idle`, and `.saving` is an
+operation — so while the segments are being assembled, a start is refused. The user would leave a
+three-hour call, stop, want to join the next one, and be told no.
+
+How long that lasts is **extrapolated, not measured**: a 90-second recording assembled in ~570 ms
+(13:40:47.99 capture stopped → 13:40:48.56 session stopped, from today's log). Assembly is
+concatenation, so the cost is roughly linear in bytes; a three-hour recording is 120× longer, which
+suggests something like a minute of refusing to start. ⚠️ That is arithmetic on one data point and
+**must be measured before it is believed** — record a long session and time the stop.
+
+If it holds, the fix is not a faster assembler. It is that **assembly must stop being part of the
+operation that blocks a start**: the next recording writes to its own folder and has nothing to do with
+the previous one's segments. The phase machine would need `.saving` to be a property of *a recording*
+rather than of *the app*, so a new capture can begin while the previous archive finishes in the
+background — with the obvious constraints that the archive listing must not show a half-assembled
+recording as done, and that quitting must still wait for work in flight.
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
