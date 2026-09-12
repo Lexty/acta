@@ -483,6 +483,35 @@ something that "has to be answered before it ships".
 call, and the boundary caused by a device switch, are **the same event on the wire** — 539 ms in one
 trace, 824 ms in another. The meaning is in the context, and the context is not observable.
 
+### Acta's own capture is `com.apple.replayd`, not Acta
+
+Found while tracing on 2026-09-12 and easy to miss: Acta captures through ScreenCaptureKit, and the
+process the HAL reports as holding the input is **`com.apple.replayd`**, a system daemon. The trace
+matched Acta's own log exactly — replayd acquired at 13:39:17.717 against a recording started at
+13:39:17, released at 13:40:48.202 against a stop at 13:40:47, and flapped 277 ms at 13:43:14.634 which
+is precisely the device-loss restart Acta logged at 13:43:14.597.
+
+So **for its own rule, Acta's recording looks like a third-party application taking the microphone.**
+`com.apple.replayd` is not in `ownBundleIDs`, and `ownPIDs` holds only Acta's own pid.
+
+⚠️ **What actually prevents a self-triggered prompt today is not the own-process filter but
+`context.isBusy`** — `offerIfQualified` is guarded by `!isBusy`, and `isBusy` is
+`state.operation != .idle`. That is a different mechanism from the one the comments describe, and it
+has a seam: `.holding(since:)` for replayd is set when the recording starts, so the 3 s threshold is
+long past by the time it ends. If `isBusy` went false while replayd was still observed holding, an
+offer would be minted **immediately**, caused by Acta's own capture that had just finished.
+
+Today's ordering saves it — capture stops about 570 ms before the operation reaches `.idle`
+(13:40:47.992 "Capture stopped" against 13:40:48.561 "stopped and saved"), and the gap is larger still
+for a long assembly. ⚠️ But that is an accident of timing, not a guarantee, and it is exactly the kind
+of ordering that changes when someone makes `.saving` stop blocking a new start — which is a change
+this very item asks for.
+
+⚠️ **Do not fix it by adding `replayd` to `ownBundleIDs`.** The daemon is shared: every
+ScreenCaptureKit client appears as replayd, so suppressing it blinds the rule to other applications'
+captures too. If a fix is wanted, it has to identify *Acta's own* capture — for instance by
+correlating with the recording the app knows it started — rather than by silencing the daemon.
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
