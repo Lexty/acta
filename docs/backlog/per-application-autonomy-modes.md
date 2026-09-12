@@ -195,25 +195,34 @@ evidence that holding can be *long*, not only brief.
 ⚠️ **This is the result that decides the item, and it is positive.** Measured 2026-09-12 on this
 machine, Slack running, with `Scripts/probe-audio-process-objects.swift` and a transition watcher:
 
-| state | holder of `IsRunningInput` | duration observed |
+| state | holder of `IsRunningInput` | what was observed |
 |---|---|---|
-| in a huddle | `com.tinyspeck.slackmacgap.helper` (pid 81379) | 90 s, **continuous, zero transitions** |
-| Slack running, no huddle | *(nothing from Slack)* | 180 s, the helper **never appeared** |
+| in a huddle | `com.tinyspeck.slackmacgap.helper` (pid 81379) | positive in **every** sample across 90 s |
+| Slack running, no huddle | *(nothing from Slack)* | negative in **every** sample across 180 s |
+
+⚠️ **"Every sample", not "continuously".** The watcher polled at 400 ms. A release and re-acquisition
+inside one interval is invisible to it, so what is established is the state at each sample, not the
+absence of transitions between them.
 
 Three things follow.
 
-- **The durable key exists for Slack.** The holder is a helper, and it carries its own bundle
+- **A candidate durable key exists for Slack**, pending one more measurement: recurrence across a
+  restart. The holder is a helper, and it carries its own bundle
   identifier — `com.tinyspeck.slackmacgap.helper`, distinct from the app's
   `com.tinyspeck.slackmacgap`, with a third object (pid 81380, "Slack Helper", accessory) present but
   not holding. So the original worry, that a huddle would be held by something keyed only by pid, is
   **wrong here**. A mode can be remembered against that string.
-- **Holding discriminates the call.** In a huddle it holds without a gap; outside one it does not hold
-  at all. That is exactly the signal the proposal's auto-start and auto-stop need, and it is a stronger
-  result than "an identifier exists".
-- **The unverified claim is refuted for this version.** The secondary source's "Slack opens brief audio
-  sessions outside huddles, for the mute button and device availability" did not happen in three
-  minutes of a running, idle Slack. Treat it as false here rather than as generally false: one machine,
-  one Slack build, no attempt at the mic-settings screen or a device switch.
+- **Holding separated *this* huddle from *this* idle window** — which is what the proposal's
+  auto-start and auto-stop need to be true, and is a stronger result than "an identifier exists". ⚠️ It
+  is **not** yet the claim that holding discriminates calls from every other Slack use of the input: a
+  microphone-test screen, a settings pane, a voice clip or a device check are all untested, and any of
+  them holding the input would put a false positive on exactly this signal.
+- **The unverified claim was not observed — which is not the same as refuted, and the first version of
+  this section said "refuted".** The secondary source's "Slack opens brief audio sessions outside
+  huddles, for the mute button and device availability" produced nothing in a 180-second idle window.
+  That window cannot rule the claim out: the trigger may be an interaction nobody performed, or an
+  event shorter than the 400 ms poll. **The claim stays unsupported**, and this result says only "not
+  observed while Slack sat idle for 180 s".
 
 ⚠️ **The release edge itself was not captured.** The watcher's first sample already found the helper
 released, so what exists is two observed *states*, not a recorded transition. Auto-stop fires on the
@@ -222,6 +231,49 @@ restarts between calls would break a pid-keyed design and leave a bundle-keyed o
 
 Still unmeasured for Slack: mute/unmute, a device handoff mid-huddle, the microphone-test screen, and
 whether a second huddle reuses pid 81379 or spawns a new helper.
+
+### The full trace: join, mute, leave, re-join — and the flap that breaks a naive auto-stop
+
+Captured 2026-09-12 in one uninterrupted run. **macOS 26.6.2 (25G83), Slack 4.52.155**, sampling every
+250 ms, releases reported only from a *complete* enumeration (there were no incomplete ones).
+
+```
+13:19:10.732  baseline: com.apple.CoreSpeech#1136 only
+13:22:35.565  + com.tinyspeck.slackmacgap.helper pid=81379 object=182   join #1
+13:22:37.468  −   (held 1.9 s)   object present, input now false
+13:22:37.741  +   (gap 273 ms)
+13:22:38.009  −   (held 268 ms)  object present, input now false
+13:22:38.275  +   (gap 266 ms)
+13:22:56.051  −   (held 17.8 s)  object present, input now false        leave #1
+13:23:12.846  +   (gap 16.8 s)                                          join #2
+13:23:14.217  −   (held 1.4 s)   object present, input now false
+13:23:14.768  +   (gap 551 ms)
+13:23:24.347  −   (held 9.6 s)   object present, input now false        leave #2
+13:24:10.813  end: com.apple.CoreSpeech#1136 only  (46 s, nothing from Slack)
+```
+
+⚠️ **The finding that changes the design: holding is not smooth.** Every join was followed within
+1.4–2.4 s by a release and re-acquisition lasting ~270 ms. **An auto-stop firing on the first observed
+release would stop the recording two seconds into the call.** A debounce is not a precaution here, it
+is a measured requirement. And the flaps (266–273 ms) are the same order as the 250 ms sampling
+interval, so **shorter ones may exist unseen**: the real signal is at least this noisy and possibly
+noisier. Any release qualification must be expressed as "released continuously for N", never as "a
+sample said false".
+
+**Mute does not release the input.** The user muted and unmuted shortly before leaving huddle #1 —
+roughly 13:22:45–56 — and there is no transition in that range. The decisive control is huddle #2,
+where nothing was muted and the join flap happened anyway: the flap belongs to joining, not to muting.
+So a recording will not be stopped by someone muting themselves, which the naive reading of "released
+the microphone" would have got wrong.
+
+**The helper is not restarted between calls.** `pid=81379 object=182` in every transition, across both
+huddles. A pid-keyed mode would have survived *this* sequence — so pid turnover is not the argument
+against pid keys; the argument is that nothing guarantees it, and the bundle key does not depend on it.
+⚠️ Still unmeasured: recurrence across a **Slack restart**, which is the case that actually decides it.
+
+**Every release was "object present, input now false", never a disappearance.** The process stays alive
+and observable across the whole sequence, so an owner-tracking observer does not have to distinguish
+"let go" from "died" for this application.
 
 ### Scope ambiguity, which the key does not solve
 
