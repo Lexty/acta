@@ -829,4 +829,134 @@ struct ReminderCoordinatorTests {
                 == .observed(processes: 4, isComplete: false, holders: 2))
         #expect(reader.readCount == 1, "one tick must read the process list exactly once")
     }
+
+    // MARK: - One snapshot per tick
+
+    private static let slackHelper = "com.tinyspeck.slackmacgap.helper"
+
+    /// The measured machine during a huddle: the Slack helper and CoreSpeech both holding, plus a
+    /// process of Acta's own holding too, which the release side must never see.
+    private static let huddle = AudioProcessSnapshot(
+        processes: [
+            AudioProcessObservation(pid: 601, bundleID: slackHelper, displayName: nil,
+                                    processName: "Slack Helper", isRunningInput: true),
+            AudioProcessObservation(pid: 602, bundleID: "com.apple.CoreSpeech", displayName: nil,
+                                    processName: "corespeechd", isRunningInput: true),
+            AudioProcessObservation(pid: 603, bundleID: "dev.personal.acta-dev", displayName: "Acta",
+                                    processName: "Acta", isRunningInput: true),
+        ],
+        isComplete: true)
+
+    @available(macOS 15.0, *)
+    private func apply(_ harness: ControllerHarness, start: Bool, release: Bool, quiet: Bool,
+                       excluding excluded: [String] = []) {
+        var settings = harness.controller.settings
+        settings.offersRecordingWhenMicrophoneBusy = start
+        settings.offersStopWhenOwnerReleases = release
+        settings.offersStopWhenQuiet = quiet
+        settings.reminderExcludedBundleIDs = excluded
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+    }
+
+    /// ⚠️ **The test the plan's negative control names.** Gating the read on the start reminder would
+    /// make the release offer depend on a preference the user can switch off separately, and a binding
+    /// could then never be re-checked against anything.
+    @Test("with the start reminder off and the release one on, the process list is observed from idle")
+    @available(macOS 15.0, *)
+    func releaseStopObservesFromIdleWithTheStartReminderOff() async {
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        apply(harness, start: false, release: true, quiet: false)
+        reader.set(Self.huddle)
+        #expect(harness.controller.phase == .idle, "the precondition is an idle recorder")
+
+        coordinator.tick()
+        #expect(reader.readCount == 1, "the release side read nothing from idle")
+        #expect(coordinator.lastHeartbeat?.observation
+                == .observed(processes: 3, isComplete: true, holders: 3))
+        guard let seen = coordinator.releaseEvidence else {
+            Issue.record("the release side kept no evidence from the read"); return
+        }
+        #expect(seen.observedAt == clock.now, "the evidence was stamped with a different clock")
+        #expect(seen.evidence.isComplete)
+        #expect(seen.evidence.reading(of: .bundle(Self.slackHelper)) == .held)
+        #expect(seen.evidence.reading(of: .bundle("com.apple.CoreSpeech")) == .held)
+
+        // Enough held ticks to qualify a start offer, and none appears. ⚠️ **This pins the outcome, not
+        // the gate.** Feeding the start rule regardless of its preference was run as a control and
+        // stayed green: while that preference is off the rule is replaced on every tick and its context
+        // is disabled, so whether it was fed is not observable from here.
+        for _ in 0..<8 {
+            clock.advance(1)
+            coordinator.tick()
+        }
+        #expect(coordinator.prompt == nil, "the release preference raised a start offer")
+        #expect(reader.readCount == 9, "one tick must read the process list exactly once")
+    }
+
+    /// ⚠️ **The whole matrix, both directions.** Zero reads for either quiet value when neither
+    /// process-consuming reminder is on; exactly one read per tick for any other combination — a
+    /// second read per tick for the second rule would be the cost this task exists to avoid.
+    @Test("the process list is read once per tick when either consumer is on, and never otherwise")
+    @available(macOS 15.0, *)
+    func theReadMatrix() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        reader.set(Self.huddle)
+        for start in [false, true] {
+            for release in [false, true] {
+                for quiet in [false, true] {
+                    apply(harness, start: start, release: release, quiet: quiet)
+                    let before = reader.readCount
+                    coordinator.tick()
+                    coordinator.tick()
+                    let expected = (start || release) ? 2 : 0
+                    #expect(reader.readCount - before == expected,
+                            "start=\(start) release=\(release) quiet=\(quiet): two ticks read \(reader.readCount - before) times")
+                    #expect((coordinator.releaseEvidence != nil) == release,
+                            "start=\(start) release=\(release) quiet=\(quiet): release evidence did not follow its preference")
+                }
+            }
+        }
+    }
+
+    /// ⚠️ **Evidence the release side was not allowed to keep gathering is not evidence of the
+    /// present.** Switched off after a read, the last picture must go rather than linger for whatever
+    /// consumes it next.
+    @Test("switching the release preference off discards what it saw")
+    @available(macOS 15.0, *)
+    func switchingReleaseOffDiscardsItsEvidence() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        apply(harness, start: true, release: true, quiet: false)
+        reader.set(Self.huddle)
+        coordinator.tick()
+        #expect(coordinator.releaseEvidence != nil, "the precondition is evidence to discard")
+
+        apply(harness, start: true, release: false, quiet: false)
+        coordinator.tick()
+        #expect(reader.readCount == 2, "the start reminder still reads")
+        #expect(coordinator.releaseEvidence == nil, "evidence outlived the preference that gathered it")
+    }
+
+    /// ⚠️ **The release side drops Acta's own processes and nothing else.** "Do not offer to record
+    /// Slack" is not consent to disregard Slack while deciding who may stop a recording — the exclusion
+    /// list stays scoped to start offers.
+    @Test("the release side ignores Acta's own capture but not the start reminder's exclusions")
+    @available(macOS 15.0, *)
+    func releaseEvidenceDropsOnlyActaItself() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        apply(harness, start: true, release: true, quiet: false, excluding: [Self.slackHelper])
+        reader.set(Self.huddle)
+        coordinator.tick()
+        guard let seen = coordinator.releaseEvidence else {
+            Issue.record("no evidence to inspect"); return
+        }
+        #expect(seen.evidence.readings[.bundle("dev.personal.acta-dev")] == nil,
+                "Acta's own capture reached the release side")
+        #expect(seen.evidence.reading(of: .bundle(Self.slackHelper)) == .held,
+                "the start reminder's exclusion list reached the release side")
+    }
 }

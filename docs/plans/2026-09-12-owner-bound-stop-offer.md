@@ -525,18 +525,51 @@ and Codex notes it would also be circular.
 **Files:** Modify `Sources/ActaRuntime/ReminderCoordinator.swift`,
 `Sources/ActaTestRunner/ReminderCoordinatorTests.swift`
 
-- [ ] read the snapshot once per tick, above both preference checks; feed each rule per its own
+- [x] read the snapshot once per tick, above both preference checks; feed each rule per its own
       preference
-- [ ] when neither feature is enabled, read nothing
-- [ ] write a test: with the start reminder off and release-stop on, observation happens from idle
-- [ ] write a test: with both off, `readSnapshot` is never called (counted on the scripted reader)
+- [x] when neither feature is enabled, read nothing
+- [x] write a test: with the start reminder off and release-stop on, observation happens from idle
+- [x] write a test: with both off, `readSnapshot` is never called (counted on the scripted reader)
       — ⚠️ **"both" means the start and release reminders**, the two that consume process observations;
       the quiet one measures audio and never gated this read. The matrix to land here:
       start=false/release=false → zero reads for **either** quiet value; start=false/release=true → one
       read from idle. `ScriptedReader` already counts (Task 1), and
       `noReminderEnabledBeatsNotObserved` already pins the zero-read half.
-- [ ] **negative control**: move the read back inside the start branch → the first test fails
-- [ ] run `bash Scripts/test.sh`
+- [x] **negative control**: move the read back inside the start branch → the first test fails
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 899 tests pass (895 before; 4 new). The read sits above both preference checks and is gated
+on `start || release`; the start rule is fed under its own switch, and the release side folds the same
+snapshot through `AudioProcessReadings.evidence` into `ReminderCoordinator.releaseEvidence` — the
+evidence, the coordinator's `observedAt`, and the observation epoch.
+
+⚠️ **Decided here: this task feeds no `MicrophoneOwnershipRule`, because none can exist yet.** A rule
+needs an `OwnerBinding`, and bindings are admitted in Task 7. What lands is the per-tick evidence that
+rule and Task 7's re-check will consume. It is `nil` whenever the release preference is off, so a later
+consumer can never read a picture nobody was allowed to keep gathering.
+
+⚠️ **Carried into Task 7:** the epoch in `releaseEvidence` is the start rule's, and it advances on
+*every* tick while the start reminder is off, because `applyPreferenceChanges` replaces the activity rule
+each time. It is harmless now only because no prompt, and so no binding, exists then.
+
+The release fold drops Acta's own bundles and pid and **nothing else** — the start reminder's exclusion
+list is not applied, per Decision 2, and a test pins it with the Slack helper excluded.
+
+**Negative controls, run:**
+- Moving the read back inside the start branch (the plan's control) failed the named
+  `with the start reminder off and the release one on, the process list is observed from idle`, and the
+  matrix test alongside it, which contains the same configuration.
+- A second `readSnapshot()` for the release fold failed the matrix, the from-idle test, the
+  switch-off test and the pre-existing `the beat reports what was actually in the snapshot`.
+- Keeping stale evidence when the release preference is off failed the matrix and the switch-off test.
+- Applying the exclusion list to the release fold failed only the exclusion test.
+- ⚠️ **Feeding the start rule regardless of its preference stayed green.** While that preference is off
+  the rule is replaced every tick and its context is disabled, so "the start rule was not fed" is not
+  observable. The from-idle test's `prompt == nil` assertion pins the outcome only, and now says so.
+
+⚠️ **Not checked:** `bash Scripts/lint.sh` — `swiftlint` is not installed. The three lines over 140
+columns in the coordinator are pre-existing log lines; one moved into `observeActivity` and got shorter.
 
 ### Task 7: One admission seam, and the binding frozen across the start
 

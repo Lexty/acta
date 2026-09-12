@@ -78,14 +78,31 @@ public struct ReminderHeartbeat: Equatable, Sendable {
         /// The process list was read on this tick.
         case observed(processes: Int, isComplete: Bool, holders: Int)
         /// **No snapshot was read on this tick.** Literally that, and nothing more: the ordinary
-        /// cause is the start reminder being off, but a tick that returned early before reaching the
-        /// read reports the same thing.
+        /// cause is both process-consuming reminders — the start offer and the release stop offer —
+        /// being off, but a tick that returned early before reaching the read reports the same thing.
         ///
         /// ⚠️ **Deliberately not repaired by the diagnostic.** A heartbeat that walked the process list
         /// to have something to report would add exactly the per-second cost the design refuses when
         /// the feature is off.
         case notObserved
     }
+}
+
+/// One fold of a process snapshot, as the release side of the reminders last saw it.
+///
+/// ⚠️ **The time and the epoch travel with the evidence**, because a binding admitted from it has to be
+/// re-checked against the observation it claims to come from, not against whatever "now" is when the
+/// check runs.
+public struct ObservedProcessEvidence: Equatable, Sendable {
+    public let evidence: AudioProcessReadings.Evidence
+    /// When the snapshot behind it was read, on the coordinator's clock.
+    public let observedAt: Date
+    /// The observation epoch current when it was read.
+    ///
+    /// ⚠️ **The start reminder's epoch**, the one a prompt's token and an `OwnerBinding` carry. It
+    /// advances on every tick while the start reminder is off, because the activity rule is replaced
+    /// each time; that is harmless only because no prompt — and so no binding — exists then.
+    public let epoch: UInt64
 }
 
 /// Joins the two reminder rules to the recorder.
@@ -118,6 +135,13 @@ public final class ReminderCoordinator: ObservableObject {
     /// therefore this epoch *and* the id, and both are re-checked.
     private var observationEpoch: UInt64 = 1
     private var quietRule = AudioActivityRule()
+    /// What the release side saw on the last tick that read the process list for it.
+    ///
+    /// ⚠️ **`nil` whenever the release preference is off**, rather than left holding the last picture:
+    /// evidence nobody was allowed to keep gathering is not evidence of the present. Published for the
+    /// admission seam that binds a recording to its owner, and so a test can see that observation
+    /// happens from idle rather than infer it from a read count.
+    public private(set) var releaseEvidence: ObservedProcessEvidence?
     private var pollTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
     /// Latched at quit **initiation**, synchronously.
@@ -355,14 +379,22 @@ public final class ReminderCoordinator: ObservableObject {
             ownBundleIDs: Self.ownBundleIDs,
             ownPIDs: [ProcessInfo.processInfo.processIdentifier])
 
-        // ⚠️ **The HAL is not read at all when the start reminder is off** — a property walk per second
-        // for a feature nobody asked for is not worth keeping episode state warm; a re-enable
-        // rebaselines instead. ⚠️ But this must **not** return: the two preferences are independent, and
-        // an early exit here left the quiet evaluation depending entirely on summaries arriving. With a
-        // stalled meter there are no summaries, so a standing stop offer would never notice it had gone
-        // stale.
-        if settings.offersRecordingWhenMicrophoneBusy {
+        // ⚠️ **One read per tick, above both preference checks, feeding each rule by its own switch.**
+        // The release side must observe from idle rather than only once a bound recording exists:
+        // gating the read on the start reminder would make the release offer depend on a preference
+        // the user can switch off independently — the shared authority Decision 6 of the owner-bound
+        // stop plan forbids. ⚠️ **And nothing is read when neither consumer is on** — a property walk per
+        // second for features nobody asked for is not worth keeping state warm; a re-enable rebaselines
+        // instead. The quiet reminder measures audio, not processes, so it never gates this read.
+        // ⚠️ This must **not** return either: an early exit left the quiet evaluation depending entirely
+        // on summaries arriving, and with a stalled meter a standing stop offer would never notice it had
+        // gone stale.
+        let observesProcesses = settings.offersRecordingWhenMicrophoneBusy
+            || settings.offersStopWhenOwnerReleases
+        if !settings.offersStopWhenOwnerReleases { releaseEvidence = nil }
+        if observesProcesses {
             let snapshot = reader.readSnapshot()
+            let observedAt = now()
             observation = .observed(processes: snapshot.processes.count,
                                     isComplete: snapshot.isComplete,
                                     holders: snapshot.processes.filter { $0.isRunningInput == true }.count)
@@ -376,29 +408,49 @@ public final class ReminderCoordinator: ObservableObject {
                 lastLoggedHolders = holders
                 log.info("observed \(snapshot.processes.count, privacy: .public) processes, complete=\(snapshot.isComplete, privacy: .public), holding=[\(holders.joined(separator: ", "), privacy: .public)]")
             }
-            switch activityRule.observe(snapshot, at: now(), context: context) {
-            case .none:
-                break
-            case .offer(let episode):
-                // ⚠️ **Instrumentation, and it decides a design question rather than decorating one.**
-                // Whether a per-application mode can ever be remembered depends on there being a
-                // durable key: a bundle identifier survives a helper restart, a PID does not. Nothing
-                // recorded this, so every claim about it so far has been inference from an absent
-                // display name — which is nil for three different reasons, only one of them a helper.
-                // One huddle and one call now settle it.
-                log.info("episode \(episode.id, privacy: .public) minted — bundle=\(episode.bundleID ?? "<none>", privacy: .public) display=\(episode.displayName ?? "<none>", privacy: .public) process=\(episode.processName ?? "<none>", privacy: .public)")
-                present(.offerToRecord(episodeID: token(for: episode.id),
-                                       application: episode.displayName,
-                                       bundleID: episode.bundleID,
-                                       suggestedTitle: service.state.suggestedTitle,
-                                       microphone: service.microphoneStatus.captureSummary))
-            case .withdraw(let episodeID):
-                log.info("episode \(episodeID, privacy: .public) withdrawn — the holder let go")
-                withdrawStartOffer(token(for: episodeID))
+            if settings.offersRecordingWhenMicrophoneBusy {
+                observeActivity(snapshot, at: observedAt, context: context)
+            }
+            if settings.offersStopWhenOwnerReleases {
+                // ⚠️ **Folded with Acta's own processes dropped and nothing else.** The start reminder's
+                // exclusion list is deliberately absent: "do not offer to record Slack" is not consent to
+                // disregard Slack while deciding who may stop a recording.
+                releaseEvidence = ObservedProcessEvidence(
+                    evidence: AudioProcessReadings.evidence(
+                        from: snapshot,
+                        dropping: .init(bundleIDs: Self.ownBundleIDs,
+                                        pids: [ProcessInfo.processInfo.processIdentifier])),
+                    observedAt: observedAt,
+                    epoch: observationEpoch)
             }
         }
 
         evaluateQuiet()
+    }
+
+    /// Feed the start reminder's rule one snapshot, and act on what it says.
+    private func observeActivity(_ snapshot: AudioProcessSnapshot, at observedAt: Date,
+                                 context: MicrophoneActivityRule.Context) {
+        switch activityRule.observe(snapshot, at: observedAt, context: context) {
+        case .none:
+            break
+        case .offer(let episode):
+            // ⚠️ **Instrumentation, and it decides a design question rather than decorating one.**
+            // Whether a per-application mode can ever be remembered depends on there being a durable
+            // key: a bundle identifier survives a helper restart, a PID does not. Nothing recorded this,
+            // so every claim about it so far has been inference from an absent display name — which is
+            // nil for three different reasons, only one of them a helper. One huddle and one call now
+            // settle it.
+            log.info("episode \(episode.id, privacy: .public) minted — bundle=\(episode.bundleID ?? "<none>", privacy: .public) display=\(episode.displayName ?? "<none>", privacy: .public) process=\(episode.processName ?? "<none>", privacy: .public)")
+            present(.offerToRecord(episodeID: token(for: episode.id),
+                                   application: episode.displayName,
+                                   bundleID: episode.bundleID,
+                                   suggestedTitle: service.state.suggestedTitle,
+                                   microphone: service.microphoneStatus.captureSummary))
+        case .withdraw(let episodeID):
+            log.info("episode \(episodeID, privacy: .public) withdrawn — the holder let go")
+            withdrawStartOffer(token(for: episodeID))
+        }
     }
 
     /// Emit a beat if this tick is due one.
