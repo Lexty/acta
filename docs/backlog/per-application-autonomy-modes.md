@@ -31,6 +31,54 @@ Proposed by the user on 2026-09-12, in full and without condensing:
 - Same for Teams and anything else: each application's behaviour is configured **from the prompts
   themselves**, not from a settings screen.
 
+## What has landed, 2026-09-12 — and what of the proposal it is not
+
+The first increment shipped on `dev` from
+[`2026-09-12-owner-bound-stop-offer.md`](../plans/completed/2026-09-12-owner-bound-stop-offer.md) (commits
+`8086b93` through `bda90bc`). **It is the release-stop half, in Ask mode only, and none of the
+per-application memory.** Everything below this section is kept as it was written — the proposal verbatim,
+and the assessment and measurements the plan was built on — and annotated where the code now answers it.
+
+Landed:
+
+- **A prompt-started recording is bound to the application whose start offer it accepted**
+  ([`OwnerBinding`](../../Sources/ActaKit/OwnerBinding.swift)), resolved by the coordinator after the
+  microphone barrier and carried by the controller as opaque session metadata. ⚠️ **A menu or socket start
+  stays unbound** — this reverses the user's first choice, on Codex's counterexample that inferring an
+  owner can bind a microphone test and stop a live call. Pid-only holders stay unbound too.
+- **Ownership is a separate rule** ([`MicrophoneOwnershipRule`](../../Sources/ActaKit/MicrophoneOwnershipRule.swift)):
+  `held → releaseCandidate → releasedQualified`, plus `unknown`. A release qualifies only from observed
+  released samples spanning 5 s with no gap over 2.5 s; unknown or a gap revokes; a return needs a full new
+  interval. It shares only the snapshot reduction with the start rule
+  ([`AudioProcessReadings`](../../Sources/ActaKit/AudioProcessReadings.swift)) and never reads
+  `isEpisodeActionable`. The recorded traces in this file are replayed through it at 1 Hz and several phase
+  offsets (`MicrophoneOwnershipRuleTests`, and end to end in `OwnerReleaseOfferTests`).
+- **The stop offer with a 20 s countdown** that starts only once the panel acknowledges the prompt as on
+  screen ([`AcknowledgedCountdown`](../../Sources/ActaKit/AcknowledgedCountdown.swift),
+  `ReminderPresenterTests`). Copy in [`OwnerReleaseOfferText`](../../Sources/ActaKit/OwnerReleaseOfferText.swift):
+  "Slack released the microphone", **Stop Now** and **Keep Recording**; it never says the call ended.
+- **A third preference**, `offersStopWhenOwnerReleases`, independent of both existing switches and off the
+  wire. The two stop reasons do not share authority, and neither prompt inherits the other's.
+- **The narrow exception in `AGENTS.md` ("The reminders")**: this countdown may stop a recording, under four
+  stated conditions. Automatic start, automatic deletion and a timer answering the quiet offer stay
+  forbidden.
+- A heartbeat in the reminder tick, for `reminders-silent-after-hours-of-uptime.md` — it makes the silence
+  observable, it does not fix it.
+
+⚠️ **One decision below was reversed by the user.** *The user's resolution* says doing nothing keeps the
+recording. The plan's Decision 4, the user's and not open, made the **default outcome stop**: Keep
+Recording keeps it, Stop Now ends it at once, the countdown completing ends it, and the owner returning
+withdraws the offer silently. The section is left as written because it records what was believed then.
+
+**Not built, and still this item's scope:** the "always stop / always start automatically for this app"
+buttons and their per-application memory; automatic start; the "recording has started" notice and
+cancel-and-delete; a place to inspect and revoke a mode; the pause-all control; Teams, and the Slack
+restart measurement a bundle-keyed mode depends on. The re-arm that swallows a second back-to-back call's
+start offer (*Two calls back to back*) is unchanged.
+
+**Moved out:** making `.saving` stop blocking the next start (*Responsiveness after a long recording*) is
+now [`saving-is-a-property-of-a-recording.md`](saving-is-a-property-of-a-recording.md).
+
 ## Is it viable — assessment, 2026-09-12, corrected the same day
 
 **Yes, as explicitly enrolled per-application automation — not as a call detector.** That distinction is

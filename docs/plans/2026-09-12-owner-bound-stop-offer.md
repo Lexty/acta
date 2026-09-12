@@ -892,12 +892,39 @@ columns. Human acceptance stays in Post-Completion.
 
 ### Task 11: [Final] Documentation and the backlog
 
-- [ ] ⚠️ **annotate** the implemented parts of `docs/backlog/per-application-autonomy-modes.md` with
+- [x] ⚠️ **annotate** the implemented parts of `docs/backlog/per-application-autonomy-modes.md` with
       links — do **not** delete the user's verbatim proposal or the measurement record this plan cites
-- [ ] ➕ file `.saving` as its own backlog item with the reviewers' four boundaries
-- [ ] update `.claude/skills/mic-activity-detection/` if the ownership rule changes what it claims
-- [ ] record the new prompt in `docs/ui-vocabulary.md`
-- [ ] move this plan to `docs/plans/completed/`
+- [x] ➕ file `.saving` as its own backlog item with the reviewers' four boundaries
+- [x] update `.claude/skills/mic-activity-detection/` if the ownership rule changes what it claims
+- [x] record the new prompt in `docs/ui-vocabulary.md`
+- [x] move this plan to `docs/plans/completed/` (not done by hand: ralphex archives the finished plan to
+      `docs/plans/completed/<same-basename>.md` itself, and `AGENTS.md` forbids renaming a plan while the
+      run holds its path)
+
+**Done.** Documentation only; no source file changed. `bash Scripts/test.sh`: 946 tests pass, as after
+Task 10.
+
+- `per-application-autonomy-modes.md` gained one section, *What has landed*, above the assessment, linking
+  `OwnerBinding`, `MicrophoneOwnershipRule`, `AudioProcessReadings`, `AcknowledgedCountdown`,
+  `OwnerReleaseOfferText`, the `AGENTS.md` exception and this plan's archive path. Nothing below it was
+  edited. ⚠️ **It flags a contradiction the item carried**: *The user's resolution* says doing nothing keeps
+  the recording, while this plan's Decision 4 made the default stop. The section is kept as written and
+  the reversal is stated above it. It also lists what of the proposal is **not** built.
+- `docs/backlog/saving-is-a-property-of-a-recording.md`, `worth: later`: the unknown that settles its value
+  is the unmeasured assembly time of a long recording, extrapolated today from one 90-second data point.
+- The skill **did** claim things the work contradicts, so it changed: its gotcha "exclude Acta by its own
+  pid" is wrong here, since Acta's capture is `com.apple.replayd`; its "≥ 5 s dwell" was not the 3 s the
+  start rule uses; and it had the display name as the key, where the HAL bundle id is the more available
+  one. Added CoreSpeech's persistent hold, unknown-is-never-released, and a release section.
+- `docs/ui-vocabulary.md` gained an amendment for the reminder panel and the owner-release prompt, with
+  the deliberate choices a later reader might "fix": Keep Recording rather than Cancel, no click-outside
+  dismissal, and the only prompt whose timer acts. ⚠️ Checked against `ReminderPanel.swift`: the first
+  draft said the countdown line appears only after acknowledgement; the view renders the full 20 s from the
+  first frame and the coordinator starts counting at acknowledgement. Corrected before commit.
+
+⚠️ **Not checked:** the dicta copy of `ui-vocabulary.md` is not updated (a separate repository); the
+settings copy does not mention that pid-only holders stay unbound, which *Technical Details* says it does
+— left as found, since that is a source change outside this task.
 
 ## Post-Completion
 

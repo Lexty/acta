@@ -176,3 +176,49 @@ is the same as having no grouping at all.
 - **The `settings` `DisclosureGroup` is gone from acta.** Configuration lives in a real Settings
   window (⌘,) reached by one row; the note above about that disclosure being Tier 2 for dicta still
   stands on its own terms.
+
+---
+
+## Amendment, 2026-09-12: the reminder panel, and the one prompt in it that acts
+
+acta now raises prompts in a floating panel of its own (`Sources/Acta/ReminderPanel.swift`), outside the
+menu. dicta has no equivalent, so **nothing here asks dicta to change anything**; it is written down
+because the panel reuses this vocabulary and the rows it bends are easy to "fix" back.
+
+**What the panel shares with the menu.** `.frame(width: 300)`, `.padding(12)`, on `.regularMaterial` in a
+12 pt `RoundedRectangle`. Each prompt is a 24 pt tinted tile beside a `.headline` over a
+`.caption`/`.secondary` line; a detail block indented 32 pt to align under the text; the `primary action`
+row as written (`.borderedProminent`, `.controlSize(.large)`, full-width, red when it is a stop); and a
+`.caption` `HStack` of plain-button verbs underneath, in the `footer`'s shape. It is **not** a
+notification — measured: a `UNUserNotificationCenter` banner hides its buttons until hover — and no copy
+may claim it respects Focus.
+
+**The prompts.** Offer to record ("Microphone activity in Slack" — Start Recording / Not now / Never for
+Slack); offer to stop when quiet ("Little audio activity" — Stop & Save / Keep Recording / Remind me in 30
+min); and, new in this amendment, **the owner-release stop offer**:
+
+| part | what it is |
+|---|---|
+| tile | `mic.slash`, secondary tint |
+| headline | "Slack released the microphone"; with no name, "The microphone was released" |
+| second line | "Acta saw Slack stop using the microphone input. The recording will stop and save unless you keep it." — not line-limited |
+| detail block | the recording's title, then "Stopping and saving in 17 s" in `.caption`/`.tertiary`, `monospacedDigit()`; the line reads the full 20 s from the first frame and starts counting only once the panel has acknowledged the prompt as on screen |
+| primary action | **Stop Now**, `stop.fill`, tinted red |
+| footer | **Keep Recording** alone, on the left |
+
+Four decisions in that row set, each deliberate:
+
+- ⚠️ **It is the only prompt that acts without a click.** When the countdown completes, the recording
+  stops and saves. `AGENTS.md` ("The reminders") carries that exception and its conditions; the other
+  prompts' expiry still acts on nothing.
+- ⚠️ **"Keep Recording", never "Cancel".** On a prompt about stopping, "Cancel" reads as cancelling the
+  recording, which is a different and unbuilt action (stop and delete). The button says what it keeps.
+- ⚠️ **No click-outside dismissal on this prompt.** On the other prompts a click elsewhere dismisses an
+  offer that acts on nothing. Here a dismissal is a decline, and the person this is for clicks in another
+  app within twenty seconds as a matter of course — so the two buttons are the only answers.
+- **The copy names an observation, not an ending.** Acta saw an application let the input go; it never
+  says the call, meeting or huddle ended, and a test forbids those words. Every sentence is a projection
+  in `ActaKit.OwnerReleaseOfferText`, not text in the view.
+
+⚠️ **Not verified on screen**: the countdown's layout, the unbounded second line, and the panel staying in
+place while the number updates once a second are human acceptance, not tests.
