@@ -48,9 +48,11 @@ struct AudioProcessReadingsTests {
 
     // MARK: - Held wins
 
-    /// ⚠️ **Both directions, because `stronger` is order-dependent if it is wrong.** A dictionary gives
-    /// no order guarantee, so a fold that only handled "held arrives second" would pass half the time
-    /// and be a flake nobody could reproduce.
+    /// ⚠️ **Both directions, because the precedence is order-dependent if it is wrong.** Codex corrected
+    /// an earlier version of this comment that blamed dictionary ordering: the fold iterates
+    /// `snapshot.processes`, an array, so for a fixed fixture the order is deterministic. What is not
+    /// promised is the order the *HAL* enumerates processes in, and a fold that only handled "held
+    /// arrives second" would depend on it.
     @Test("held wins over an unreadable sibling of the same key, in either order")
     func heldWinsOverAnUnreadableSibling() {
         let heldFirst = AudioProcessReadings.reduce(
@@ -112,19 +114,28 @@ struct AudioProcessReadingsTests {
     /// ⚠️ **The other half, and the one that makes the rule above a rule rather than a refusal.** In a
     /// *complete* list, an application observed idle is idle — otherwise nothing could ever be released
     /// and the ownership rule could never fire at all.
-    @Test("confirmed absence in a complete list is a release")
+    ///
+    /// ⚠️ **This is an observed idle process, not an absent one.** Codex caught the earlier title
+    /// claiming "confirmed absence": a key missing from the snapshot gets no reading at all, and the
+    /// fold deliberately does not decide what that means. See `anAbsentKeyProducesNoReading`.
+    @Test("a process observed idle in a complete list is a release")
     func aCompleteListCanSayAnythingStopped() {
         let readings = AudioProcessReadings.reduce(
             Self.snapshot([Self.process(501, Self.slack, false)]), dropping: .init())
         #expect(readings == [.bundle(Self.slack): .released])
     }
 
-    /// A key that is not in the snapshot at all has no reading — the absence is the caller's to
-    /// interpret, and the two rules interpret it differently.
-    @Test("a key absent from the snapshot produces no reading")
+    /// ⚠️ **A key absent from the snapshot has no reading, and the fold says nothing about why.** An
+    /// empty *complete* list and an empty *incomplete* one reduce to the same empty dictionary, so a
+    /// consumer that wrote `readings[owner] ?? .released` would treat a failed enumeration as a call
+    /// ending. Completeness has to be carried alongside the readings by every consumer — the activity
+    /// rule already does, and the ownership rule must. A disappearance trace belongs in those consumer
+    /// tests, not here.
+    @Test("a key absent from the snapshot produces no reading, complete or not")
     func anAbsentKeyProducesNoReading() {
-        let readings = AudioProcessReadings.reduce(Self.snapshot([]), dropping: .init())
-        #expect(readings.isEmpty)
+        #expect(AudioProcessReadings.reduce(Self.snapshot([]), dropping: .init()).isEmpty)
+        #expect(AudioProcessReadings.reduce(Self.snapshot([], complete: false),
+                                            dropping: .init()).isEmpty)
     }
 
     // MARK: - Acta's own capture
@@ -145,15 +156,31 @@ struct AudioProcessReadingsTests {
                 "Acta's own capture reached the fold")
     }
 
-    /// ⚠️ **Dropped, not read as idle.** Filtering afterwards would be the same thing for `held`, and the
-    /// opposite for this case: an own process seen idle would otherwise coalesce into its key and be
-    /// able to *contradict* a foreign process of the same key.
-    @Test("an own process cannot make its key look idle")
-    func anOwnProcessCannotContributeIdleness() {
+    /// ⚠️ **Dropped before the key is built, and this is the fixture that can tell the difference.**
+    /// Codex corrected both the earlier rationale and the earlier fixture: an *idle* own process can
+    /// never contradict a foreign sibling, because held beats unreadable beats released — and the old
+    /// fixture excluded the whole bundle, so both processes were Acta's and there was no foreign
+    /// sibling at all. The case that needs filtering **before** aggregation is the opposite one: Acta's
+    /// own process holding, a foreign process of the same bundle idle, and only the pid excluded.
+    /// Folding first leaves the key `held`; deleting the key afterwards loses the foreign reading.
+    @Test("an own process holding cannot make a foreign sibling of its bundle look held")
+    func ownProcessesAreDroppedBeforeTheKeyIsBuilt() {
         let readings = AudioProcessReadings.reduce(
-            Self.snapshot([Self.process(10, "com.acta.dev", false),
-                           Self.process(11, "com.acta.dev", nil)]),
-            dropping: .init(bundleIDs: ["com.acta.dev"]))
-        #expect(readings.isEmpty)
+            Self.snapshot([Self.process(99, "com.example.shared", true),     // Acta's
+                           Self.process(100, "com.example.shared", false)]), // not Acta's
+            dropping: .init(pids: [99]))
+        #expect(readings == [.bundle("com.example.shared"): .released],
+                "Acta's own capture was aggregated into a foreign application's key")
+    }
+
+    /// The same boundary in the other direction: an own process that could not be read must not make a
+    /// foreign sibling unreadable.
+    @Test("an own unreadable process cannot make a foreign sibling of its bundle unreadable")
+    func anOwnUnreadableProcessCannotSpoilASibling() {
+        let readings = AudioProcessReadings.reduce(
+            Self.snapshot([Self.process(99, "com.example.shared", nil),
+                           Self.process(100, "com.example.shared", false)]),
+            dropping: .init(pids: [99]))
+        #expect(readings == [.bundle("com.example.shared"): .released])
     }
 }

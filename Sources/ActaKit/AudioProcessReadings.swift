@@ -41,8 +41,11 @@ public enum MicrophoneInputReading: Equatable, Sendable {
 public enum AudioProcessReadings {
     /// The processes a reduction must pretend it never saw.
     ///
-    /// ⚠️ **Dropped during the fold rather than filtered afterwards**, so Acta's own capture can never
-    /// create, extend or re-arm anything. ⚠️ **A set of bundle identifiers, not one**: the dev and
+    /// ⚠️ **Dropped before the key is built, not filtered afterwards, and the difference is observable.**
+    /// Take one bundle with two processes — Acta's own, holding, and a foreign one, idle. Folding first
+    /// leaves the key `held`, because held wins; deleting the key afterwards loses the foreign
+    /// process's reading entirely. Only dropping before aggregation gives the answer that is true of
+    /// everything Acta did not do: `released`. ⚠️ **A set of bundle identifiers, not one**: the dev and
     /// stable builds coexist on this machine by design, and each must ignore the other's capture as
     /// well as its own.
     public struct Own: Equatable, Sendable {
@@ -85,7 +88,10 @@ public enum AudioProcessReadings {
 
     /// `held` beats `unreadable` beats `released`: a key is idle only when every process of it was seen
     /// to be idle.
-    public static func stronger(_ lhs: MicrophoneInputReading?,
+    ///
+    /// ⚠️ Private: `reduce` is its only consumer, and a shared fold is worth less if callers can
+    /// reassemble it themselves.
+    private static func stronger(_ lhs: MicrophoneInputReading?,
                                 _ rhs: MicrophoneInputReading) -> MicrophoneInputReading {
         guard let lhs else { return rhs }
         if lhs == .held || rhs == .held { return .held }

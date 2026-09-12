@@ -362,6 +362,28 @@ fold must pretend it never saw.
 protocol* in `ActaRuntime` — the thing `ScriptedReader` conforms to. The fold's per-key verdict is
 `MicrophoneInputReading`; the file keeps the plan's name, `AudioProcessReadings.swift`.
 
+**Codex reviewed it read-only**, compared the removed loop, the precedence helper and the
+incomplete-list pass against the new implementation line by line, and found no functional regression —
+which is the evidence for "no behaviour change"; a green suite alone would not be. He also declined my
+worry about the old rule losing its own guard: one invariant, in the shared fold, with consumer
+regressions rather than a duplicate. Four precision corrections applied:
+
+1. ⚠️ **My own-process test did not demonstrate what its comment claimed.** The rationale said an idle
+   own process could contradict a foreign sibling — impossible under held > unreadable > released — and
+   the fixture excluded the *whole bundle*, so both processes were Acta's and there was no foreign
+   sibling at all. The case that actually needs filtering **before** aggregation is the opposite one:
+   Acta's own process holding, a foreign process of the same bundle idle, only the pid excluded.
+   Two new fixtures; deleting the pid drop makes them read `held` and `unreadable` instead of
+   `released`, which is precisely the folding-first outcome.
+2. ⚠️ **"Confirmed absence in a complete list is a release" supplied a *present idle* process.** An
+   absent key gets no reading at all, and an empty complete list and an empty incomplete one reduce to
+   the same empty dictionary — so a consumer writing `readings[owner] ?? .released` would read a failed
+   enumeration as a call ending. Renamed, and both empties are now asserted. **Completeness must be
+   carried by every consumer**; the ownership rule inherits that obligation in Task 5.
+3. The two-order rationale blamed dictionary ordering. The fold iterates `snapshot.processes`, an
+   array, so a fixed fixture is deterministic; what is not promised is the HAL's enumeration order.
+4. `stronger` is now private: `reduce` is its only consumer.
+
 **Negative control:** deleting the incomplete-enumeration rule failed **three** tests, not one — the
 named `a partial list with a visible idle sibling is unreadable, never released`, its sibling
 `a partial list may still say that something is holding`, and the *pre-existing*
@@ -377,18 +399,35 @@ constant and its exclusion policy. What remains is the case where the identity i
 **Files:** Create `Sources/ActaKit/OwnerBinding.swift`, Create
 `Sources/ActaTestRunner/OwnerBindingTests.swift`
 
-- [ ] define `OwnerBinding` — an immutable value carrying the owner key, the observation epoch and the
+- [x] define `OwnerBinding` — an immutable value carrying the owner key, the observation epoch and the
       `observedAt` of the evidence it came from
-- [ ] build it from a triggering episode's key; there is no other constructor in this increment
-- [ ] ⚠️ pid-only holders yield no binding (pid reuse within one recording; see Technical Details)
-- [ ] coalesce several processes of one key into one holder
-- [ ] write tests: a prompt episode yields a binding carrying its epoch and `observedAt`
-- [ ] write tests: **prompt(A) keeps A even when B acquired more recently** — the guard against the
+- [x] build it from a triggering episode's key; there is no other constructor in this increment
+- [x] ⚠️ pid-only holders yield no binding (pid reuse within one recording; see Technical Details)
+- [x] coalesce several processes of one key into one holder
+- [x] write tests: a prompt episode yields a binding carrying its epoch and `observedAt`
+- [x] write tests: **prompt(A) keeps A even when B acquired more recently** — the guard against the
       heuristic ever coming back
-- [ ] write tests: a pid-only episode yields no binding
-- [ ] **negative control**: let the constructor take any current holder → the prompt(A)-with-B test
+- [x] write tests: a pid-only episode yields no binding
+- [x] **negative control**: let the constructor take any current holder → the prompt(A)-with-B test
       fails
-- [ ] run `bash Scripts/test.sh`
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 877 tests pass (871 before; 6 new). `OwnerBinding.bind(episode:holding:epoch:observedAt:)` is
+the only entry point; the memberwise initialiser is private.
+
+⚠️ **One thing the plan did not specify, decided here: the readings are a parameter.** They are never
+used to *choose* the key — that is the whole rule — but a binding is refused when the evidence does not
+show that application holding. Handing stop authority to an application we cannot see would be a guess,
+and this is also the shape Task 7 re-checks after the barrier. `unreadable` is not `held`, so an
+incomplete enumeration mints no binding.
+
+⚠️ **The negative control had to be constructible.** The rule here is an *absence* — there is no
+inference to delete — so the control adds one: pick the holder the world offers instead of the prompt's.
+It failed the named test, and the value it produced is the counterexample itself: the binding became
+`com.zzz.dictation`, the dictation service, while the prompt was about the call. The fixture is built so
+that both orderings a "pick from the world" rule could use — enumeration order and identifier order —
+land on that application, which is what makes the control deterministic rather than a coin toss.
 
 ### Task 5: `MicrophoneOwnershipRule` and the replay fixture
 
