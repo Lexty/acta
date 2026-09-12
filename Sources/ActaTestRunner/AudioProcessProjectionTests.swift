@@ -234,10 +234,19 @@ struct AudioProcessListTrimmingTests {
         #expect(CoreAudioProcessProperties.trimmed([11, 12], returnedBytes: 0, stride: stride) == [])
     }
 
-    @Test("a count larger than the allocation cannot read past it")
-    func anOverlongCountIsClamped() {
+    @Test("a count larger than the allocation is refused, not clamped")
+    func anOverlongCountIsUnreadable() {
+        // ⚠️ **Bounds-safe truncation is not the same as a trustworthy reading.** Clamping keeps the
+        // process alive but turns nonsense into a *successful, complete* list — and completeness is
+        // precisely what the rule is entitled to read as "everything absent from this has stopped".
         #expect(CoreAudioProcessProperties.trimmed([11], returnedBytes: UInt32(9 * stride),
-                                                   stride: stride) == [11])
+                                                   stride: stride) == nil)
+    }
+
+    @Test("a byte count that is not whole object ids is refused")
+    func aMisalignedCountIsUnreadable() {
+        #expect(CoreAudioProcessProperties.trimmed([11, 12], returnedBytes: UInt32(stride + 1),
+                                                   stride: stride) == nil)
     }
 }
 
@@ -324,5 +333,29 @@ struct AudioProcessProjectionIntegrationTests {
             }
         }
         #expect(offers == 1)
+    }
+}
+
+/// Remembering that a process genuinely has no bundle identifier.
+@Suite("Audio process known-absent identity")
+struct AudioProcessAbsentIdentityTests {
+    private typealias Fake = AudioProcessProjectionTests.FakeProperties
+
+    @Test("a later failed read does not degrade a snapshot about a process known to have none")
+    func aKnownAbsentIdentityIsRemembered() {
+        // ⚠️ Three states, not two. "The system says this process has no bundle id" is an answer, and a
+        // failure to read it afterwards changes nothing we know — so the snapshot stays complete, and
+        // the observation keeps carrying its input evidence.
+        let fake = Fake()
+        fake.list = .list([1])
+        fake.processes[1] = .init(pid: .value(321), bundleID: .absent, isRunningInput: .value(true))
+        let projection = AudioProcessProjection(reader: fake)
+        #expect(projection.readSnapshot().isComplete)
+
+        fake.processes[1]?.bundleID = .unreadable
+        let second = projection.readSnapshot()
+        #expect(second.isComplete, "a failed read degraded a snapshot about an identity already known")
+        #expect(second.processes.first?.bundleID == nil)
+        #expect(second.processes.first?.isRunningInput == true)
     }
 }

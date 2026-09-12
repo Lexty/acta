@@ -69,7 +69,16 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
     ///
     /// ⚠️ Cleared for any pid that is absent from a **complete** enumeration, so a recycled pid cannot
     /// inherit the identity of the process that used to own it.
-    private var knownBundleIDs: [Int32: String] = [:]
+    /// ⚠️ Three states, not two: an identifier we read, an identifier the system says does not exist,
+    /// and nothing known at all. Collapsing the middle one into the last makes a process that genuinely
+    /// has no bundle id indistinguishable from one whose read failed — and the second must degrade the
+    /// snapshot while the first must not.
+    private enum KnownIdentity: Equatable {
+        case bundle(String)
+        case none
+    }
+
+    private var knownBundleIDs: [Int32: KnownIdentity] = [:]
     /// The same for names, and for the same reason.
     private var knownNames: [Int32: (display: String?, process: String?)] = [:]
 
@@ -125,12 +134,13 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
                                  identityIsKnown: inout Bool) -> String? {
         switch reader.bundleID(of: object) {
         case .value(let identifier):
-            lock.lock(); knownBundleIDs[pid] = identifier; lock.unlock()
+            lock.lock(); knownBundleIDs[pid] = .bundle(identifier); lock.unlock()
             return identifier
         case .absent:
-            // A real answer: this process genuinely has no bundle identifier. Any remembered one is
-            // stale — a recycled pid — so it must go.
-            lock.lock(); knownBundleIDs[pid] = nil; lock.unlock()
+            // A real answer: this process genuinely has no bundle identifier, and that is now
+            // *remembered* as an answer rather than forgotten — a later failed read must not degrade a
+            // snapshot about a process we already know has none.
+            lock.lock(); knownBundleIDs[pid] = KnownIdentity.none; lock.unlock()
             return nil
         case .unreadable:
             // Identity preserved across a transient failure; if we never knew one, the snapshot loses
@@ -138,11 +148,16 @@ public final class AudioProcessProjection: AudioProcessReading, @unchecked Senda
             lock.lock(); let remembered = knownBundleIDs[pid]; lock.unlock()
             // ⚠️ The inout is *completeness*, not degradation — an inverted name here silently
             // turned every unreadable identity into a complete reading.
-            if remembered == nil {
+            switch remembered {
+            case .some(.bundle(let identifier)):
+                return identifier
+            case .some(.none):
+                return nil
+            case .none:
                 isComplete = false
                 identityIsKnown = false
+                return nil
             }
-            return remembered
         }
     }
 
@@ -231,7 +246,11 @@ public final class CoreAudioProcessProperties: AudioProcessPropertyReading, @unc
                                          0, nil, &readSize, &ids) == noErr else {
             return .unreadable
         }
-        return .list(Self.trimmed(ids.map { UInt32($0) }, returnedBytes: readSize, stride: stride))
+        guard let trimmed = Self.trimmed(ids.map { UInt32($0) }, returnedBytes: readSize,
+                                         stride: stride) else {
+            return .unreadable
+        }
+        return .list(trimmed)
     }
 
     /// What the second read actually returned, rather than what the sizing read promised.
@@ -241,11 +260,17 @@ public final class CoreAudioProcessProperties: AudioProcessPropertyReading, @unc
     /// that briefly lost an audio client would look like a machine full of unidentifiable ones — and,
     /// because unidentifiable observations cost the snapshot its completeness, every live episode would
     /// freeze. Pure and static so this is decided by a test rather than by a race.
-    public static func trimmed(_ ids: [UInt32], returnedBytes: UInt32, stride: Int) -> [UInt32] {
-        guard stride > 0 else { return [] }
+    public static func trimmed(_ ids: [UInt32], returnedBytes: UInt32, stride: Int) -> [UInt32]? {
+        guard stride > 0 else { return nil }
+        // ⚠️ **Impossible metadata is unreadable, not clamped.** Bounds-safe truncation keeps the process
+        // alive but turns nonsense into a *successful, complete* reading — and a complete reading is
+        // exactly what the rule is entitled to treat as evidence that something stopped. A byte count
+        // that is not a whole number of object ids, or that claims more than was allocated, means the
+        // answer cannot be trusted at all.
+        guard Int(returnedBytes) % stride == 0 else { return nil }
         let returned = Int(returnedBytes) / stride
-        guard returned > 0 else { return [] }
-        return Array(ids.prefix(min(returned, ids.count)))
+        guard returned >= 0, returned <= ids.count else { return nil }
+        return Array(ids.prefix(returned))
     }
 
     public func processID(of object: UInt32) -> AudioPropertyReading<Int32> {

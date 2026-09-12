@@ -492,65 +492,42 @@ struct MenuContent: View {
         VStack(alignment: .leading, spacing: 6) {
             microphoneStates(mic)
 
-            // ⚠️ **The list was unexplained and therefore invisible.** With no entries every device sat
-            // under "Available" behind an unlabelled circle, the ranking arrows appear only once
-            // something is *already* ranked, and the only explanation was a hover tooltip — so the way
-            // to make the first entry had to be guessed. Manual acceptance found this immediately;
-            // nothing in the suite could, because rendering is the one thing it does not see.
-            // ⚠️ **This sentence used to contradict the picker three lines below it.** It said
-            // recordings use the highest microphone on the list — which is false when the user has
-            // asked for the Mac's input, and false again while a *Use now* is in force. An instruction
-            // that teaches the feature must not be the thing that misdescribes it.
-            Text(mic.listExplanation).font(.caption2).foregroundStyle(.secondary)
-
-            // ⚠️ **Priority order first, including entries whose device is absent.** Iterating the
-            // device list rendered rows in enumeration order while the arrows moved a different list —
-            // so the numbers and the rows disagreed — and a preferred microphone that was unplugged
-            // vanished from the menu while staying in the persistent list, which left the user unable
-            // to see or remove a preference without reconnecting the device.
-            if !mic.priority.isEmpty {
-                Text("Your list").font(.caption2).foregroundStyle(.secondary)
+            // ⚠️ **Reduced on purpose, and this is the half of the Settings move that is not cosmetic.**
+            // Membership and order are configuration: they are edited in the Settings window, and
+            // leaving a second editor here would be two controls over one list, drifting apart. What
+            // stays is what a person needs *in this moment* — which microphone each device is, whether
+            // it is available, and the one-off "use this for now".
+            if mic.devices.isEmpty, mic.priority.isEmpty {
+                Text(mic.isComplete ? "No microphones found."
+                                    : "The audio devices could not be read.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(Array(mic.priority.enumerated()), id: \.element) { index, uid in
                 microphoneRow(device(uid, in: mic), rank: index, in: mic)
             }
             let unranked = mic.devices.filter { !mic.priority.contains($0.uid) }
-            if !unranked.isEmpty {
-                Text(mic.priority.isEmpty ? "Available" : "Not on your list")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.top, 2)
-                ForEach(unranked, id: \.uid) { device in
-                    microphoneRow(device, rank: nil, in: mic)
-                }
-            }
-            if mic.devices.isEmpty, mic.priority.isEmpty {
-                // ⚠️ An incomplete read is never rendered as a settled claim about the hardware.
-                Text(mic.isComplete ? "No microphones found."
-                                    : "The audio devices could not be read.")
-                    .font(.caption).foregroundStyle(.secondary)
+            ForEach(unranked, id: \.uid) { device in
+                microphoneRow(device, rank: nil, in: mic)
             }
 
-            // ⚠️ **The explicit capture policy had no control at all**, so a persisted setting could
-            // only be changed outside the shipped chooser.
-            Picker("Recordings use", selection: Binding(
-                get: { mic.captureChoice },
-                set: { model.setCaptureChoice($0) }
-            )) {
-                Text("my list").tag(CaptureMicrophoneChoice.followPriority)
-                Text("the Mac's input at the time").tag(CaptureMicrophoneChoice.systemDefault)
-            }
-            .font(.caption)
-
-            Text("Changes apply the next time capture starts — a new recording, or one this recording "
-                 + "restarts by itself. If Acta manages the Mac's input, that changes right away.")
-                .font(.caption2).foregroundStyle(.secondary)
-
+            // ⚠️ **Kept here, with the temporary choice that created it.** Applying a one-off in the menu
+            // and having to undo it in a window is the split that makes a control feel broken.
             if mic.override != nil {
                 Button("Resume automatic selection") { model.resumeAutomaticMicrophoneSelection() }
                     .font(.caption)
             }
 
+            Text("Changes apply the next time capture starts — a new recording, or one this recording "
+                 + "restarts by itself. If Acta manages the Mac's input, that changes right away.")
+                .font(.caption2).foregroundStyle(.secondary)
+
             Divider()
             managementControls(mic)
+
+            SettingsLink {
+                Text("Microphone Settings…").font(.caption)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.top, 4)
     }
@@ -612,21 +589,10 @@ struct MenuContent: View {
         let present = mic.devices.contains { $0.uid == device.uid }
         HStack(spacing: 6) {
             if let rank { Text("\(rank + 1).").font(.caption2).foregroundStyle(.secondary) }
-            // ⚠️ **A checkbox carrying the device's own name**, because the unlabelled circle that
-            // stood here read as a radio button — one-of-many — when the control is in fact "on my
-            // list", and several microphones may be on it. The action was explained only in a hover
-            // tooltip, which a menu-bar popover effectively does not have.
             VStack(alignment: .leading, spacing: 0) {
-                Toggle(isOn: Binding(get: { rank != nil },
-                                     set: { _ in model.togglePreferred(device.uid) })) {
-                    Text(device.name).font(.callout)
-                }
-                .toggleStyle(.checkbox)
-                // ⚠️ **"using now" is a claim about what is in force, not about what is stored.** Shown
-                // for any stored override, one row could say "using now" and "unavailable" at once —
-                // while the selection had correctly fallen back to the list.
-                // ⚠️ Three facts, three labels. Only a recording that came up on this device may be
-                // described in the present tense, and only a complete observation may call it absent.
+                // ⚠️ A name, not a control: membership and order moved to the Settings window, and a
+                // checkbox here would be a second way to edit one list.
+                Text(device.name).font(.callout)
                 if device.uid == mic.override {
                     switch mic.overrideStanding {
                     case .recording:
@@ -641,10 +607,6 @@ struct MenuContent: View {
                         EmptyView()
                     }
                 }
-                // ⚠️ **One click can legitimately land on only one of the two promises**, and the menu
-                // has to say which. Capture does not filter on `canBeSystemDefault` and the system
-                // default does, so a device Acta can record from may be one the OS refuses as the Mac's
-                // input: the recording follows, the Mac's input does not.
                 if mic.managingSystemInput, device.isCaptureCandidate, !device.isSystemDefaultCandidate {
                     Text("recording only — the Mac's input will not follow")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -657,16 +619,6 @@ struct MenuContent: View {
             }
             Spacer()
 
-            if rank != nil {
-                Button { model.moveMicrophone(device.uid, up: true) } label: {
-                    Image(systemName: "chevron.up")
-                }
-                .buttonStyle(.plain).disabled(rank == 0)
-                Button { model.moveMicrophone(device.uid, up: false) } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .buttonStyle(.plain).disabled(rank == mic.priority.count - 1)
-            }
             Button("Use now") { model.useMicrophoneNow(device.uid) }
                 .font(.caption)
                 .disabled(!present || model.pendingSelection == device.uid)
