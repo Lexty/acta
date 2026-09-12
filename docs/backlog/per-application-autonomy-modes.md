@@ -495,17 +495,23 @@ So **for its own rule, Acta's recording looks like a third-party application tak
 `com.apple.replayd` is not in `ownBundleIDs`, and `ownPIDs` holds only Acta's own pid.
 
 ⚠️ **What actually prevents a self-triggered prompt today is not the own-process filter but
-`context.isBusy`** — `offerIfQualified` is guarded by `!isBusy`, and `isBusy` is
-`state.operation != .idle`. That is a different mechanism from the one the comments describe, and it
-has a seam: `.holding(since:)` for replayd is set when the recording starts, so the 3 s threshold is
-long past by the time it ends. If `isBusy` went false while replayd was still observed holding, an
-offer would be minted **immediately**, caused by Acta's own capture that had just finished.
+`context.isBusy`** — the offer is guarded by `!isBusy`, and `isBusy` is `state.operation != .idle`.
+That is a different mechanism from the one the comments describe.
 
-Today's ordering saves it — capture stops about 570 ms before the operation reaches `.idle`
-(13:40:47.992 "Capture stopped" against 13:40:48.561 "stopped and saved"), and the gap is larger still
-for a long assembly. ⚠️ But that is an accident of timing, not a guarantee, and it is exactly the kind
-of ordering that changes when someone makes `.saving` stop blocking a new start — which is a change
-this very item asks for.
+⚠️ **The first version of this section then drew a conclusion that is wrong, and it is corrected here
+rather than deleted.** It claimed that making `.saving` non-blocking would let `isBusy` go false while
+replayd was still holding, minting an offer from Acta's own just-finished capture. **It would not.**
+Qualification *spends* every qualified key before the `isBusy` guard is reached —
+`phases[qualifiedKey] = .spent(episodeID:)` runs unconditionally, and only then does
+`guard context.isEnabled, !context.isBusy, !context.isMenuOpen` return `.none`. The comment beside it
+says why: an episode suppressed by a recording in progress is over as far as prompting goes. So replayd
+reaches `.spent` about three seconds into *every* recording and mints nothing afterwards, before or
+after any change to `.saving`.
+
+What remains is a genuinely narrow window: a recording **shorter than the three-second hold** whose
+replayd phase outlives the stop. That window is open **today** — the ~570 ms between "Capture stopped"
+and `.idle` does not reach three seconds either — so it is not created by unblocking `.saving` and not
+a reason to order one change before the other.
 
 ⚠️ **Do not fix it by adding `replayd` to `ownBundleIDs`.** The daemon is shared: every
 ScreenCaptureKit client appears as replayd, so suppressing it blinds the rule to other applications'
