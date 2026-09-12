@@ -31,6 +31,9 @@ final class ReminderPanelController {
         switch prompt {
         case .offerToRecord: return 20
         case .offerToStop: return 30    // a heavier decision deserves longer
+        // ⚠️ Long enough to outlive a slow start: capture can take a couple of seconds to confirm, and a
+        // panel that vanished first would leave the click looking like it did nothing.
+        case .startingRecording: return 12
         case .startedRecording: return 3
         }
     }
@@ -135,8 +138,10 @@ private struct ReminderPanelView: View {
                               title: title, microphone: mic)
             case .offerToStop(let recordingID, let title, let elapsed):
                 offerToStop(recordingID: recordingID, title: title, elapsed: elapsed)
+            case .startingRecording(let title):
+                started(title: title, confirmed: false)
             case .startedRecording(let title):
-                started(title: title)
+                started(title: title, confirmed: true)
             }
         }
         .padding(12)
@@ -232,12 +237,15 @@ private struct ReminderPanelView: View {
         .padding(.top, 8)
     }
 
+    /// ⚠️ **"Starting…" until capture confirms.** Acta's oldest rule is that it never reports recording
+    /// while data is not being written, and a start is asynchronous: it can still fail on a permission, a
+    /// device, or the self-check that exists to catch exactly this.
     @ViewBuilder
-    private func started(title: String) -> some View {
+    private func started(title: String, confirmed: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            tile(systemImage: "record.circle", tint: .red)
+            tile(systemImage: confirmed ? "record.circle" : "clock", tint: confirmed ? .red : .secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Recording").font(.headline)
+                Text(confirmed ? "Recording" : "Starting…").font(.headline)
                 Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }

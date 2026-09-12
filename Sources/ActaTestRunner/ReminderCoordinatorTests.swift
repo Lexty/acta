@@ -8,7 +8,10 @@ import Testing
 /// ⚠️ **These belong in a test, not behind the panel's human-acceptance disclaimer.** The coordinator
 /// lives in ActaRuntime with its service and reader injected; only the `NSPanel` drawing is manual. An
 /// earlier commit message of mine claimed otherwise and Codex was right to correct it.
-@Suite("Reminder coordinator")
+/// ⚠️ **Serialized.** These drive a real controller and a real recording; run in parallel with the rest
+/// of the suite they starve the timing-sensitive socket tests, which is a property of the machine rather
+/// than of either test.
+@Suite("Reminder coordinator", .serialized)
 @MainActor
 struct ReminderCoordinatorTests {
     /// A reader whose snapshots are scripted.
@@ -34,8 +37,12 @@ struct ReminderCoordinatorTests {
     private static let quiet = AudioProcessSnapshot(processes: [], isComplete: true)
 
     /// Drive the coordinator to the point where a start offer is on screen.
+    /// ⚠️ **The hold is simulated, not slept through.** The qualification hold is three seconds of
+    /// *observed* time; a test that waits for it in real time is slow and timing-dependent for no gain,
+    /// and on a loaded machine it starves the suites that genuinely measure time.
     @available(macOS 15.0, *)
-    private func offered(_ coordinator: ReminderCoordinator, _ reader: ScriptedReader) async -> UInt64? {
+    private func offered(_ coordinator: ReminderCoordinator, _ reader: ScriptedReader,
+                         _ clock: ManualClock) -> UInt64? {
         reader.set(Self.quiet)
         coordinator.tick()                       // baseline
         reader.set(Self.holding(Self.slack))
@@ -44,28 +51,41 @@ struct ReminderCoordinatorTests {
             if case .offerToRecord(let episodeID, _, _, _, _) = coordinator.prompt {
                 return episodeID
             }
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            clock.advance(1)
         }
         return nil
     }
 
+    /// A clock the test moves, shared by the summaries and the coordinator.
+    final class ManualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = Date(timeIntervalSince1970: 8_000_000)
+        var now: Date { lock.lock(); defer { lock.unlock() }; return instant }
+        func advance(_ seconds: TimeInterval) {
+            lock.lock(); instant = instant.addingTimeInterval(seconds); lock.unlock()
+        }
+    }
+
     @available(macOS 15.0, *)
-    private func makeCoordinator() -> (ControllerHarness, ReminderCoordinator, ScriptedReader) {
-        let harness = ControllerHarness(label: "reminders")
+    private func makeClockedCoordinator()
+        -> (ControllerHarness, ReminderCoordinator, ScriptedReader, ManualClock) {
+        let harness = ControllerHarness(label: "reminders-clocked")
         let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
                                                           defaultInput: "BuiltInMicrophoneDevice")
         manager.start()
         let api = ControlAPI(controller: harness.controller, microphone: manager)
         let reader = ScriptedReader()
-        return (harness, ReminderCoordinator(service: api, reader: reader), reader)
+        let clock = ManualClock()
+        let coordinator = ReminderCoordinator(service: api, reader: reader, now: { clock.now })
+        return (harness, coordinator, reader, clock)
     }
 
     @Test("an offer appears for an application that holds the input")
     @available(macOS 15.0, *)
     func anOfferIsRaised() async {
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        let episodeID = await offered(coordinator, reader)
+        let episodeID = offered(coordinator, reader, clock)
         #expect(episodeID != nil)
         if case .offerToRecord(_, let application, let bundleID, _, _) = coordinator.prompt {
             #expect(application == "Slack")
@@ -80,9 +100,9 @@ struct ReminderCoordinatorTests {
     func closingRefusesAStart() async {
         // ⚠️ The window the socket teardown exists to close: `applicationShouldTerminate` begins a
         // `.terminateLater` finalisation, and a prompt still on screen must not admit work into it.
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        guard let episodeID = await offered(coordinator, reader) else {
+        guard let episodeID = offered(coordinator, reader, clock) else {
             Issue.record("no offer to accept"); return
         }
         coordinator.beginClosing()
@@ -99,9 +119,9 @@ struct ReminderCoordinatorTests {
         // microphone barrier a socket `start` waits on, and quit can begin inside that wait — which is
         // precisely the window `applicationShouldTerminate` exists to close. Clearing the prompt at
         // `beginClosing` is not enough on its own, because by then the click has already been accepted.
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        guard let episodeID = await offered(coordinator, reader) else {
+        guard let episodeID = offered(coordinator, reader, clock) else {
             Issue.record("no offer to accept"); return
         }
         coordinator.acceptStart(episodeID: episodeID)
@@ -114,9 +134,9 @@ struct ReminderCoordinatorTests {
     @Test("a click carrying the wrong episode starts nothing")
     @available(macOS 15.0, *)
     func aMismatchedIdentityIsRefused() async {
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        guard let episodeID = await offered(coordinator, reader) else {
+        guard let episodeID = offered(coordinator, reader, clock) else {
             Issue.record("no offer to accept"); return
         }
         coordinator.acceptStart(episodeID: episodeID &+ 99)
@@ -129,9 +149,9 @@ struct ReminderCoordinatorTests {
     @Test("an expiry for an old prompt does not dismiss the one that replaced it")
     @available(macOS 15.0, *)
     func dismissalIsIdentityScoped() async {
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        guard let episodeID = await offered(coordinator, reader) else {
+        guard let episodeID = offered(coordinator, reader, clock) else {
             Issue.record("no offer to accept"); return
         }
         let stale = ReminderPrompt.offerToRecord(episodeID: episodeID &+ 1, application: nil,
@@ -143,9 +163,9 @@ struct ReminderCoordinatorTests {
     @Test("switching the reminder off takes its prompt down without acting")
     @available(macOS 15.0, *)
     func aPreferenceChangeDismissesWithoutActing() async {
-        let (harness, coordinator, reader) = makeCoordinator()
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
         defer { harness.tearDown() }
-        guard await offered(coordinator, reader) != nil else {
+        guard offered(coordinator, reader, clock) != nil else {
             Issue.record("no offer to accept"); return
         }
         var settings = harness.controller.settings
@@ -156,5 +176,196 @@ struct ReminderCoordinatorTests {
         coordinator.tick()
         #expect(coordinator.prompt == nil)
         #expect(harness.controller.phase == .idle)
+    }
+
+    // MARK: - The stop reminder through the coordinator
+
+    /// Feed both tracks at 1 Hz with fabricated observation times, which is what the summaries carry.
+    @available(macOS 15.0, *)
+    /// ⚠️ **The window ends at *now*.** Summaries carry the time the audio was measured, and the rule
+    /// asks whether that evidence is fresh at the moment it is evaluated — so a fabricated origin in
+    /// 1970 makes every track read as stale and nothing is ever quiet. That was a defect in the first
+    /// version of this fixture, not in the rule.
+    private func feedQuiet(_ coordinator: ReminderCoordinator, _ clock: ManualClock,
+                           seconds: Int, generation: UInt64 = 1, power: Double = -100) {
+        for _ in 0..<seconds {
+            clock.advance(1)
+            let at = clock.now
+            for track in [AudioActivitySummary.Track.microphone, .system] {
+                coordinator.ingest(AudioActivitySummary(track: track, generation: generation,
+                                                        duration: 1, power: power, observedAt: at))
+            }
+        }
+    }
+
+    @available(macOS 15.0, *)
+    private func startRecording(_ harness: ControllerHarness) async {
+        harness.controller.start()
+        _ = await awaitCondition { MainActor.assumeIsolated { harness.controller.phase } == .recording }
+    }
+
+    @Test("a stop offer is raised for a quiet recording")
+    @available(macOS 15.0, *)
+    func aStopOfferIsRaised() async {
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.quietMinutesBeforeStopOffer = 2
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        await startRecording(harness)
+        #expect(harness.controller.phase == .recording, "the fixture never got a recording going")
+        coordinator.tick()
+
+        feedQuiet(coordinator, clock, seconds: 200)
+        if case .offerToStop(_, _, _) = coordinator.prompt {
+            // as intended
+        } else {
+            Issue.record("""
+                no stop offer: microphone=\(coordinator.trackStateForTesting(.microphone)) \
+                system=\(coordinator.trackStateForTesting(.system)) \
+                recording=\(harness.controller.phase)
+                """)
+        }
+    }
+
+    @Test("a stop offer cannot stop the recording that replaced the one it names")
+    @available(macOS 15.0, *)
+    func aStaleStopOfferCannotStopItsSuccessor() async {
+        // ⚠️ The replacement case: A stops and B starts, and an old prompt is still on screen. The
+        // sampled "is recording" flag is true throughout, so a counter driven by it never moves — the
+        // folder being written into is what distinguishes them.
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.quietMinutesBeforeStopOffer = 2
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        await startRecording(harness)
+        coordinator.tick()
+        feedQuiet(coordinator, clock, seconds: 200)
+        guard case .offerToStop(let staleID, _, _) = coordinator.prompt else {
+            Issue.record("no stop offer to go stale"); return
+        }
+
+        // ⚠️ `stop()` rather than `stopAndWait()`: this test is about identity, and waiting for the
+        // assembly of a fixture recording costs tens of seconds for nothing it asserts.
+        harness.controller.stop()
+        _ = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.activeRecordingDirectory } == nil
+        }
+        await startRecording(harness)
+        coordinator.tick()
+
+        coordinator.acceptStop(recordingID: staleID)
+        let stopped = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.phase } != .recording
+        }
+        #expect(!stopped, "a prompt about a finished recording stopped the one that replaced it")
+        harness.controller.stop()
+    }
+
+    @Test("quit fences summaries already queued for delivery")
+    @available(macOS 15.0, *)
+    func closingFencesQueuedEvidence() async {
+        // ⚠️ Removing the sink handler does not unqueue what is already on the main actor's queue, and
+        // the panel observer lives until `applicationWillTerminate` — so without a fence a burst of
+        // deliveries could raise a fresh prompt inside the quit finalisation.
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.quietMinutesBeforeStopOffer = 2
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        await startRecording(harness)
+        coordinator.tick()
+
+        coordinator.beginClosing()
+        feedQuiet(coordinator, clock, seconds: 300)
+        #expect(coordinator.prompt == nil)
+        harness.controller.stop()
+    }
+
+    @Test("a stop prompt refuses a successor the observer has not even noticed yet")
+    @available(macOS 15.0, *)
+    func aStaleStopOfferIsRefusedWithoutAnyObservation() async {
+        // ⚠️ **The case the counter cannot catch.** If A stops and B starts with no observation in
+        // between, the coordinator's own recording counter has not moved and its "is recording" flag was
+        // never false — so every identity it minted itself still matches. The folder being written into
+        // is the only thing that differs, and it is asked of the recorder rather than of the observer.
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.quietMinutesBeforeStopOffer = 2
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        await startRecording(harness)
+        coordinator.tick()
+        feedQuiet(coordinator, clock, seconds: 200)
+        guard case .offerToStop(let staleID, _, _) = coordinator.prompt else {
+            Issue.record("no stop offer to go stale"); return
+        }
+
+        // A ends and B begins, and nothing observes it: no tick, no state event consumed.
+        harness.controller.stop()
+        _ = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.activeRecordingDirectory } == nil
+        }
+        await startRecording(harness)
+
+        coordinator.acceptStop(recordingID: staleID)
+        // ⚠️ A bounded wait for the **forbidden** outcome: `stop()` is asynchronous, so checking the
+        // phase on the next line would pass even if the stop had been admitted.
+        let stopped = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.phase } != .recording
+        }
+        #expect(!stopped, "an unobserved replacement was stopped by a prompt about its predecessor")
+        harness.controller.stop()
+    }
+
+    @Test("the two reminders are independent switches")
+    @available(macOS 15.0, *)
+    func thePreferencesAreIndependent() async {
+        // ⚠️ An early return when the *start* reminder was off left the quiet evaluation depending
+        // entirely on summaries arriving — so with a stalled meter a standing stop offer would never
+        // notice it had gone stale.
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.offersRecordingWhenMicrophoneBusy = false
+        settings.quietMinutesBeforeStopOffer = 2
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        await startRecording(harness)
+        coordinator.tick()
+
+        feedQuiet(coordinator, clock, seconds: 200)
+        if case .offerToStop = coordinator.prompt {
+            // The stop reminder works with the start reminder switched off.
+        } else {
+            Issue.record("the stop reminder was disabled by the other preference")
+        }
+        harness.controller.stop()
+    }
+
+    @Test("a gap in which nothing was observed rebaselines instead of counting as elapsed time")
+    @available(macOS 15.0, *)
+    func anUnobservedGapRebaselines() async {
+        // ⚠️ Sleep, suspension and a corrected clock all move wall time without anything being watched.
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        guard offered(coordinator, reader, clock) != nil else {
+            Issue.record("no offer to lose"); return
+        }
+        // A gap longer than the rebaseline threshold: the standing prompt goes, and the application
+        // still holding the input is treated as a baseline rather than as a fresh call.
+        coordinator.rebaselineThreshold = .milliseconds(50)
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        coordinator.tick()
+        #expect(coordinator.prompt == nil)
+        for _ in 0..<5 {
+            coordinator.tick()
+            #expect(coordinator.prompt == nil, "waking re-offered a call that was already running")
+        }
     }
 }

@@ -83,6 +83,14 @@ public final class RecordingController: ObservableObject {
         errorMessage = message.text
     }
     private var currentDirectory: URL?
+
+    /// The folder the recording in flight is writing into, or `nil` when nothing is recording.
+    ///
+    /// ⚠️ **The only authoritative identity a recording has.** Everything else — a phase, an elapsed
+    /// count, a flag sampled by an observer — describes a *kind* of state, and two recordings in a row
+    /// are indistinguishable by all of them. A prompt raised about one recording must be able to refuse
+    /// to act on its successor, and this is what lets it.
+    public var activeRecordingDirectory: URL? { currentDirectory }
     private var currentTitle: String = ""
     private var currentSource: String = ""
     private var startedAt: Date?

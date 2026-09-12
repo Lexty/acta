@@ -180,6 +180,12 @@ public final class ControlAPI {
     /// The auto-suggested title (the field's placeholder). Read-only, as on the controller.
     public var suggestedTitle: String { controller.suggestedTitle }
 
+    /// The folder the recording in flight is writing into — the authoritative identity of *this*
+    /// recording, for anything that must refuse to act on a different one. Deliberately not on the wire:
+    /// it is a filesystem path, and `ControlRecordingLookup`'s rule is that a client may only name an id
+    /// it was given.
+    public var activeRecordingDirectory: URL? { controller.activeRecordingDirectory }
+
     /// The current settings. Assigning mirrors the UI's binding; `saveSettings()` normalises and
     /// persists them, exactly as the menu does.
     public var settings: RecordingSettings {

@@ -219,6 +219,9 @@ final class GatedClock: SelfCheckClock, @unchecked Sendable {
 
 /// Wait until `condition` holds, or give up. Bounded so a regression fails instead of hanging.
 @MainActor
+/// ⚠️ **The default stays short on purpose.** Several callers use this bound to assert an *absence* —
+/// "the forbidden thing did not happen within it" — and raising it globally makes every one of those
+/// wait longer for nothing. A caller waiting for something that must arrive raises its own bound.
 func awaitCondition(timeoutMilliseconds: Int = 2000,
                     _ condition: @escaping @Sendable () -> Bool) async -> Bool {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000

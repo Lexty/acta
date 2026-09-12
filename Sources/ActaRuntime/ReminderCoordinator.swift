@@ -17,7 +17,13 @@ public enum ReminderPrompt: Equatable, Sendable {
     /// recording count is a different number. A prompt that answers "will I lose what is recorded" with
     /// the wrong figure is worse than one that does not answer it.
     case offerToStop(recordingID: UInt64, title: String, elapsedSeconds: Int)
-    /// A recording just started from a prompt — shown briefly, then gone.
+    /// A start was accepted from a prompt and capture has not confirmed yet.
+    ///
+    /// ⚠️ **Acta never reports recording before data is being written** — that is the app's oldest rule,
+    /// and a confirmation shown the instant `start` returns breaks it: the start is asynchronous and can
+    /// still fail on a permission, a device or a self-check.
+    case startingRecording(title: String)
+    /// Capture confirmed. Shown briefly, then gone.
     case startedRecording(title: String)
 }
 
@@ -52,6 +58,25 @@ public final class ReminderCoordinator: ObservableObject {
     /// finalisation.
     private var isClosing = false
 
+    /// When `tick` last ran, on a clock that cannot jump.
+    ///
+    /// ⚠️ **`Date` is not evidence of elapsed observation.** A laptop that slept for an hour, a process
+    /// suspended by the system, or a clock corrected by NTP all move wall time without anything having
+    /// been watched — and both rules measure *observed* intervals on purpose. A gap therefore
+    /// rebaselines rather than being treated as a very long interval in which nothing happened, which is
+    /// how waking a Mac would otherwise produce "record this call?" for a call that was already running.
+    private var lastTick: ContinuousClock.Instant?
+
+    /// How long a gap between observations must be before the picture is thrown away.
+    ///
+    /// ⚠️ Several poll intervals rather than one: a busy machine can miss a tick without anything being
+    /// wrong, and rebaselining on ordinary jitter would make the start reminder miss real calls.
+    public static let rebaselineAfter: Duration = .seconds(10)
+
+    /// The threshold this instance uses. Production takes the constant; a test shortens it rather than
+    /// sleeping through it.
+    public var rebaselineThreshold: Duration = ReminderCoordinator.rebaselineAfter
+
     /// Whether the menu is open, so a prompt does not duplicate what is already on screen.
     public var isMenuOpen = false
 
@@ -64,6 +89,11 @@ public final class ReminderCoordinator: ObservableObject {
     /// layers below; a coordinator that assumed one would silently drop every measurement when the two
     /// disagreed — a stop reminder that never fires and never says why.
     private var currentGeneration: UInt64 = 0
+    /// The title of a start accepted from a prompt whose capture has not confirmed yet.
+    private var awaitingConfirmation: String?
+    /// The folder the recording `recordingID` names. Compared at the admission point, because a
+    /// coordinator-minted counter says only how many transitions *this observer* saw.
+    private var recordingDirectory: URL?
 
     /// How often the process list is read.
     ///
@@ -74,9 +104,20 @@ public final class ReminderCoordinator: ObservableObject {
     /// event source is a feature that silently never works.
     public static let pollInterval: Duration = .seconds(1)
 
-    public init(service: ControlAPI, reader: any AudioProcessReading) {
+    /// What "now" means to this coordinator.
+    ///
+    /// ⚠️ **Injectable, because the evidence and the evaluation must share a clock.** Summaries carry the
+    /// time the audio was measured; the rule asks whether that evidence is fresh *now* and how long the
+    /// quiet has lasted. A test that fabricates observation times while the coordinator reads the wall
+    /// clock is not testing the rule — it is reading stale evidence and correctly getting nothing, which
+    /// is exactly the false negative my first fixture produced.
+    private let now: @Sendable () -> Date
+
+    public init(service: ControlAPI, reader: any AudioProcessReading,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.reader = reader
+        self.now = now
     }
 
     public static func live(service: ControlAPI = .shared) -> ReminderCoordinator {
@@ -130,6 +171,10 @@ public final class ReminderCoordinator: ObservableObject {
     /// ⚠️ A **rising** generation is adopted; a straggler from a capture that has already been replaced
     /// is not, and the rule drops it.
     public func ingest(_ summary: AudioActivitySummary) {
+        // ⚠️ **Queued deliveries outlive the switch that stopped them.** `beginClosing` and `stop` remove
+        // the handler, but tasks already enqueued on the main actor still arrive; without this, enough
+        // of them could raise a fresh stop prompt during the quit finalisation.
+        guard !isClosing, service.settings.offersStopWhenQuiet else { return }
         if summary.generation > currentGeneration {
             currentGeneration = summary.generation
             quietRule.beginGeneration(summary.generation)
@@ -148,6 +193,7 @@ public final class ReminderCoordinator: ObservableObject {
     /// preference switched off between the prompt and the click — can be decided rather than raced.
     public func tick() {
         guard !isClosing else { return }
+        rebaselineIfObservationLapsed()
         let settings = service.settings
         applyPreferenceChanges(settings)
         quietRule.setQuietInterval(TimeInterval(settings.quietMinutesBeforeStopOffer * 60))
@@ -166,25 +212,55 @@ public final class ReminderCoordinator: ObservableObject {
             ownBundleIDs: Self.ownBundleIDs,
             ownPIDs: [ProcessInfo.processInfo.processIdentifier])
 
-        // ⚠️ **The HAL is not read at all when the reminder is off.** Keeping the rule's episode state
-        // warm is not worth a property walk per second for a feature nobody asked for; a re-enable
-        // rebaselines instead.
-        guard settings.offersRecordingWhenMicrophoneBusy else { return }
-
-        switch activityRule.observe(reader.readSnapshot(), at: Date(), context: context) {
-        case .none:
-            break
-        case .offer(let episode):
-            present(.offerToRecord(episodeID: episode.id,
-                                   application: episode.displayName,
-                                   bundleID: episode.bundleID,
-                                   suggestedTitle: service.state.suggestedTitle,
-                                   microphone: service.microphoneStatus.captureSummary))
-        case .withdraw(let episodeID):
-            withdrawStartOffer(episodeID)
+        // ⚠️ **The HAL is not read at all when the start reminder is off** — a property walk per second
+        // for a feature nobody asked for is not worth keeping episode state warm; a re-enable
+        // rebaselines instead. ⚠️ But this must **not** return: the two preferences are independent, and
+        // an early exit here left the quiet evaluation depending entirely on summaries arriving. With a
+        // stalled meter there are no summaries, so a standing stop offer would never notice it had gone
+        // stale.
+        if settings.offersRecordingWhenMicrophoneBusy {
+            switch activityRule.observe(reader.readSnapshot(), at: now(), context: context) {
+            case .none:
+                break
+            case .offer(let episode):
+                present(.offerToRecord(episodeID: episode.id,
+                                       application: episode.displayName,
+                                       bundleID: episode.bundleID,
+                                       suggestedTitle: service.state.suggestedTitle,
+                                       microphone: service.microphoneStatus.captureSummary))
+            case .withdraw(let episodeID):
+                withdrawStartOffer(episodeID)
+            }
         }
 
         evaluateQuiet()
+    }
+
+    /// Throw the picture away after a gap in which nothing was observed.
+    private func rebaselineIfObservationLapsed() {
+        let now = ContinuousClock.now
+        defer { lastTick = now }
+        guard let lastTick, now - lastTick > rebaselineThreshold else { return }
+        log.info("rebaselining the reminders after an unobserved gap")
+        // ⚠️ A fresh rule, not a cleared one: the baseline is what makes an application already holding
+        // the input at this instant silent, and that is exactly the state a wake needs.
+        activityRule = MicrophoneActivityRule()
+        quietRule.invalidate()
+        if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
+            activityRule.offerResolved(episodeID: episodeID)
+            prompt = nil
+        }
+        if case .offerToStop = prompt {
+            quietRule.offerResolved()
+            prompt = nil
+        }
+    }
+
+    /// What the quiet rule believes about one track — exposed so a failing test can say *why* rather
+    /// than only that nothing happened.
+    public func trackStateForTesting(_ track: AudioActivitySummary.Track)
+        -> AudioActivityRule.TrackState {
+        quietRule.state(of: track, at: now())
     }
 
     /// A preference switched off must take the prompt it governs off the screen, and must never act on
@@ -216,11 +292,29 @@ public final class ReminderCoordinator: ObservableObject {
         case .recording, .starting: isRecording = true
         case .idle, .saving: isRecording = false
         }
-        if isRecording, !wasRecording {
+        // ⚠️ **A changed folder is a changed recording, whatever the sampled flag says.** A stop and a
+        // start between two observations leave "is recording" true throughout, so a counter driven by
+        // that flag never moves — and a stop prompt raised for the first could stop the second.
+        let directory = service.activeRecordingDirectory
+        if isRecording, !wasRecording || directory != recordingDirectory {
             recordingID += 1
+            recordingDirectory = directory
             quietRule.beginRecording(recordingID, generation: currentGeneration)
+            if case .offerToStop = prompt { prompt = nil }
+        }
+        // ⚠️ Promotion happens on `.recording`, never on `.starting`: capture writing segments is what
+        // the confirmation claims, and `.starting` is precisely the state in which that is not yet known.
+        if case .recording = state.operation, let title = awaitingConfirmation {
+            awaitingConfirmation = nil
+            present(.startedRecording(title: title))
+        }
+        if case .idle = state.operation, awaitingConfirmation != nil {
+            // The start failed, or was cancelled. The panel must not be left claiming otherwise.
+            awaitingConfirmation = nil
+            if case .startingRecording = prompt { prompt = nil }
         }
         if !isRecording, wasRecording {
+            recordingDirectory = nil
             quietRule.invalidate()
             if case .offerToStop = prompt { prompt = nil }
         }
@@ -228,11 +322,11 @@ public final class ReminderCoordinator: ObservableObject {
     }
 
     private func evaluateQuiet() {
-        guard wasRecording else { return }
+        guard !isClosing, wasRecording else { return }
         let settings = service.settings
         let context = AudioActivityRule.Context(isEnabled: settings.offersStopWhenQuiet,
                                                 recordingID: recordingID)
-        switch quietRule.evaluate(at: Date(), context: context) {
+        switch quietRule.evaluate(at: now(), context: context) {
         case .none:
             break
         case .offerStop(let id):
@@ -297,7 +391,9 @@ public final class ReminderCoordinator: ObservableObject {
             // ⚠️ The title the prompt promised, not whatever the field holds now: "Will save as X" has
             // to be true, and `service.title` can have been edited in the menu since.
             self.service.start(title: intendedTitle)
-            self.present(.startedRecording(title: intendedTitle))
+            // Honest until the recorder says otherwise; `trackRecordingIdentity` promotes or withdraws it.
+            self.awaitingConfirmation = intendedTitle
+            self.present(.startingRecording(title: intendedTitle))
         }
     }
 
@@ -331,6 +427,13 @@ public final class ReminderCoordinator: ObservableObject {
             return
         }
         guard case .recording = service.state.operation else { return }
+        // ⚠️ **Asked of the recorder, not of the observer, and in this turn.** The state stream is
+        // documented as lossy, so "the coordinator thinks this is still recording A" is not evidence;
+        // the folder being written into is.
+        guard service.activeRecordingDirectory == recordingDirectory else {
+            log.info("stop offer \(id, privacy: .public) names a recording that has been replaced")
+            return
+        }
         service.stop()
     }
 
@@ -342,7 +445,7 @@ public final class ReminderCoordinator: ObservableObject {
     /// "Remind me in thirty minutes", bound to this recording.
     public func snooze(recordingID id: UInt64, minutes: Int = 30) {
         guard id == recordingID else { return dismiss() }
-        quietRule.armSnooze(until: Date().addingTimeInterval(TimeInterval(minutes * 60)),
+        quietRule.armSnooze(until: now().addingTimeInterval(TimeInterval(minutes * 60)),
                             recordingID: id)
         dismiss()
     }

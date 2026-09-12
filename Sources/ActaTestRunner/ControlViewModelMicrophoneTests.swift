@@ -796,13 +796,16 @@ struct ControlViewModelMicrophoneTests {
         defer { subscription.cancel() }
 
         api.start(title: "Pinned")
-        let pinned = await awaitCondition {
+        // ⚠️ A longer bound than the default: this waits for a **real** recording to come up and for the
+        // menu's stream to carry the pin, and the default two seconds is tight when the rest of the
+        // suite is running beside it. The bound costs nothing when the condition holds.
+        let pinned = await awaitCondition(timeoutMilliseconds: 6000) {
             MainActor.assumeIsolated { model.microphone.recordingFrom?.uid } == "BuiltInMicrophoneDevice"
         }
         #expect(pinned, "the open menu never learned which microphone the recording came up on")
 
         await api.stopAndWait()
-        let cleared = await awaitCondition {
+        let cleared = await awaitCondition(timeoutMilliseconds: 6000) {
             MainActor.assumeIsolated { model.microphone.recordingFrom } == nil
         }
         #expect(cleared, "the menu went on naming a microphone after the recording had stopped")
