@@ -572,8 +572,10 @@ these hold, each of which has a test and a negative control (`OwnerReleaseOfferT
   being written into, and the admitted binding — and its release still stands qualified.
 
 ⚠️ **Those tests reach the coordinator's side of the presenter contract, not the panel's.** That
-`ReminderPanel.swift` acknowledges only once the window server reports the panel visible, and reports a
-lock or a display sleep as a lost presentation, is human acceptance — see "Not verified automatically".
+`ReminderPanel.swift` acknowledges only once the window server reports the panel visible, reports a
+lock or a display sleep as a lost presentation, and acknowledges nothing while one is still in force — until
+its own counterpart (unlock, wake, session active) is observed — is human acceptance — see "Not verified
+automatically".
 
 Keep Recording, a dismissal, a displacement by another prompt, the preference being switched off and quit
 all end the countdown without acting. **The panel's own expiry is not a dismissal here**

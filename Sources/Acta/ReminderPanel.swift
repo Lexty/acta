@@ -36,6 +36,12 @@ final class ReminderPanelController: ReminderPresenting {
     /// A presentation shown but not yet visible, waiting for its window to say so.
     private var awaitingAcknowledgement: UInt64?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    /// What currently makes presentation impossible, by the notification that began it.
+    private var suppressions: Set<Suppression> = []
+
+    private enum Suppression {
+        case systemSleep, displaySleep, sessionInactive, screenLocked
+    }
 
     init(coordinator: ReminderCoordinator) {
         self.coordinator = coordinator
@@ -155,8 +161,12 @@ final class ReminderPanelController: ReminderPresenting {
 
     // MARK: - Presentation evidence
 
+    /// ⚠️ **A lock or a sleep still in force answers "not visible" on its own**, without asking the window
+    /// server: whether occlusion reports a panel ordered in under the lock shield as visible has not been
+    /// measured here, and an offer raised onto a screen that is *already* locked gets no lock notification
+    /// to lose it.
     private var isVisibleOnScreen: Bool {
-        guard let panel else { return false }
+        guard let panel, suppressions.isEmpty else { return false }
         return panel.isVisible && panel.occlusionState.contains(.visible)
     }
 
@@ -178,26 +188,46 @@ final class ReminderPanelController: ReminderPresenting {
     /// ⚠️ **A lock or a display sleep takes away the interval a countdown promised**, whether or not the
     /// window server reports an occlusion change for it. Each is reported as lost; the coordinator
     /// decides what that withdraws, and it withdraws nothing but a countdown.
+    ///
+    /// ⚠️ **And it lasts until its own end is observed.** Reporting the loss once is not enough: the
+    /// release stays qualified behind the lock, so a fresh offer is raised a few seconds later onto the same
+    /// locked screen. Each state is held by the notification that began it and cleared only by its own
+    /// counterpart — a wake does not unlock — and while any is held nothing is acknowledged. A counterpart
+    /// that never arrives leaves offers unacknowledged, which keeps recording.
     private func watchForLostPresentation() {
         let workspace = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
-                     NSWorkspace.sessionDidResignActiveNotification] {
-            let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.reportLost() }
-            }
-            observers.append((workspace, token))
-        }
         let distributed = DistributedNotificationCenter.default()
-        let token = distributed.addObserver(forName: Notification.Name("com.apple.screenIsLocked"),
-                                            object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reportLost() }
+        let pairs: [(NotificationCenter, Notification.Name, Notification.Name, Suppression)] = [
+            (workspace, NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, .systemSleep),
+            (workspace, NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
+             .displaySleep),
+            (workspace, NSWorkspace.sessionDidResignActiveNotification,
+             NSWorkspace.sessionDidBecomeActiveNotification, .sessionInactive),
+            (distributed, Notification.Name("com.apple.screenIsLocked"),
+             Notification.Name("com.apple.screenIsUnlocked"), .screenLocked),
+        ]
+        for (center, began, ended, suppression) in pairs {
+            let beganToken = center.addObserver(forName: began, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.suppress(suppression) }
+            }
+            let endedToken = center.addObserver(forName: ended, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.resume(suppression) }
+            }
+            observers.append((center, beganToken))
+            observers.append((center, endedToken))
         }
-        observers.append((distributed, token))
     }
 
-    private func reportLost() {
+    private func suppress(_ suppression: Suppression) {
+        suppressions.insert(suppression)
         guard let shownID else { return }
         coordinator?.presentationLost(shownID)
+    }
+
+    /// A presentation still waiting is acknowledged only now, and only if the window server agrees.
+    private func resume(_ suppression: Suppression) {
+        suppressions.remove(suppression)
+        acknowledgeIfVisible()
     }
 
     /// Top right of the display the pointer is on, under the menu bar.

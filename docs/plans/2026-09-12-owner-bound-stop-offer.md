@@ -706,7 +706,11 @@ presentation id) and takes its prompt down. Nothing acts on it. Task 9 replaces 
 `coordinator.presenter = panel`; the Combine sink (and `import Combine` there) is gone. The panel acknowledges
 when `isVisible && occlusionState.contains(.visible)` — right after `orderFrontRegardless`, or on the next
 `didChangeOcclusionStateNotification`. It reports lost on occlusion becoming not-visible, `willSleep`,
-`screensDidSleep`, `sessionDidResignActive` and `com.apple.screenIsLocked`. The coordinator ignores a loss
+`screensDidSleep`, `sessionDidResignActive` and `com.apple.screenIsLocked`, and — added in the second review
+pass — holds each of those as a suppression until its own counterpart (`didWake`, `screensDidWake`,
+`sessionDidBecomeActive`, `com.apple.screenIsUnlocked`), acknowledging nothing meanwhile: the release stays
+qualified behind a lock, so a fresh offer is raised onto the still-locked screen, and whether occlusion
+calls that panel visible is unmeasured. The coordinator ignores a loss
 for a presentation that carries no countdown, so existing prompts behave as before.
 
 Revocation points: `dismiss()` (`.dismissed`), `present` of anything (`.replaced` — and the new prompt's
