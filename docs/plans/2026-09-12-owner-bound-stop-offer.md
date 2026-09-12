@@ -424,10 +424,30 @@ incomplete enumeration mints no binding.
 
 ⚠️ **The negative control had to be constructible.** The rule here is an *absence* — there is no
 inference to delete — so the control adds one: pick the holder the world offers instead of the prompt's.
-It failed the named test, and the value it produced is the counterexample itself: the binding became
-`com.zzz.dictation`, the dictation service, while the prompt was about the call. The fixture is built so
-that both orderings a "pick from the world" rule could use — enumeration order and identifier order —
-land on that application, which is what makes the control deterministic rather than a coin toss.
+Codex accepted constructed controls as legitimate mutation tests and declined my offer of a source-level
+guard.
+
+**Codex reviewed it and corrected two things, both verified:**
+
+1. ⚠️ **"An incomplete enumeration mints no binding" was false, and the code never did it.** A
+   positively held owner in a partial list reduces to `.held` and binds — held wins. What refuses a
+   binding is the absence of positive evidence *for that key*. Prose corrected everywhere, and two
+   fixtures added: a partial list showing the owner holding **binds**, and an unreadable property
+   (`nil`) in a **complete** list does not. The old "unreadable" fixture only covered a `false` that
+   incompleteness had turned unreadable — a different case.
+2. ⚠️ **My fixture's ordering claim was wrong.** I said both orderings a world-picking rule could use
+   land on the second application; but the snapshot's array order is erased by the fold, so only the
+   identifier order survives, and a selector sorting the other way would have passed. His replacement is
+   stronger and is what is now in the file: bind the **same two-holder readings twice**, once with each
+   episode, and expect the matching owner each time. No deterministic episode-ignoring selector can
+   answer both. Run in both sort directions, the control fails two tests each time.
+
+⚠️ **Carried into Task 7 on his point 3:** a `nil` binding must never become a refused *start*. An
+unbindable episode — pid-only, or an owner not positively held at that instant — still starts a
+recording; it starts **unbound**, and only the owner-release stop is unavailable. `guard let binding
+else { return }` would recreate the dead-button defect `checkingStart` exists to prevent. Record why the
+binding was withheld; do **not** attach an owner later when the input returns, which would move the
+frozen admission boundary.
 
 ### Task 5: `MicrophoneOwnershipRule` and the replay fixture
 
@@ -489,6 +509,10 @@ the kind of green implementation both reviews warned about.
       coordinator supplies the resolver's observation state
 - [ ] ⚠️ **resolve after the last pre-admission `await`**, and attach in the **same actor turn** that
       successfully latches `isStarting`
+- [ ] ⚠️ **a `nil` binding starts the recording unbound — it never refuses the start.** Codex, on
+      Task 4: `guard let binding else { return }` recreates the dead-button defect and would also break
+      pid-only prompt starts. Record *why* the binding was withheld, for diagnosis; do not attach an
+      owner later when the input returns, which would move the frozen admission boundary
 - [ ] for a prompt: preserve the original episode identity across the barrier, but **re-check** its
       observation epoch, key and current evidence afterwards — never replace it with a newer candidate
 - [ ] freeze the accepted binding across the `recoveryTask` and `session.start` suspensions; an owner

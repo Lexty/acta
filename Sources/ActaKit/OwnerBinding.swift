@@ -9,7 +9,7 @@ import Foundation
 /// user presses Record; that service is the only recent acquirer, so a recency rule binds **it**; it
 /// releases, and Acta runs a countdown and stops the still-running Slack recording. A false binding is
 /// worse than a missing one. A manual or socket start therefore stays unbound: the recording works, and
-/// no stop is offered for it.
+/// no *owner-release* stop is offered for it. The quiet reminder is untouched and still applies.
 ///
 /// ⚠️ **A second failure needs no third party.** Two holders both acquire, a recency rule correctly
 /// answers "ambiguous" — then the older acquisition ages out while that application is still holding,
@@ -19,7 +19,7 @@ import Foundation
 /// Slack myself", which is not consent to give another application authority to stop a recording. New
 /// copy and a new test do not retroactively change what an already-saved preference meant.
 public struct OwnerBinding: Equatable, Sendable {
-    /// Which application. Always a bundle key — see `init?(episode:...)`.
+    /// Which application. Always a bundle key — see `bind(episode:holding:epoch:observedAt:)`.
     public let key: AudioProcessKey
 
     /// The observation epoch the evidence belongs to.
@@ -64,6 +64,22 @@ public struct OwnerBinding: Equatable, Sendable {
     /// show holding the input — binding to something we cannot see would hand stop authority to a
     /// guess. Several processes of one application have already been coalesced into one holder by
     /// `AudioProcessReadings.reduce`, so "is it holding" is one lookup rather than a scan.
+    ///
+    /// ⚠️ **This is about positive evidence for *that key*, not about the list being complete.** An
+    /// incomplete enumeration that nonetheless shows the owner holding does bind — held wins, and a
+    /// process seen holding is holding. What refuses a binding is the absence of positive evidence:
+    /// idle, unreadable, or not listed at all. Codex caught an earlier version of this comment saying
+    /// "an incomplete enumeration mints no binding", which the code never did.
+    ///
+    /// ⚠️ **The caller's obligations, which no signature here can enforce.** `epoch` and `observedAt`
+    /// are supplied separately from `readings`, and `MicrophoneActivityEpisode` is publicly
+    /// constructible, so nothing in this type establishes that the three describe one observation or a
+    /// recent one. Admission does that: see Task 7 of the plan.
+    ///
+    /// ⚠️ **`nil` here must never turn into a refused start.** An episode this cannot bind — pid-only,
+    /// or an owner not positively held at that instant — still starts a recording; it starts *unbound*,
+    /// and only the owner-release stop is unavailable for it. Treating `nil` as a reason to return
+    /// early would recreate the dead-button defect the `checkingStart` prompt exists to prevent.
     ///
     /// Returns `nil` when the episode has no bundle identifier. ⚠️ **A pid-only holder is left
     /// unbound**: a pid can be reused *within one recording*, so a bare pid cannot promise the identity

@@ -58,6 +58,39 @@ public enum AudioProcessReadings {
         }
     }
 
+    /// One fold together with the completeness of the snapshot it came from.
+    ///
+    /// ⚠️ **The two travel together because separating them loses evidence silently.** A key missing
+    /// from the readings means nothing on its own: an empty *complete* list and an empty *incomplete*
+    /// one reduce to the same empty dictionary, so a consumer writing `readings[owner] ?? .released`
+    /// reads a failed enumeration as a call ending. Codex named this while reviewing the extraction;
+    /// this type is what stops the next consumer from having to remember it.
+    public struct Evidence: Equatable, Sendable {
+        public let readings: [AudioProcessKey: MicrophoneInputReading]
+        /// Whether the enumeration behind it was trustworthy enough to say something is *absent*.
+        public let isComplete: Bool
+
+        public init(readings: [AudioProcessKey: MicrophoneInputReading], isComplete: Bool) {
+            self.readings = readings
+            self.isComplete = isComplete
+        }
+
+        /// What this evidence says about one key.
+        ///
+        /// ⚠️ **Absence is answered here, once.** A key the fold never saw is `released` when the
+        /// enumeration was complete — the application has no audio process object at all, which is what
+        /// quitting looks like — and `unreadable` when it was not.
+        public func reading(of key: AudioProcessKey) -> MicrophoneInputReading {
+            if let reading = readings[key] { return reading }
+            return isComplete ? .released : .unreadable
+        }
+    }
+
+    /// Fold a snapshot into evidence: one reading per key, and whether absence means anything.
+    public static func evidence(from snapshot: AudioProcessSnapshot, dropping own: Own) -> Evidence {
+        Evidence(readings: reduce(snapshot, dropping: own), isComplete: snapshot.isComplete)
+    }
+
     /// Fold the snapshot into one reading per key.
     public static func reduce(_ snapshot: AudioProcessSnapshot,
                               dropping own: Own) -> [AudioProcessKey: MicrophoneInputReading] {

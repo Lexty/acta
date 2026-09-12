@@ -10,15 +10,10 @@ import Testing
 /// ever comes back.
 @Suite("Owner binding")
 struct OwnerBindingTests {
-    /// The application the prompt was about. Named so it sorts **first** among the fixture's holders.
+    /// The application the prompt was about.
     private static let promptApp = "com.aaa.calls"
-    /// Another application holding the input at the same instant. Named so it sorts **last**, and
-    /// listed last in every snapshot below.
-    ///
-    /// ⚠️ **Both properties are deliberate.** A rule that picked "some holder from the world" would have
-    /// to pick by *something*, and the two orderings available to it — the enumeration order and the
-    /// identifier order — both land on this one. That is what makes the negative control deterministic
-    /// instead of a coin toss.
+    /// Another application holding the input at the same instant — the dictation service from the
+    /// counterexample.
     private static let otherApp = "com.zzz.dictation"
 
     private static let observed = Date(timeIntervalSince1970: 9_000_000)
@@ -62,18 +57,28 @@ struct OwnerBindingTests {
     /// the input briefly just before the user presses Record; that service is the only recent acquirer,
     /// so a recency rule binds it; it releases, and Acta runs a countdown and stops the still-running
     /// Slack recording. A false binding is worse than a missing one.
-    @Test("the prompt's application is bound even when another application is also holding")
-    func thePromptWinsOverAnyOtherHolder() {
+    /// ⚠️ **One world, two episodes, and the answer has to follow the episode.** Codex replaced an
+    /// earlier fixture of mine that claimed any "pick from the world" ordering would land on the second
+    /// application: the snapshot's array order is erased by the fold, so only the identifier order
+    /// survives, and a selector sorting the other way would have passed. Binding the *same* readings
+    /// twice removes the guesswork — no deterministic selector that ignores the episode can answer both
+    /// correctly, whichever ordering it uses.
+    @Test("the same world binds to whichever application the prompt was about")
+    func theBindingFollowsTheEpisodeAndNotTheWorld() {
         let world = Self.readings([Self.process(501, Self.promptApp, true),
                                    Self.process(900, Self.otherApp, true)])
-        // The fixture is a real counterexample rather than a degenerate one: there genuinely are two
-        // holders, and the other one is the one any "pick from the world" ordering would reach first.
+        // A real counterexample rather than a degenerate one: there genuinely are two holders.
         #expect(world.count == 2)
         #expect(world[.bundle(Self.otherApp)] == .held)
 
-        let binding = OwnerBinding.bind(episode: Self.episode(1, Self.promptApp), holding: world,
-                                        epoch: 1, observedAt: Self.observed)
-        #expect(binding?.key == .bundle(Self.promptApp),
+        let first = OwnerBinding.bind(episode: Self.episode(1, Self.promptApp), holding: world,
+                                      epoch: 1, observedAt: Self.observed)
+        #expect(first?.key == .bundle(Self.promptApp),
+                "the binding was taken from the world instead of from the prompt")
+
+        let second = OwnerBinding.bind(episode: Self.episode(2, Self.otherApp), holding: world,
+                                       epoch: 1, observedAt: Self.observed)
+        #expect(second?.key == .bundle(Self.otherApp),
                 "the binding was taken from the world instead of from the prompt")
     }
 
@@ -118,12 +123,33 @@ struct OwnerBindingTests {
                                        epoch: 1, observedAt: Self.observed)
         #expect(absent == nil)
 
-        // ⚠️ Unreadable is not held. An incomplete enumeration is exactly where a key stops being
-        // answerable, and a binding minted from it would claim evidence that does not exist.
-        let unreadable = OwnerBinding.bind(
+        // ⚠️ An unreadable property in a **complete** list. This is the real unknown case: the HAL
+        // answered for the process and could not say. Not to be confused with the case below, where a
+        // perfectly readable `false` became unreadable only because the enumeration was partial.
+        let unreadableProperty = OwnerBinding.bind(
+            episode: Self.episode(1, Self.promptApp),
+            holding: Self.readings([Self.process(501, Self.promptApp, nil)]),
+            epoch: 1, observedAt: Self.observed)
+        #expect(unreadableProperty == nil)
+
+        let idleInAPartialList = OwnerBinding.bind(
             episode: Self.episode(1, Self.promptApp),
             holding: Self.readings([Self.process(501, Self.promptApp, false)], complete: false),
             epoch: 1, observedAt: Self.observed)
-        #expect(unreadable == nil)
+        #expect(idleInAPartialList == nil)
+    }
+
+    /// ⚠️ **An incomplete list still binds when the owner is positively held**, and Codex caught me
+    /// claiming otherwise in prose the code never obeyed. Held wins: a process seen holding is holding,
+    /// whatever else the enumeration missed. What refuses a binding is the absence of positive evidence
+    /// for *that key*, not the completeness of the list.
+    @Test("a partial enumeration that shows the owner holding still binds")
+    func aPartialListStillBindsAPositivelyHeldOwner() {
+        let binding = OwnerBinding.bind(
+            episode: Self.episode(1, Self.promptApp),
+            holding: Self.readings([Self.process(501, Self.promptApp, true),
+                                    Self.process(900, Self.otherApp, false)], complete: false),
+            epoch: 1, observedAt: Self.observed)
+        #expect(binding?.key == .bundle(Self.promptApp))
     }
 }
