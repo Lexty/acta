@@ -40,6 +40,54 @@ public enum ReminderPrompt: Equatable, Sendable {
     case startedRecording(title: String)
 }
 
+/// One line of proof that the reminder tick is still running.
+///
+/// ⚠️ **It does not fix the silence, it makes it observable.** On 2026-09-12 an instance that had been
+/// up since 09:57 did not react to two real Slack huddles, while a fresh one reacted immediately — and
+/// nothing in the log could separate "the tick stopped" from "nothing was holding the microphone",
+/// because the only diagnostic there logs on *change*. A beat emitted on a schedule rather than on a
+/// change tells those two apart: a beat proves a tick completed, and an idle machine beats as loudly as
+/// a busy one.
+///
+/// ⚠️ **No beats is a question, not an answer.** It says only that no completed tick was retained in the
+/// interval looked at — which sleep, a deliberate quit, a tick wedged inside a synchronous read, and the
+/// store's own retention limit all produce as readily as a dead poll task. Codex corrected an earlier
+/// version of this comment that called it a diagnosis.
+///
+/// ⚠️ **`tick` against `uptime` is not polling utilisation either.** `ContinuousClock` keeps counting
+/// while the Mac is asleep — which is the whole reason `lastTick` below rebaselines on a gap — so an
+/// overnight sleep leaves a low ratio with nothing wrong. A ratio far below one is an observation gap
+/// that has to be explained, not starvation.
+public struct ReminderHeartbeat: Equatable, Sendable {
+    /// How many times `tick()` has run on this instance, counting the one that emitted this.
+    public let tick: UInt64
+    /// How long this instance has been alive, on a clock that cannot jump.
+    public let uptime: Duration
+    /// What this tick saw, or that it deliberately looked at nothing.
+    public let observation: Observation
+    /// The two reminder preferences as *this tick* read them.
+    ///
+    /// ⚠️ **A preference that is off is the other way a silent instance is explained**, and it was ruled
+    /// out by hand last time — by decoding the stored settings blob after the fact. Carrying them costs
+    /// nothing and settles it in the same line.
+    public let offersRecordingWhenMicrophoneBusy: Bool
+    public let offersStopWhenQuiet: Bool
+    public let offersStopWhenOwnerReleases: Bool
+
+    public enum Observation: Equatable, Sendable {
+        /// The process list was read on this tick.
+        case observed(processes: Int, isComplete: Bool, holders: Int)
+        /// **No snapshot was read on this tick.** Literally that, and nothing more: the ordinary
+        /// cause is the start reminder being off, but a tick that returned early before reaching the
+        /// read reports the same thing.
+        ///
+        /// ⚠️ **Deliberately not repaired by the diagnostic.** A heartbeat that walked the process list
+        /// to have something to report would add exactly the per-second cost the design refuses when
+        /// the feature is off.
+        case notObserved
+    }
+}
+
 /// Joins the two reminder rules to the recorder.
 ///
 /// ⚠️ **Nothing here acts on its own.** Every path that starts or stops a recording begins with a click.
@@ -138,6 +186,37 @@ public final class ReminderCoordinator: ObservableObject {
     /// The folder the recording `recordingID` names. Compared at the admission point, because a
     /// coordinator-minted counter says only how many transitions *this observer* saw.
     private var recordingDirectory: URL?
+
+    /// How many ticks this instance has run.
+    ///
+    /// ⚠️ **A property rather than a log assertion.** `log` is a private `let` and the test runner has no
+    /// seam that captures `os_log`, so a test that could only read the unified log would be an
+    /// integration test of Apple's logging rather than of this counter.
+    public private(set) var tickCount: UInt64 = 0
+
+    /// How many heartbeats have been emitted, and the last one.
+    ///
+    /// ⚠️ **A count and the latest, not a list.** This instance is meant to run for days; an array of
+    /// every beat would be a leak whose only reader is a test.
+    public private(set) var heartbeatCount: UInt64 = 0
+    public private(set) var lastHeartbeat: ReminderHeartbeat?
+
+    /// When this instance was built, on a clock that cannot jump.
+    ///
+    /// ⚠️ **Construction, not `start()`.** The app builds the coordinator and starts it in the same
+    /// launch, and a test drives `tick()` without ever calling `start()` — an uptime that only began at
+    /// `start()` would be absent in exactly the case the beat exists to describe.
+    private let startedAt = ContinuousClock.now
+
+    /// How many ticks apart the beats are. Sixty at a one-second poll is one line a minute.
+    public static let heartbeatTicks: UInt64 = 60
+
+    /// The interval this instance uses. Production takes the constant; a test shortens it rather than
+    /// driving sixty ticks to see two beats.
+    public var heartbeatInterval: UInt64 = ReminderCoordinator.heartbeatTicks
+
+    /// Ticks left before the next beat. Starts at one, so a launch is on the record immediately.
+    private var ticksUntilHeartbeat: UInt64 = 1
 
     /// How often the process list is read.
     ///
@@ -241,8 +320,24 @@ public final class ReminderCoordinator: ObservableObject {
     /// preference switched off between the prompt and the click — can be decided rather than raced.
     public func tick() {
         guard !isClosing else { return }
-        rebaselineIfObservationLapsed()
+        tickCount += 1
+        // ⚠️ Read at the end of the tick through `defer`, so the beat describes what this tick actually
+        // did rather than what it was about to do — and so a later early return could not take the
+        // record of the tick with it.
+        var observation = ReminderHeartbeat.Observation.notObserved
+        // ⚠️ **Settings are read before the `defer` is registered, on Codex's correction.** Captured as
+        // mutable booleans assigned further down, an early return inserted between the two would make
+        // the beat report both reminders *off* — a fabricated fact, in the one line whose whole job is
+        // to be believed hours later.
         let settings = service.settings
+        defer {
+            emitHeartbeatIfDue(
+                observation,
+                offersRecordingWhenMicrophoneBusy: settings.offersRecordingWhenMicrophoneBusy,
+                offersStopWhenQuiet: settings.offersStopWhenQuiet,
+                offersStopWhenOwnerReleases: settings.offersStopWhenOwnerReleases)
+        }
+        rebaselineIfObservationLapsed()
         applyPreferenceChanges(settings)
         quietRule.setQuietInterval(TimeInterval(settings.quietMinutesBeforeStopOffer * 60))
         // ⚠️ Applied to the *live* meter too, not only to the next one built: switching the reminder off
@@ -268,6 +363,9 @@ public final class ReminderCoordinator: ObservableObject {
         // stale.
         if settings.offersRecordingWhenMicrophoneBusy {
             let snapshot = reader.readSnapshot()
+            observation = .observed(processes: snapshot.processes.count,
+                                    isComplete: snapshot.isComplete,
+                                    holders: snapshot.processes.filter { $0.isRunningInput == true }.count)
             // ⚠️ **Diagnostic, added because the feature was silent through a real 95-second Slack
             // huddle** with the preference on and nothing excluded, and reading the rule did not
             // explain it. Logged only when the set of input holders changes, so an idle machine is
@@ -301,6 +399,49 @@ public final class ReminderCoordinator: ObservableObject {
         }
 
         evaluateQuiet()
+    }
+
+    /// Emit a beat if this tick is due one.
+    ///
+    /// ⚠️ **`.notice`, chosen against the two cheaper levels.** Apple documents `.notice` as persisted to
+    /// the store, and `.info` and `.debug` as normally memory-only unless something asks for them — and
+    /// the defect this exists for appears after *hours*, long enough for a memory buffer to have wrapped
+    /// before anyone thinks to look. ⚠️ Persisted is not permanent: the store has a size limit and this
+    /// promises no particular retention. About 1440 short records a day of continuous running is a
+    /// judgement about a reasonable cost, not a measurement of one. The holder diagnostic beside it
+    /// stays `.info`: it is read while reproducing, not hours later.
+    ///
+    /// ⚠️ **Beats are emitted from `tick`, so a stopped tick emits none.** That is the signal, not a
+    /// gap in it — do not add a separate timer to keep beating when the loop this describes has died.
+    private func emitHeartbeatIfDue(_ observation: ReminderHeartbeat.Observation,
+                                    offersRecordingWhenMicrophoneBusy: Bool,
+                                    offersStopWhenQuiet: Bool,
+                                    offersStopWhenOwnerReleases: Bool) {
+        ticksUntilHeartbeat -= 1
+        guard ticksUntilHeartbeat == 0 else { return }
+        ticksUntilHeartbeat = max(1, heartbeatInterval)
+        let beat = ReminderHeartbeat(
+            tick: tickCount, uptime: ContinuousClock.now - startedAt, observation: observation,
+            offersRecordingWhenMicrophoneBusy: offersRecordingWhenMicrophoneBusy,
+            offersStopWhenQuiet: offersStopWhenQuiet,
+            offersStopWhenOwnerReleases: offersStopWhenOwnerReleases)
+        heartbeatCount += 1
+        lastHeartbeat = beat
+        let seen: String
+        switch observation {
+        case .observed(let processes, let isComplete, let holders):
+            seen = "processes=\(processes) complete=\(isComplete) holding=\(holders)"
+        case .notObserved:
+            seen = "not observed"
+        }
+        let seconds = beat.uptime.components.seconds
+        log.notice("""
+            heartbeat tick=\(beat.tick, privacy: .public) uptime=\(seconds, privacy: .public)s \
+            \(seen, privacy: .public) \
+            start=\(offersRecordingWhenMicrophoneBusy, privacy: .public) \
+            quiet=\(offersStopWhenQuiet, privacy: .public) \
+            release=\(offersStopWhenOwnerReleases, privacy: .public)
+            """)
     }
 
     /// Throw the picture away after a gap in which nothing was observed.

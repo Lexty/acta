@@ -376,6 +376,12 @@ public final class ControlViewModel: ObservableObject {
                 set: { [weak self] in self?.update(.offersStopWhenQuiet($0)) })
     }
 
+    public var offersStopOnReleaseBinding: Binding<Bool> {
+        Binding(get: { [weak self] in self?.api.settings.offersStopWhenOwnerReleases
+                          ?? RecordingSettings.default.offersStopWhenOwnerReleases },
+                set: { [weak self] in self?.update(.offersStopWhenOwnerReleases($0)) })
+    }
+
     public var quietMinutesBinding: Binding<Int> {
         Binding(get: { [weak self] in self?.api.settings.quietMinutesBeforeStopOffer
                           ?? RecordingSettings.default.quietMinutesBeforeStopOffer },

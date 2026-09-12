@@ -74,6 +74,22 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     /// Whether Acta offers to stop a recording that has gone quiet.
     public var offersStopWhenQuiet: Bool
 
+    /// Whether Acta offers to stop a recording when the application it was started for lets the
+    /// microphone go.
+    ///
+    /// ⚠️ **Independent of `offersStopWhenQuiet`, in both directions.** They answer different questions —
+    /// "nobody has said anything for minutes" and "the application whose call this was released the
+    /// input" — and a user who wants one and not the other must be able to have that. Neither is a
+    /// master switch for the other.
+    ///
+    /// ⚠️ **This is the one reminder whose prompt can act on its own**, after its countdown runs out on
+    /// an acknowledged prompt. That is a deliberate, narrow exception to the rule that nothing in Acta
+    /// acts without a click; the UI copy has to say so.
+    ///
+    /// ⚠️ **Only a recording started from a prompt can be bound to an application**, so this preference
+    /// changes nothing for recordings started from the menu or the socket. See `OwnerBinding`.
+    public var offersStopWhenOwnerReleases: Bool
+
     /// How long **both** tracks must be inactive before the stop offer appears, minutes.
     ///
     /// ⚠️ Both tracks: a person listening to a presentation without speaking is not an idle recording,
@@ -89,6 +105,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
                 offersRecordingWhenMicrophoneBusy: Bool = true,
                 reminderExcludedBundleIDs: [String] = [],
                 offersStopWhenQuiet: Bool = true,
+                offersStopWhenOwnerReleases: Bool = true,
                 quietMinutesBeforeStopOffer: Int = defaultQuietMinutes) {
         self.archivePath = archivePath
         self.segmentSeconds = segmentSeconds
@@ -99,6 +116,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         self.offersRecordingWhenMicrophoneBusy = offersRecordingWhenMicrophoneBusy
         self.reminderExcludedBundleIDs = reminderExcludedBundleIDs
         self.offersStopWhenQuiet = offersStopWhenQuiet
+        self.offersStopWhenOwnerReleases = offersStopWhenOwnerReleases
         self.quietMinutesBeforeStopOffer = quietMinutesBeforeStopOffer
     }
 
@@ -164,6 +182,9 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
             ?? def.reminderExcludedBundleIDs
         offersStopWhenQuiet = try c.decodeIfPresent(Bool.self, forKey: .offersStopWhenQuiet)
             ?? def.offersStopWhenQuiet
+        offersStopWhenOwnerReleases = try c.decodeIfPresent(Bool.self,
+                                                            forKey: .offersStopWhenOwnerReleases)
+            ?? def.offersStopWhenOwnerReleases
         quietMinutesBeforeStopOffer = try c.decodeIfPresent(Int.self,
                                                             forKey: .quietMinutesBeforeStopOffer)
             ?? def.quietMinutesBeforeStopOffer
@@ -186,6 +207,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         case offersRecordingWhenMicrophoneBusy(Bool)
         case reminderExcludedBundleIDs([String])
         case offersStopWhenQuiet(Bool)
+        case offersStopWhenOwnerReleases(Bool)
         case quietMinutesBeforeStopOffer(Int)
     }
 
@@ -207,6 +229,7 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
             copy.offersRecordingWhenMicrophoneBusy = value
         case .reminderExcludedBundleIDs(let value): copy.reminderExcludedBundleIDs = value
         case .offersStopWhenQuiet(let value): copy.offersStopWhenQuiet = value
+        case .offersStopWhenOwnerReleases(let value): copy.offersStopWhenOwnerReleases = value
         case .quietMinutesBeforeStopOffer(let value): copy.quietMinutesBeforeStopOffer = value
         }
         return copy

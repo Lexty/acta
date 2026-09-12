@@ -241,6 +241,7 @@ func settingsDecodedFromAConfigWithoutRemindersGetsTheDefaults() throws {
     let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
     #expect(decoded.offersRecordingWhenMicrophoneBusy)
     #expect(decoded.offersStopWhenQuiet)
+    #expect(decoded.offersStopWhenOwnerReleases)
     #expect(decoded.reminderExcludedBundleIDs.isEmpty)
     #expect(decoded.quietMinutesBeforeStopOffer == RecordingSettings.defaultQuietMinutes)
     // ...without disturbing what the old config did carry.
@@ -254,11 +255,13 @@ func settingsDecodedFromAConfigWithoutRemindersGetsTheDefaults() throws {
 @Test
 func settingsDecodedWithRemindersPresentKeepsThem() throws {
     let json = Data((#"{"segmentSeconds":45,"offersRecordingWhenMicrophoneBusy":false,"#
-        + #""offersStopWhenQuiet":false,"reminderExcludedBundleIDs":["com.google.Chrome"],"#
+        + #""offersStopWhenQuiet":false,"offersStopWhenOwnerReleases":false,"#
+        + #""reminderExcludedBundleIDs":["com.google.Chrome"],"#
         + #""quietMinutesBeforeStopOffer":12}"#).utf8)
     let decoded = try JSONDecoder().decode(RecordingSettings.self, from: json)
     #expect(!decoded.offersRecordingWhenMicrophoneBusy)
     #expect(!decoded.offersStopWhenQuiet)
+    #expect(!decoded.offersStopWhenOwnerReleases)
     #expect(decoded.reminderExcludedBundleIDs == ["com.google.Chrome"])
     #expect(decoded.quietMinutesBeforeStopOffer == 12)
 }
@@ -301,4 +304,39 @@ func mergingOneReminderFieldLeavesTheOthersAlone() {
     let d = base.merging(.quietMinutesBeforeStopOffer(20))
     #expect(d.quietMinutesBeforeStopOffer == 20)
     #expect(d.offersStopWhenQuiet)
+}
+
+/// ⚠️ **Both directions, because a master switch would pass one of them.** The two stop reminders answer
+/// different questions — "nobody has spoken for minutes" and "the application whose call this was let
+/// the microphone go" — and a user who wants one and not the other has to be able to have that. Stating
+/// only "turning the quiet one off leaves the release one alone" would still hold if the release rule
+/// secretly required the quiet one; the second half is what refuses that.
+@Test
+func theTwoStopRemindersAreIndependentInBothDirections() {
+    let both = RecordingSettings(offersStopWhenQuiet: true, offersStopWhenOwnerReleases: true)
+
+    let quietOff = both.merging(.offersStopWhenQuiet(false))
+    #expect(!quietOff.offersStopWhenQuiet)
+    #expect(quietOff.offersStopWhenOwnerReleases, "switching the quiet reminder off took the other one")
+
+    let releaseOff = both.merging(.offersStopWhenOwnerReleases(false))
+    #expect(!releaseOff.offersStopWhenOwnerReleases)
+    #expect(releaseOff.offersStopWhenQuiet, "switching the release reminder off took the quiet one")
+
+    // And neither is tied to the *start* reminder, which is the third independent switch.
+    #expect(releaseOff.offersRecordingWhenMicrophoneBusy)
+    #expect(quietOff.offersRecordingWhenMicrophoneBusy)
+
+    // The interval belongs to the quiet rule alone; editing it must not disturb the release reminder.
+    let interval = both.merging(.quietMinutesBeforeStopOffer(20))
+    #expect(interval.offersStopWhenOwnerReleases)
+}
+
+/// ⚠️ **On by default, like its two siblings**, and stated rather than left to the initialiser. The
+/// default is the reason the substitution in `appliedSettings` exists at all: `RecordingSettings(wire)`
+/// fabricates `true` on every `settings_set`, so a user who turned this off would have it switched back
+/// on by an unrelated command if the substitution were dropped.
+@Test
+func theReleaseStopReminderDefaultsOn() {
+    #expect(RecordingSettings.default.offersStopWhenOwnerReleases)
 }

@@ -15,12 +15,18 @@ import Testing
 @MainActor
 struct ReminderCoordinatorTests {
     /// A reader whose snapshots are scripted.
+    ///
+    /// ⚠️ **It counts its reads**, because "the HAL was not touched" is otherwise only asserted by
+    /// reading the production code. Codex made this point about a heartbeat test of mine that checked
+    /// the *payload* said `notObserved` and would have stayed green beside an illicit `readSnapshot()`.
     final class ScriptedReader: AudioProcessReading, @unchecked Sendable {
         private let lock = NSLock()
         private var snapshot = AudioProcessSnapshot(processes: [], isComplete: true)
+        private var reads = 0
+        var readCount: Int { lock.lock(); defer { lock.unlock() }; return reads }
         func set(_ next: AudioProcessSnapshot) { lock.lock(); snapshot = next; lock.unlock() }
         func readSnapshot() -> AudioProcessSnapshot {
-            lock.lock(); defer { lock.unlock() }; return snapshot
+            lock.lock(); defer { lock.unlock() }; reads += 1; return snapshot
         }
     }
 
@@ -703,5 +709,115 @@ struct ReminderCoordinatorTests {
             coordinator.tick()
             #expect(coordinator.prompt == nil, "waking re-offered a call that was already running")
         }
+    }
+
+    // MARK: - The heartbeat
+
+    /// ⚠️ **These assert a property, not a log line.** `ReminderCoordinator.log` is a private `let` and
+    /// the runner has no seam that captures `os_log`; a test that could only read the unified log would
+    /// be testing Apple's logging rather than this schedule.
+
+    @Test("the heartbeat fires on its own schedule, and not between beats")
+    @available(macOS 15.0, *)
+    func theHeartbeatFiresOnSchedule() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        coordinator.heartbeatInterval = 3
+        reader.set(Self.quiet)
+
+        coordinator.tick()
+        #expect(coordinator.heartbeatCount == 1, "the first tick left no record that this instance ran")
+        #expect(coordinator.lastHeartbeat?.tick == 1)
+        coordinator.tick()
+        #expect(coordinator.heartbeatCount == 1, "a beat was emitted between two due ticks")
+        coordinator.tick()
+        #expect(coordinator.heartbeatCount == 1, "a beat was emitted between two due ticks")
+        coordinator.tick()
+        #expect(coordinator.heartbeatCount == 2, "the fourth tick was due a beat and did not emit one")
+        #expect(coordinator.lastHeartbeat?.tick == 4)
+        #expect(coordinator.tickCount == 4)
+        #expect((coordinator.lastHeartbeat?.uptime ?? .zero) > .zero)
+    }
+
+    /// ⚠️ **The one that matters.** The existing holder diagnostic logs only when the set of holders
+    /// changes, which is why a stopped tick and an idle machine were indistinguishable in the log for
+    /// the 2026-09-12 silence. An unchanging picture is the normal state of an idle Mac, and it is
+    /// exactly the state the beat has to survive.
+    @Test("an unchanging picture still produces heartbeats")
+    @available(macOS 15.0, *)
+    func anUnchangingPictureStillBeats() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        coordinator.heartbeatInterval = 2
+        reader.set(Self.quiet)                      // the same snapshot on every tick, never replaced
+
+        var beats: [ReminderHeartbeat] = []
+        for _ in 0..<8 {
+            let before = coordinator.heartbeatCount
+            coordinator.tick()
+            if coordinator.heartbeatCount > before, let beat = coordinator.lastHeartbeat {
+                beats.append(beat)
+            }
+        }
+        #expect(beats.count == 4, "eight ticks at an interval of two owed four beats")
+        let expected = ReminderHeartbeat.Observation.observed(processes: 0, isComplete: true,
+                                                              holders: 0)
+        #expect(beats.allSatisfy { $0.observation == expected },
+                "the fixture was supposed to hold the picture still")
+        #expect(beats.map(\.tick) == [1, 3, 5, 7])
+    }
+
+    @Test("with both reminders off the heartbeat reports that nothing was observed")
+    @available(macOS 15.0, *)
+    func bothPreferencesOffBeatsNotObserved() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.offersRecordingWhenMicrophoneBusy = false
+        settings.offersStopWhenQuiet = false
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+        reader.set(Self.holding(Self.slack))        // held, and deliberately never looked at
+
+        coordinator.tick()
+        #expect(coordinator.lastHeartbeat?.observation == .notObserved)
+        #expect(coordinator.lastHeartbeat?.offersRecordingWhenMicrophoneBusy == false)
+        #expect(coordinator.lastHeartbeat?.offersStopWhenQuiet == false)
+        // ⚠️ **The assertion that makes the payload mean something.** Without it the test passes beside
+        // a diagnostic read the design refuses. ⚠️ Deliberately only for the *both-off* case: Codex
+        // suggested asserting it for start-off/quiet-on as well, and that one is true today but is
+        // exactly what Task 6 changes — the release rule has to observe from idle. Pinning it here
+        // would make a planned change look like a regression.
+        #expect(reader.readCount == 0, "the process list was read for a feature nobody enabled")
+    }
+
+    /// ⚠️ **Every other beat in these tests carries an empty, complete snapshot**, so a payload
+    /// hard-coded to `processes: 0, isComplete: true, holders: 0` would satisfy them all. Codex spotted
+    /// that; this is the case that refuses it.
+    @Test("the beat reports what was actually in the snapshot, holders and completeness alike")
+    @available(macOS 15.0, *)
+    func theBeatReportsTheSnapshotItRead() async {
+        let (harness, coordinator, reader, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        // Three processes, two of them holding input, one whose input property could not be read — the
+        // shape the real machine produces, where `isRunningInput` is `nil` for a process the HAL would
+        // not answer for.
+        reader.set(AudioProcessSnapshot(
+            processes: [
+                AudioProcessObservation(pid: 501, bundleID: Self.slack, displayName: "Slack",
+                                        processName: "Slack", isRunningInput: true),
+                AudioProcessObservation(pid: 502, bundleID: "com.apple.CoreSpeech", displayName: nil,
+                                        processName: "corespeechd", isRunningInput: true),
+                AudioProcessObservation(pid: 503, bundleID: "com.apple.Music", displayName: "Music",
+                                        processName: "Music", isRunningInput: false),
+                AudioProcessObservation(pid: 504, bundleID: nil, displayName: nil, processName: nil,
+                                        isRunningInput: nil),
+            ],
+            isComplete: false))
+
+        coordinator.tick()
+        #expect(coordinator.lastHeartbeat?.observation
+                == .observed(processes: 4, isComplete: false, holders: 2))
+        #expect(reader.readCount == 1, "one tick must read the process list exactly once")
     }
 }

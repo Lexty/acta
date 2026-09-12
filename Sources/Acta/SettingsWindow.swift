@@ -224,6 +224,23 @@ private struct ReminderSettings: View {
             } header: {
                 Text("When a recording goes quiet")
             }
+
+            Section {
+                Toggle("Offer to stop when the app that started the recording releases the microphone",
+                       isOn: model.offersStopOnReleaseBinding)
+                // ⚠️ **Three things this copy has to be honest about**, and each of them was a decision
+                // rather than a wording choice. It does not claim the call ended — Acta saw an
+                // application let the input go, which is not the same fact. It is the one place Acta
+                // acts without a click, so the countdown is named. And it applies only to recordings
+                // Acta itself offered to start, because only those carry a known application; the user
+                // would otherwise reasonably expect it on a recording they started from the menu.
+                Text("Only for recordings Acta offered to start — those know which app the call "
+                     + "belonged to. Acta asks first and waits; if you do not answer, it stops the "
+                     + "recording when the countdown ends. Separate from the quiet reminder above.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("When the app lets the microphone go")
+            }
         }
         .formStyle(.grouped)
     }

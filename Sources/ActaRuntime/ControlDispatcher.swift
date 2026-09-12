@@ -314,6 +314,7 @@ public final class ControlDispatcher: ControlRequestHandling {
         applied.offersRecordingWhenMicrophoneBusy = authoritative.offersRecordingWhenMicrophoneBusy
         applied.reminderExcludedBundleIDs = authoritative.reminderExcludedBundleIDs
         applied.offersStopWhenQuiet = authoritative.offersStopWhenQuiet
+        applied.offersStopWhenOwnerReleases = authoritative.offersStopWhenOwnerReleases
         applied.quietMinutesBeforeStopOffer = authoritative.quietMinutesBeforeStopOffer
         return applied
     }

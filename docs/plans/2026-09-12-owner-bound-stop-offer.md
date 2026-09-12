@@ -240,18 +240,51 @@ as the last one. It does **not** fix the silent-instance defect — it makes it 
 **Files:** Modify `Sources/ActaRuntime/ReminderCoordinator.swift`,
 `Sources/ActaTestRunner/ReminderCoordinatorTests.swift`
 
-- [ ] add an observable tick counter and monotonic start instant on the coordinator — ⚠️ **observable,
+- [x] add an observable tick counter and monotonic start instant on the coordinator — ⚠️ **observable,
       because the `Logger` is a private `let` and there is no log-capture seam in the test runner**
-- [ ] emit the heartbeat every `heartbeatTicks`, carrying tick count, uptime, and whether a snapshot was
+- [x] emit the heartbeat every `heartbeatTicks`, carrying tick count, uptime, and whether a snapshot was
       taken at all
-- [ ] ⚠️ when **both** preferences are off, report "not observed" — do **not** introduce a HAL read for
+- [x] ⚠️ when **both** preferences are off, report "not observed" — do **not** introduce a HAL read for
       diagnostics that the design deliberately avoids
-- [ ] choose the log level deliberately: `.info`/`.debug` are not persisted by `os_log`, and the defect
+- [x] choose the log level deliberately: `.info`/`.debug` are not persisted by `os_log`, and the defect
       appears after *hours*, so the buffer may have wrapped — record the choice and why
-- [ ] write a test that the heartbeat fires on the expected tick and not between
-- [ ] write a test that a run of identical snapshots still produces heartbeats
-- [ ] **negative control**: make the heartbeat fire only on change → the identical-snapshots test fails
-- [ ] run `bash Scripts/test.sh`
+      → **`.notice`**, reasoned in `emitHeartbeatIfDue`. The existing holder diagnostic stays `.info`:
+      it is read while reproducing, not hours later.
+- [x] write a test that the heartbeat fires on the expected tick and not between
+- [x] write a test that a run of identical snapshots still produces heartbeats
+- [x] **negative control**: make the heartbeat fire only on change → the identical-snapshots test fails
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 857 tests pass (854 before). The beat is a property (`tickCount`, `heartbeatCount`,
+`lastHeartbeat`) *and* a `.notice` line, because `log` is a private `let` with no capture seam.
+⚠️ The negative control failed **two** tests, not one: `anUnchangingPictureStillBeats` as the plan
+required, and `theHeartbeatFiresOnSchedule` as well — both assert the schedule, so a change-gate breaks
+both. The named one bites; the control is not uniquely scoped to it.
+
+**Codex reviewed it read-only and found two real things, both now fixed:**
+
+1. ⚠️ **A false claim inside the diagnostic itself.** My comment said a tick count far below the elapsed
+   seconds is a starved loop. `ContinuousClock` keeps counting while the Mac is asleep — which is the
+   very reason `lastTick` rebaselines on a gap, seventy lines above — so an overnight sleep produces
+   the same ratio with nothing wrong. The comment now calls it an observation gap to be explained. The
+   same correction applies to *no beats*: sleep, a quit, a tick wedged in a synchronous read and the
+   store's retention limit all produce it as readily as a dead poll task.
+2. ⚠️ **The both-off test proved nothing about the HAL.** It asserted the *payload* said `notObserved`;
+   `ScriptedReader` had no counter, so an illicit `readSnapshot()` would have left it green. The reader
+   now counts, and the test asserts zero reads. ⚠️ **Deliberately only for both-off**: Codex also
+   suggested pinning start-off/quiet-on, which is true today and is exactly what Task 6 changes.
+   Pinning it would make a planned change look like a regression.
+
+Also on his review: `defer` now closes over `let settings` read *before* it is registered, so an early
+return inserted later cannot make the beat report both reminders off — a fabricated fact in the one line
+whose job is to be believed hours later. And one test now drives a non-empty, **incomplete** snapshot
+with `isRunningInput` true, false and `nil`, because every other beat carried an empty complete one and
+a hard-coded payload would have passed them all.
+
+⚠️ **What the beat does not answer**, stated because the backlog item invites the opposite reading:
+CoreSpeech alone and Slack alone both show `holding=1`. This settles *whether ticks completed and
+sampling was on*; it does not settle why a particular huddle raised no offer.
 
 ### Task 2: The third preference, before anything consumes it
 
@@ -260,20 +293,41 @@ later.
 
 **Files:** Modify `Sources/ActaKit/RecordingSettings.swift`,
 `Sources/ActaRuntime/ControlDispatcher.swift`, `Sources/Acta/SettingsWindow.swift`,
-`Sources/ActaTestRunner/MicrophoneSettingsTests.swift`,
-`Sources/ActaTestRunner/SourceConfinementTests.swift`
+`Sources/ActaTestRunner/RecordingSettingsTests.swift`,
+`Sources/ActaTestRunner/SourceConfinementTests.swift`,
+`Sources/ActaRuntime/ControlViewModel.swift`,
+`Sources/ActaTestRunner/ControlDispatcherConfinementTests.swift`
+⚠️ **The plan named the wrong test file.** The reminder settings tests live in
+`RecordingSettingsTests.swift`; `MicrophoneSettingsTests.swift` is about devices. Two files the plan
+did not list were needed: the binding (`ControlViewModel`) and the confinement tests that actually
+assert the substitution.
 
-- [ ] add `offersStopWhenOwnerReleases: Bool` (default on) with the `decodeIfPresent`-and-default
+- [x] add `offersStopWhenOwnerReleases: Bool` (default on) with the `decodeIfPresent`-and-default
       pattern its siblings use
-- [ ] preserve it in `appliedSettings` for **both** confinements — ⚠️ the wire never supplied it in
+- [x] preserve it in `appliedSettings` for **both** confinements — ⚠️ the wire never supplied it in
       either case, so a trusted-dispatcher regression is as real as a socket one
-- [ ] add the toggle to the Reminders tab; copy states what it does, that it only *asks*, and that it is
+- [x] add the toggle to the Reminders tab; copy states what it does, that it only *asks*, and that it is
       independent of the quiet rule
-- [ ] add its label to `persistentControls` in `SourceConfinementTests`
-- [ ] write tests: the two stop preferences are independent in both directions
-- [ ] write tests: neither a socket **nor** a trusted `settings_set` can change it
-- [ ] **negative control**: drop it from `appliedSettings` → the trusted-dispatcher test fails
-- [ ] run `bash Scripts/test.sh`
+- [x] add its label to `persistentControls` in `SourceConfinementTests`
+- [x] write tests: the two stop preferences are independent in both directions
+- [x] write tests: neither a socket **nor** a trusted `settings_set` can change it
+- [x] **negative control**: drop it from `appliedSettings` → the trusted-dispatcher test fails
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 860 tests pass (857 after Task 1). The toggle reads *"Offer to stop when the app that started
+the recording releases the microphone"*, and its caption says three things the decisions require: it
+covers only recordings Acta offered to start, it is the one place Acta acts without a click, and it is
+separate from the quiet reminder.
+
+⚠️ **The heartbeat's payload gained the third preference in this task**, not in Task 1. A beat that
+reported `start=` and `quiet=` while a third reminder existed would be a diagnostic that lies by
+omission — the exact failure mode Task 1 exists to prevent.
+
+**Negative control:** deleting the `appliedSettings` line failed
+`aTrustedSettingsSetCannotChangeTheReminderPreferencesEither` as the plan required, and the socket one
+alongside it. Both fail for the same reason: `RecordingSettings(wire)` fabricates `true`, and without
+the substitution an unrelated `settings_set` switches a user's preference back on.
 
 ### Task 3: One shared reduction of process observations
 

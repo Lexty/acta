@@ -184,6 +184,7 @@ func aSocketSettingsSetCannotChangeTheReminderPreferences() async {
                                       offersRecordingWhenMicrophoneBusy: false,
                                       reminderExcludedBundleIDs: ["com.google.Chrome"],
                                       offersStopWhenQuiet: false,
+                                      offersStopWhenOwnerReleases: false,
                                       quietMinutesBeforeStopOffer: 17)
 
     let wire = wireSettings(microphonePriority: [],
@@ -195,6 +196,7 @@ func aSocketSettingsSetCannotChangeTheReminderPreferences() async {
     // flipped back on.
     #expect(fake.settings.offersRecordingWhenMicrophoneBusy == false)
     #expect(fake.settings.offersStopWhenQuiet == false)
+    #expect(fake.settings.offersStopWhenOwnerReleases == false)
     #expect(fake.settings.reminderExcludedBundleIDs == ["com.google.Chrome"])
     #expect(fake.settings.quietMinutesBeforeStopOffer == 17)
     // ...and the command still did the thing it was for.
@@ -214,6 +216,7 @@ func aTrustedSettingsSetCannotChangeTheReminderPreferencesEither() async {
     fake.settings = RecordingSettings(offersRecordingWhenMicrophoneBusy: false,
                                       reminderExcludedBundleIDs: ["com.tinyspeck.slackmacgap"],
                                       offersStopWhenQuiet: false,
+                                      offersStopWhenOwnerReleases: false,
                                       quietMinutesBeforeStopOffer: 21)
 
     let wire = wireSettings(microphonePriority: ["SomeDevice"],
@@ -223,6 +226,7 @@ func aTrustedSettingsSetCannotChangeTheReminderPreferencesEither() async {
 
     #expect(fake.settings.offersRecordingWhenMicrophoneBusy == false)
     #expect(fake.settings.offersStopWhenQuiet == false)
+    #expect(fake.settings.offersStopWhenOwnerReleases == false)
     #expect(fake.settings.reminderExcludedBundleIDs == ["com.tinyspeck.slackmacgap"])
     #expect(fake.settings.quietMinutesBeforeStopOffer == 21)
     // A trusted caller *may* still write the microphone fields — that distinction is the point.

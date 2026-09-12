@@ -34,6 +34,7 @@ struct SourceConfinementTests {
             "Keep the Mac's input on my list",
             "Offer to start recording when another app uses microphone input",
             "Offer to stop after low audio activity",
+            "Offer to stop when the app that started the recording releases the microphone",
             "Delete segments after assembly",
         ]
         let app = SourceConfinement.swiftFiles(under: SourceConfinement.sourcesRoot
