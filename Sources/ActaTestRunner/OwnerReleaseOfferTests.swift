@@ -604,5 +604,200 @@ struct OwnerReleaseOfferTests {
         #expect(fixture.coordinator.ownerWatch == nil)
         await settle(harness)
     }
+
+    // MARK: - Acceptance
+
+    /// ⚠️ **The rule's replay, repeated through the wired coordinator**, because the rule qualifying correctly
+    /// says nothing about what the coordinator raises from it. Same traces, same realistic machine (Slack,
+    /// CoreSpeech, and replayd once recording), sampled at 1 Hz at four phase offsets.
+    ///
+    /// Each trace is replayed **up to its final leave**, which would run a countdown out and stop the fixture's
+    /// only recording; that release is the completion test's. What remains still holds one genuine release —
+    /// the 16.8 s between the two huddles — so the oracle can fail in both directions: flaps must raise
+    /// nothing, and that release must raise an offer that the re-join withdraws without stopping anything.
+    ///
+    /// ⚠️ The oracle reads the trace, not the rule. An offer standing at `t` needs the owner truly released
+    /// at `t` for at least the 5 s qualification; a release still running at `from + 6` must have been offered
+    /// by then, since at 1 Hz the first released sample falls before `from + 1`. The traces are a
+    /// reconstruction of what was observed; `MicrophoneOwnershipFixtures` says what that does not prove.
+    @Test("the recorded traces, replayed through the coordinator, offer on the real release and on no flap")
+    @available(macOS 15.0, *)
+    func recordedTracesThroughTheCoordinator() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        let qualification: TimeInterval = 5
+        let offsets: [TimeInterval] = [0, 0.25, 0.5, 0.75]
+        var expectedOffers = 0
+        for trace in MicrophoneOwnershipFixtures.allTraces {
+            guard let leave = trace.transitions.last(where: { !$0.holding })?.at else { continue }
+            let releases = trace.releases.filter { $0.from < leave }
+            // Precondition: no watched release is long enough to qualify at some offsets and not others.
+            #expect(!releases.contains { $0.until - $0.from >= qualification && $0.until - $0.from < 7 },
+                    "\(trace.name) holds a release whose offer would depend on phase")
+            expectedOffers += releases.filter { $0.until - $0.from >= 7 }.count * offsets.count
+        }
+
+        var offersShown = Set<UInt64>()
+        for trace in MicrophoneOwnershipFixtures.allTraces {
+            guard let leave = trace.transitions.last(where: { !$0.holding })?.at else { continue }
+            for offset in offsets {
+                fixture.reader.set(Self.inCall(recording: true))
+                fixture.run(seconds: 2)
+                #expect(fixture.coordinator.prompt == nil, "\(trace.name) +\(offset): an offer survived a hold")
+                var offeredThisRelease = false
+                var time = offset
+                while time < leave {
+                    let holding = trace.isHolding(at: time)
+                    let since = trace.transitions.last { $0.at <= time }?.at ?? 0
+                    fixture.reader.set(holding ? Self.inCall(recording: true) : Self.afterCall)
+                    fixture.run(seconds: 1)
+                    let label = "\(trace.name) +\(offset) at \(time)"
+                    if holding { offeredThisRelease = false }
+                    if let offer = fixture.presenter.shown.last, fixture.releaseOffer != nil {
+                        offeredThisRelease = true
+                        offersShown.insert(offer.id)
+                        #expect(!holding, "\(label): an offer stood while Slack held the input")
+                        #expect(time - since >= qualification, "\(label): offered after \(time - since) s released")
+                    }
+                    if !holding, time >= since + qualification + 1 {
+                        #expect(offeredThisRelease, "\(label): a release \(time - since) s long was not offered")
+                    }
+                    #expect(!stopBegan(fixture.harness), "\(label): the replay stopped the recording")
+                    time += 1
+                }
+            }
+        }
+        #expect(offersShown.count == expectedOffers)
+        #expect(expectedOffers > 0, "no replayed release was long enough, so nothing could fail the offer half")
+        await settle(fixture.harness)
+    }
+
+    /// ⚠️ **The coordinator's own lapse, not the rule's gap.** The injected clock advances one second per tick
+    /// throughout, so the ownership rule sees no gap; only the monotonic rebaseline knows the Mac was away.
+    /// What it must do is withdraw, forget the accumulated release, and ask again only with a fresh interval
+    /// and a full countdown — never complete the one it slept through.
+    @Test("a wake during the countdown withdraws it, and only a freshly observed release offers again")
+    @available(macOS 15.0, *)
+    func aWakeDuringTheCountdownNeedsFreshEvidence() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, let id = fixture.presenter.shown.last?.id else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.run(seconds: 3)
+
+        fixture.coordinator.rebaselineThreshold = .milliseconds(50)
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        fixture.run(seconds: 1)
+        fixture.coordinator.rebaselineThreshold = ReminderCoordinator.rebaselineAfter
+        #expect(fixture.coordinator.prompt == nil, "the countdown survived a wake")
+        #expect(fixture.coordinator.countdown?.phase == .revoked(.observationLapsed))
+        #expect(fixture.presenter.withdrawn.contains(id))
+
+        fixture.run(seconds: 3)
+        #expect(fixture.coordinator.prompt == nil, "the offer returned on the release accumulated before the wake")
+        guard let seconds = releaseUntilOffered(fixture) else {
+            Issue.record("the offer never returned after the wake"); return
+        }
+        #expect(4 + seconds >= 5)
+        #expect(fixture.presenter.shown.last?.id != id)
+        #expect(fixture.presenter.shown.last?.secondsRemaining == 20, "the fresh offer did not carry a full countdown")
+        // Past the slept-through countdown's deadline, inside the fresh one.
+        fixture.run(seconds: 12)
+        #expect(!stopBegan(fixture.harness), "the countdown the Mac slept through stopped the recording")
+        await settle(fixture.harness)
+    }
+
+    /// One second of the quiet rule's input: both tracks at the digital floor, then a tick.
+    @available(macOS 15.0, *)
+    private func quietSecond(_ fixture: Fixture) {
+        fixture.clock.advance(1)
+        for track in [AudioActivitySummary.Track.microphone, .system] {
+            fixture.coordinator.ingest(AudioActivitySummary(track: track, generation: 1 << 40, duration: 1,
+                                                            power: -100, observedAt: fixture.clock.now))
+        }
+        fixture.coordinator.tick()
+    }
+
+    @available(macOS 15.0, *)
+    private func setStopPreferences(_ harness: ControllerHarness, quiet: Bool, release: Bool) {
+        var settings = harness.controller.settings
+        settings.offersStopWhenQuiet = quiet
+        settings.offersStopWhenOwnerReleases = release
+        harness.controller.settings = settings
+        harness.controller.saveSettings()
+    }
+
+    /// ⚠️ **Behaviour, both directions, on one bound recording.** `RecordingSettingsTests` pins that the two
+    /// values are stored independently; this pins that neither reminder *acts* through the other's switch.
+    /// Slack stays released throughout, so a release offer is due the whole time the release switch is on.
+    @Test("the two stop reminders act independently in both directions")
+    @available(macOS 15.0, *)
+    func theStopRemindersActIndependently() async {
+        let fixture = makeFixture(quietMinutes: 2)
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        let coordinator = fixture.coordinator
+
+        // Release off, quiet on: the quiet offer arrives, and no release offer ever does.
+        setStopPreferences(fixture.harness, quiet: true, release: false)
+        fixture.reader.set(Self.afterCall)
+        var quietPrompt: ReminderPrompt?
+        for _ in 0..<300 {
+            quietSecond(fixture)
+            #expect(fixture.releaseOffer == nil, "a release offer was raised with its switch off")
+            if case .offerToStop? = coordinator.prompt { quietPrompt = coordinator.prompt; break }
+        }
+        guard let quietPrompt else {
+            Issue.record("switching the release offer off took the quiet one with it"); return
+        }
+        #expect(coordinator.ownerWatch == nil)
+        coordinator.dismiss(quietPrompt)
+        #expect(!stopBegan(fixture.harness))
+
+        // Quiet off, release on: the release offer arrives from fresh evidence, and no quiet offer does.
+        setStopPreferences(fixture.harness, quiet: false, release: true)
+        var offered = false
+        for _ in 0..<10 {
+            quietSecond(fixture)
+            if case .offerToStop? = coordinator.prompt { Issue.record("a quiet offer was raised with its switch off") }
+            if fixture.releaseOffer != nil { offered = true; break }
+        }
+        #expect(offered, "switching the quiet reminder off took the release offer with it")
+        await settle(fixture.harness)
+    }
+
+    /// ⚠️ **Measured: Acta's own capture is `com.apple.replayd`**, which is not one of Acta's bundle identifiers,
+    /// so nothing drops it from the fold. What keeps it silent is that it acquires while a recording is busy,
+    /// which spends it, and that a binding is only ever minted from a start prompt. Here it holds from the
+    /// start, lingers into idle after the stop, and then lets go — with Slack, the owner, holding throughout.
+    @Test("Acta's own capture mints no offer of either kind, while recording or after the stop")
+    @available(macOS 15.0, *)
+    func actasOwnCaptureMintsNothing() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+
+        fixture.reader.set(Self.inCall(recording: true))
+        for second in 1...30 {
+            fixture.run(seconds: 1)
+            #expect(fixture.coordinator.prompt == nil, "an offer at \(second) s into the recording")
+        }
+        await settle(fixture.harness)
+        #expect(fixture.harness.controller.phase == .idle)
+
+        for second in 1...15 {
+            fixture.run(seconds: 1)
+            #expect(fixture.coordinator.prompt == nil, "an offer \(second) s after the stop, replayd lingering")
+        }
+        fixture.reader.set(Self.inCall(recording: false))
+        for second in 1...15 {
+            fixture.run(seconds: 1)
+            #expect(fixture.coordinator.prompt == nil, "an offer \(second) s after replayd let go")
+        }
+        #expect(fixture.coordinator.ownerWatch == nil)
+    }
 }
 }

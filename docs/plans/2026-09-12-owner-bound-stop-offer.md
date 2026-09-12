@@ -842,13 +842,53 @@ No added line exceeds 140 columns.
 
 ### Task 10: Verify acceptance criteria
 
-- [ ] Slack + CoreSpeech binds to Slack; the huddle ending raises the prompt; no flap in any trace does
-- [ ] all four outcomes behave; displacement, wake and a failed start revoke correctly
-- [ ] the two stop preferences are independent in both directions
-- [ ] no offer is minted from Acta's own capture
-- [ ] run `bash Scripts/test.sh` — ⚠️ and **repeat it where a failure was observed**, rather than a
+- [x] Slack + CoreSpeech binds to Slack; the huddle ending raises the prompt; no flap in any trace does
+- [x] all four outcomes behave; displacement, wake and a failed start revoke correctly
+- [x] the two stop preferences are independent in both directions
+- [x] no offer is minted from Acta's own capture
+- [x] run `bash Scripts/test.sh` — ⚠️ and **repeat it where a failure was observed**, rather than a
       blanket ten runs: both reviewers called the blanket campaign waste
-- [ ] re-run the named negative controls once together
+- [x] re-run the named negative controls once together
+
+**Done.** 946 tests pass (942 before; 4 new), in three consecutive full runs of about 30 s — the full gate
+being where Task 9 saw its failure. The four new tests are acceptance tests through the wired coordinator,
+in `OwnerReleaseOfferTests`; the other criteria were already pinned by named tests, and the controls below
+are the evidence that they still bite.
+
+- `the recorded traces, replayed through the coordinator, offer on the real release and on no flap` — the
+  rule's replay repeated end to end on Slack + CoreSpeech + replayd, at 1 Hz and four phase offsets, up to
+  each trace's final leave. The oracle reads the trace: an offer needs 5 s of truth-released behind it, a
+  release still running 6 s in must have been offered, and the one genuine release (16.8 s between the two
+  huddles) must be offered at every offset and withdrawn by the re-join without stopping anything. A
+  precondition rejects releases whose offer would depend on phase.
+- `a wake during the countdown withdraws it, and only a freshly observed release offers again` — the
+  coordinator's rebaseline, with the injected clock advancing steadily so the rule itself sees no gap.
+- `the two stop reminders act independently in both directions` — behaviour, on one bound recording;
+  `RecordingSettingsTests` already pinned storage.
+- `Acta's own capture mints no offer of either kind, while recording or after the stop` — replayd holding
+  from the start, lingering into idle, then letting go, with Slack holding throughout.
+- A failed start: `a failed start discards the binding it was admitted with` (Task 7). All four outcomes and
+  displacement: Task 9's tests.
+
+**Negative controls, re-run together** (15, one after another, each restored; the runner compares the
+source tree to git afterwards and it was clean). All bit:
+- Tasks 1–6, 8 and 9: each failed its named test, with the same companions their tasks recorded (the
+  filters ran only the named suite, so Task 3's cross-suite failure was not re-observed, and Task 6's narrower
+  filter ran the from-idle test without the matrix test that also failed in Task 6).
+- ⚠️ **Task 7's control as first written stayed green, and the control was the defect.** It resolved before
+  the barrier into a variable nobody used, and still handed the late resolver to `start`. Rebuilt so the
+  early result is what `start` receives, it failed the named parked-barrier test and the unreadable-owner
+  test, which is the pair Task 7 recorded.
+- The new tests' own controls: never raising the offer, and qualifying after 1 s, each fail the replay (the
+  oracle fails in both directions); a lapse that does not discard the release fails only the wake test;
+  the release switch invalidating the quiet rule fails only the independence test; `isBusy: false` fails the
+  own-capture test.
+- ⚠️ The quiet switch gating the release offer failed the independence test and **12 others**: the fixture
+  runs with the quiet reminder off, so that control removes the whole feature from the suite. It shows the
+  test can fail, not that it alone can. The first attempt at this control did not compile and was rebuilt.
+
+⚠️ **Not checked:** `bash Scripts/lint.sh` — `swiftlint` is not installed. No added line exceeds 140
+columns. Human acceptance stays in Post-Completion.
 
 ### Task 11: [Final] Documentation and the backlog
 
