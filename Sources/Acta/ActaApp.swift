@@ -22,6 +22,17 @@ struct ActaApp: App {
             menuBarLabel
         }
         .menuBarExtraStyle(.window)
+
+        // ⚠️ **A real window, reached by ⌘, and by the menu's Settings row.** Persistent configuration
+        // outgrew a disclosure inside a 300 pt popover the moment the reminders needed a list of
+        // applications; what stays in the menu is what is needed at the moment of acting.
+        Settings {
+            if #available(macOS 15.0, *) {
+                ActaSettingsView()
+            } else {
+                Text("Acta's settings need macOS 15.").padding()
+            }
+        }
     }
 
     /// What shows in the menu bar. The dev build adds a visible "DEV" tag next to the waveform so two
@@ -54,7 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// builds its content on the first click, so anything that waits for the menu has already missed
     /// every call that started since launch — and this feature's whole promise is that it notices one
     /// without being asked.
-    private var reminders: AnyObject?
+    /// Reachable from the menu, which is the only thing that knows whether it is open.
+    var reminders: AnyObject?
     private var reminderObserver: AnyCancellable?
     /// Type-erased for the same reason `socketHost` is: the panel is macOS 15+ and this delegate is not
     /// gated.
@@ -247,7 +259,6 @@ struct MenuContent: View {
     // renders the `ControlState` it delivers. No view here touches the recording controller or the
     // pipeline — every read is on `state`, every action is a `ControlAPI` command.
     @StateObject private var model = ControlViewModel()
-    @State private var settingsExpanded = false
     /// ⚠️ Collapsed by default. The chooser is six rows plus a picker plus the management
     /// controls, and shown unconditionally it pushed the menu off the bottom of the screen —
     /// on a laptop, with only six devices attached. What a user needs at a glance is which
@@ -267,6 +278,12 @@ struct MenuContent: View {
 
     /// The current typed state — the single thing every view below reads.
     private var state: ControlState { model.state }
+
+    /// The app-lifetime coordinator, reached through the delegate that owns it.
+    @available(macOS 15.0, *)
+    private static var reminderCoordinator: ReminderCoordinator? {
+        (NSApp.delegate as? AppDelegate)?.reminders as? ReminderCoordinator
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -292,7 +309,7 @@ struct MenuContent: View {
             recordingsList
 
             Divider()
-            settingsSection
+            settingsRow
 
             Divider()
             HStack {
@@ -304,7 +321,14 @@ struct MenuContent: View {
         }
         .padding(12)
         .frame(width: 300)
-        .onAppear { model.refresh(); model.refreshMicrophone() }
+        .onAppear {
+            model.refresh()
+            model.refreshMicrophone()
+            // ⚠️ The menu is the only thing that knows it is open, and a prompt must not duplicate what
+            // is already on screen.
+            Self.reminderCoordinator?.isMenuOpen = true
+        }
+        .onDisappear { Self.reminderCoordinator?.isMenuOpen = false }
         // Auto-cancelled when the menu closes, so repeated opens do not accumulate subscriptions.
         .task { await model.subscribe() }
     }
@@ -739,33 +763,19 @@ struct MenuContent: View {
 
     // MARK: - Settings
 
-    private var settingsSection: some View {
-        DisclosureGroup(isExpanded: $settingsExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Archive folder").font(.caption2).foregroundStyle(.secondary)
-                    // The bindings merge each field into the authoritative settings and save on change,
-                    // so no `.onChange` is needed here.
-                    TextField("~/Acta", text: model.archivePathBinding)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                Stepper(value: model.segmentSecondsBinding,
-                        in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
-                        step: 5) {
-                    Text("Segment length: \(state.settings.segmentSeconds) s").font(.caption)
-                }
-
-                Toggle("Delete segments after assembly", isOn: model.deleteSegmentsBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
+    /// ⚠️ **The row that replaced the disclosure.** `SettingsLink` opens the same window ⌘, does, which
+    /// is the point: two ways in, one window, and no second copy of the controls to drift.
+    private var settingsRow: some View {
+        SettingsLink {
+            HStack(spacing: 6) {
+                Image(systemName: "gearshape").font(.caption).foregroundStyle(.secondary)
+                Text("Settings…").font(.caption)
+                Spacer()
+                Text("⌘,").font(.caption2).foregroundStyle(.tertiary)
             }
-            .padding(.top, 6)
-            .disabled(isBusy)
-        } label: {
-            Label("Settings", systemImage: "gearshape").font(.caption)
-                .disclosureRow { settingsExpanded.toggle() }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Banner
