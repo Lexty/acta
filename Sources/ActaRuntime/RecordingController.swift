@@ -214,9 +214,21 @@ public final class RecordingController: ObservableObject {
         return RecoveryOutcome(outcome)
     }
 
+    /// How many of the newest recordings carry their `info.md` metadata.
+    ///
+    /// ⚠️ **One number for two jobs, and that is the point.** It bounds the files the refresh reads
+    /// *and* it is the number of rows the menu draws. Two separate constants would drift, and the
+    /// drift is silent in one direction: a menu showing six rows off a five-row hydration shows one
+    /// row with no title and no date, looking for all the world like a damaged recording.
+    public static let hydratedRecentCount = 5
+
     /// Refresh the list of saved recordings.
+    ///
+    /// ⚠️ The list stays complete — every folder, as before. Only the newest few are enriched, because
+    /// only those are drawn. Callers that enumerate the archive (the control socket's listing,
+    /// `openInFinder`) still see all of it.
     public func refresh() {
-        recordings = store.listRecordings()
+        recordings = store.listRecordings(hydratingFirst: Self.hydratedRecentCount)
     }
 
     // MARK: - Start/stop

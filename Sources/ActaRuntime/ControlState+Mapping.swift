@@ -22,7 +22,8 @@ extension ControlState {
                   title: snapshot.title,
                   suggestedTitle: snapshot.suggestedTitle,
                   settings: snapshot.settings,
-                  recordings: snapshot.recordings)
+                  recordings: snapshot.recordings,
+                  activeRecordingDirectory: snapshot.activeRecordingDirectory)
     }
 
     /// The operation, with explicit precedence — the order below **is** the contract.

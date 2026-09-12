@@ -222,7 +222,16 @@ final class GatedClock: SelfCheckClock, @unchecked Sendable {
 /// ⚠️ **The default stays short on purpose.** Several callers use this bound to assert an *absence* —
 /// "the forbidden thing did not happen within it" — and raising it globally makes every one of those
 /// wait longer for nothing. A caller waiting for something that must arrive raises its own bound.
-func awaitCondition(timeoutMilliseconds: Int = 2000,
+/// ⚠️ **The default bound is five seconds, and the number was measured rather than chosen.** At two
+/// seconds the suite was 2 failing runs in 12 as soon as twenty more tests joined the parallel pool —
+/// not because anything they test is slow (the work in them benchmarks under 50 ms in total) but
+/// because swift-testing runs suites concurrently, and a main-actor hop chain waiting on a pool that
+/// twenty more tasks are sharing does not always complete inside two seconds. The control that
+/// established it: the same production changes with those twenty tests removed failed 0 runs in 12.
+///
+/// A bound exists so a broken test **fails instead of hanging**; it is not a performance assertion,
+/// and five seconds still fails fast. Anything that genuinely needs longer says so at the call site.
+func awaitCondition(timeoutMilliseconds: Int = 5000,
                     _ condition: @escaping @Sendable () -> Bool) async -> Bool {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
     while DispatchTime.now().uptimeNanoseconds < deadline {
@@ -239,7 +248,7 @@ func awaitCondition(timeoutMilliseconds: Int = 2000,
 /// The same bounded wait, for a condition that must be **asked of an actor**. A sync closure cannot
 /// await, and sampling an actor's state through a cached mirror is how a test ends up asserting on a
 /// value that lags the thing it is checking.
-func awaitAsyncCondition(timeoutMilliseconds: Int = 2000,
+func awaitAsyncCondition(timeoutMilliseconds: Int = 5000,
                          _ condition: @escaping @Sendable () async -> Bool) async -> Bool {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutMilliseconds) * 1_000_000
     while DispatchTime.now().uptimeNanoseconds < deadline {

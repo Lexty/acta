@@ -131,3 +131,48 @@ dicta to change anything**.
   trap.
 - **The rows above were not otherwise re-derived.** Everything not listed here dates from the
   2026-08-24 reading and should be treated as that old.
+
+---
+
+## Amendment, 2026-09-12: acta's panel diverges on five rows, deliberately
+
+The acta panel was redesigned after a measured reading of what it actually looked like on screen.
+Three mock-ups were put to the user and variant A — "quiet", the idiom of Apple's own menu extras —
+was chosen. **None of this asks dicta to change anything**, and every row below is a divergence acta
+now owns rather than a correction to the shared vocabulary.
+
+What the reading measured, since the divergences follow from it: on macOS `.caption` and `.caption2`
+are **the same 10 pt**, differing only in colour, so a hierarchy the code expressed in four styles had
+three levels on screen; `.headline` is 13 pt bold, which made the app's own name and a subsection
+heading the same rank; and the panel carried **five `Divider()`s at an identical 10 pt step**, which
+is the same as having no grouping at all.
+
+- **`panel`: no `VStack(spacing: 10)`, and one `Divider()` rather than five.** Grouping is by
+  distance — 6 pt inside a group, 16 pt between — which is what Apple's own menu extras (Wi-Fi, Sound,
+  Now Playing) do; they carry no rules at all. The one surviving rule sits above the utility line,
+  where what follows is not another group but a different kind of thing. ⚠️ **The cost is real**: a
+  wrong `spacing:` destroys the grouping silently and no test can see it. Rules are cheaper to keep
+  right, which is the argument for dicta keeping them.
+- **`header`: one line, and no status text.** "Ready to record" sat directly above a button reading
+  "Start Recording" — the same sentence twice, in the place the eye lands first. The glyph became a
+  22 pt tinted tile, the name lost the flavour suffix in favour of a `DEV` capsule beside it, and the
+  timer still sits at the trailing edge while recording. The status sentence survives as the tile's
+  **accessibility label**, because a reader that cannot see a red tile and a running timer needs it.
+- **`list`: no status `Circle`.** The dot marked the *ordinary* — every saved recording had one — so
+  the eye learned to ignore it, and a recovered or unfinished recording sat in the same field of dots
+  with only a hue to distinguish it. Now the ordinary is silent and the exceptions carry **a symbol
+  and a word**, which also survives a user who cannot tell the hues apart. The `colours` row still
+  holds for what remains: red for unfinished, amber for recovered.
+- **`list`: the row shows the meeting's real title.** It showed `directory.lastPathComponent` — a slug
+  that repeats the date already in the folder name, truncated through the middle. The title has been
+  in `info.md` since the first version and the listing simply never read it back
+  (`MeetingInfo.parse`). The second line is `Today 20:07 · 41:12`, and **the duration appears only for
+  a finished recording that measured one**: `info.md` is written at start with `duration: "00:00:00"`,
+  and rendering that placeholder beside real durations would state that a recording lasted no time.
+- **`footer`: replaced by a utility line.** "Open Archive" and "Quit" were two bordered buttons of
+  equal weight — a frequent, harmless action and a rare, destructive one. "Open Archive" moved to the
+  header of the list it is about; "Quit" is a quiet verb paired with the build revision, which also
+  moved here out of the header.
+- **The `settings` `DisclosureGroup` is gone from acta.** Configuration lives in a real Settings
+  window (⌘,) reached by one row; the note above about that disclosure being Tier 2 for dicta still
+  stands on its own terms.

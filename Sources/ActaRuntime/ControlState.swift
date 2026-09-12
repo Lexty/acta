@@ -37,6 +37,8 @@ public struct ControllerSnapshot: Equatable, Sendable {
     public var recordings: [MeetingStore.Recording]
     /// Elapsed time of the current recording, s.
     public var elapsedSeconds: Int
+    /// The folder the live recording is writing into, when there is one.
+    public var activeRecordingDirectory: URL?
 
     public init(phase: RecordingController.Phase = .idle,
                 isStarting: Bool = false,
@@ -47,7 +49,8 @@ public struct ControllerSnapshot: Equatable, Sendable {
                 suggestedTitle: String = "",
                 settings: RecordingSettings = .default,
                 recordings: [MeetingStore.Recording] = [],
-                elapsedSeconds: Int = 0) {
+                elapsedSeconds: Int = 0,
+                activeRecordingDirectory: URL? = nil) {
         self.phase = phase
         self.isStarting = isStarting
         self.isSaving = isSaving
@@ -58,6 +61,7 @@ public struct ControllerSnapshot: Equatable, Sendable {
         self.settings = settings
         self.recordings = recordings
         self.elapsedSeconds = elapsedSeconds
+        self.activeRecordingDirectory = activeRecordingDirectory
     }
 }
 
@@ -179,6 +183,17 @@ public struct ControlState: Equatable, Sendable {
     public var suggestedTitle: String
     public var settings: RecordingSettings
     public var recordings: [MeetingStore.Recording]
+    /// The folder the live recording is writing into, when there is one.
+    ///
+    /// ⚠️ **Identity, not lifecycle.** It says which archive folder belongs to *this* session; what is
+    /// happening to it is `operation`. A row must read both: a folder carrying a `recording` marker is
+    /// the live one only while this matches it, and even then it is "Starting…", "Recording" or
+    /// "Saving…" according to `operation` — never all three. A `recording` marker on any *other*
+    /// folder is an interrupted recording that recovery has not yet claimed.
+    ///
+    /// ⚠️ Deliberately absent from the wire: `RecordingSummary` answers a different question, for a
+    /// client that cannot see the menu at all.
+    public var activeRecordingDirectory: URL?
 
     public init(operation: Operation = .idle,
                 lifecycleFailure: ControlFailure? = nil,
@@ -187,7 +202,8 @@ public struct ControlState: Equatable, Sendable {
                 title: String = "",
                 suggestedTitle: String = "",
                 settings: RecordingSettings = .default,
-                recordings: [MeetingStore.Recording] = []) {
+                recordings: [MeetingStore.Recording] = [],
+                activeRecordingDirectory: URL? = nil) {
         self.operation = operation
         self.lifecycleFailure = lifecycleFailure
         self.notice = notice
@@ -196,6 +212,7 @@ public struct ControlState: Equatable, Sendable {
         self.suggestedTitle = suggestedTitle
         self.settings = settings
         self.recordings = recordings
+        self.activeRecordingDirectory = activeRecordingDirectory
     }
 
     /// Work that must not be cut short by quitting — the controller's `hasWorkInFlight`, restated over

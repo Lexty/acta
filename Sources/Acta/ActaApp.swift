@@ -285,39 +285,48 @@ struct MenuContent: View {
         (NSApp.delegate as? AppDelegate)?.reminders as? ReminderCoordinator
     }
 
+    /// ⚠️ **The structure is the design, and it is held by spacing rather than by rules.** The panel
+    /// used to be six slabs between five `Divider()`s at an identical 10 pt step, which is the same as
+    /// having no grouping at all: the title field and the Start button below it were no more related
+    /// to each other than "Settings" was to the footer. Apple's own menu extras — Wi-Fi, Sound, Now
+    /// Playing — carry no rules; they group by distance. Here that is 6 pt inside a group and 16 pt
+    /// between, and the one surviving rule sits above the utility line because what follows it is not
+    /// another group but a different kind of thing.
+    ///
+    /// ⚠️ **The cost, named where someone will read it:** a wrong `spacing:` silently destroys the
+    /// grouping and no test can see it. That is the trade this layout accepts.
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
 
+            // Banners keep their own space: a recovery notice or a failure is the most important thing
+            // in the panel whenever it exists, and it must not look like part of the action group.
             if let recovery = state.recoveryNotice {
                 banner(recovery.message, systemImage: "arrow.clockwise.circle.fill",
                        tint: .orange) { model.dismissRecoveryNotice() }
+                    .padding(.top, 12)
             }
             if let errorText = errorBannerText {
                 banner(errorText, systemImage: "exclamationmark.triangle.fill",
                        tint: .red, dismiss: nil)
+                    .padding(.top, 12)
             }
 
-            titleField
-            controls
-
-            Divider()
-            microphoneSection
-
-            Divider()
-            recordingsList
-
-            Divider()
-            settingsRow
-
-            Divider()
-            HStack {
-                Button("Open Archive") { model.openArchive() }
-                Spacer()
-                Button("Quit") { NSApplication.shared.terminate(nil) }
+            // ⚠️ **One group: what will be recorded, the button, and what it will be recorded with.**
+            // The microphone line sits directly under the button because the panel has to answer
+            // "with which microphone?" *before* the click, not in a section below the archive.
+            VStack(alignment: .leading, spacing: 6) {
+                titleField
+                controls
+                microphoneSection
             }
-            .font(.caption)
+            .padding(.top, 16)
+
+            recentSection.padding(.top, 16)
+            settingsRow.padding(.top, 16)
+
+            Divider().padding(.top, 12)
+            utilityLine.padding(.top, 8)
         }
         .padding(12)
         .frame(width: 300)
@@ -344,36 +353,66 @@ struct MenuContent: View {
     /// Whether editing the title and settings is blocked — today's `isBusy`, restated over `operation`.
     private var isBusy: Bool { state.operation != .idle }
 
+    /// One line: what this is, and — while recording — how long it has been going.
+    ///
+    /// ⚠️ **The status line is gone, and that was a decision, not an omission.** "Ready to record" sat
+    /// directly above a button reading "Start Recording": the same sentence twice, in the place the eye
+    /// lands first. What replaces it is not nothing — the tile changes symbol and colour, and the timer
+    /// appears — so the state is carried by form and position as well as by the words on the control
+    /// itself. **Every state still has words**: the button says "Starting…", "Recording", "Saving…",
+    /// and the tile carries an accessibility label for a reader that cannot see either.
+    ///
+    /// ⚠️ **The revision moved to the bottom, not away.** It is needed to accept a build, so it is
+    /// still on screen; it is not competing with the app's own name to be read first.
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: statusIcon)
+                .font(.system(size: 13))
                 .foregroundStyle(statusColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(BuildFlavor.current.appDisplayName).font(.headline)
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
-                if BuildFlavor.current == .dev {
-                    // Which build is this? With two apps installed it is worth knowing at a glance.
-                    Text(BuildFlavor.revision).font(.caption2).foregroundStyle(.tertiary)
-                }
+                .frame(width: 22, height: 22)
+                .background(statusColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel(statusText)
+            Text(AppInfo.name).font(.headline)
+            if BuildFlavor.current == .dev {
+                // The flavour as a capsule rather than as part of the name: two installed apps are
+                // told apart at a glance, and the name stays the name.
+                Text("DEV")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
             }
             Spacer()
             if case .recording(let elapsedSeconds) = state.operation {
                 // Ticks because each `elapsedSeconds` tick is a distinct `ControlState` the stream emits.
                 Text(MeetingInfo.formatDuration(seconds: elapsedSeconds))
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.medium))
                     .foregroundStyle(.red)
+                    .accessibilityLabel("Recording for \(MeetingInfo.formatDuration(seconds: elapsedSeconds))")
             }
         }
     }
 
+    /// ⚠️ **The "Title" caption is gone because the placeholder already says it.** On 300 pt a label
+    /// above a field that is showing the very text it describes spends a line to repeat itself.
+    ///
+    /// ⚠️ **Borderless, but never invisible as a control.** The bottom rule and the focus ring are what
+    /// tell the user it is editable — a field disguised as text is a known trap, and it is the reason
+    /// the underline stays when the field is enabled. The accessibility label survives the caption it
+    /// replaced, so nothing is lost to a screen reader.
     private var titleField: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Title").font(.caption).foregroundStyle(.secondary)
-            TextField(state.suggestedTitle.isEmpty ? "Meeting title" : state.suggestedTitle,
-                      text: model.titleBinding)
-                .textFieldStyle(.roundedBorder)
-                .disabled(isBusy)
-        }
+        TextField(state.suggestedTitle.isEmpty ? "Meeting title" : state.suggestedTitle,
+                  text: model.titleBinding)
+            .textFieldStyle(.plain)
+            .font(.body)
+            .disabled(isBusy)
+            .padding(.vertical, 3)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(isBusy ? Color.secondary.opacity(0.15) : Color.secondary.opacity(0.3))
+                    .frame(height: 1)
+            }
+            .accessibilityLabel("Meeting title")
     }
 
     private var controls: some View {
@@ -454,10 +493,23 @@ struct MenuContent: View {
                                                            bound: Self.chooserMaxHeight))
                 .onPreferenceChange(ChooserHeightKey.self) { chooserHeight = $0 }
             } label: {
+                // ⚠️ **The section heading "Microphone" is gone; the summary *is* the row.** The
+                // heading was `.headline` — the same 13 pt bold as the app's own name at the top of
+                // the panel — which made a subsection look like a second application. What a person
+                // needs here is the answer, not the name of the question.
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Microphone").font(.headline)
-                    // The one fact worth showing without opening anything.
-                    Text(mic.captureSummary).font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Image(systemName: "mic")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        // Already distinguishes "Recording from X" from "Will use X": what is happening
+                        // now and what is promised next are different sentences.
+                        Text(mic.captureSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                     // ⚠️ Feature (B) changes every other app's input, so *that it is on* stays visible
                     // even when its controls are folded away. Only the controls collapse, never the
                     // statement of what Acta is doing to the machine.
@@ -468,6 +520,7 @@ struct MenuContent: View {
                         Text(summary)
                             .font(.caption2)
                             .foregroundStyle(mic.managementNeedsAttention ? .orange : .secondary)
+                            .padding(.leading, 19)
                     }
                 }
                 .disclosureRow { microphoneExpanded.toggle() }
@@ -523,14 +576,8 @@ struct MenuContent: View {
 
             Divider()
             managementControls(mic)
-
-            // ⚠️ Labelled for where it actually goes. `SettingsLink` opens the window at whichever tab
-            // it last showed, and promising "Microphone Settings" while landing on General is a small
-            // lie the user pays for every time.
-            SettingsLink {
-                Text("Settings…").font(.caption)
-            }
-            .buttonStyle(.plain)
+            // ⚠️ **No second Settings link here.** There is one Settings row in the panel, below the
+            // recordings. Two links to one window, a few rows apart, read as two destinations.
         }
         .padding(.top, 4)
     }
@@ -680,30 +727,53 @@ struct MenuContent: View {
         }
     }
 
-    private var recordingsList: some View {
+    /// ⚠️ **"Open Archive" lives here, not in a footer.** It is about this list; next to it, it reads
+    /// as "and the rest of them". In the footer it was a bordered button of exactly the same weight as
+    /// "Quit" — a frequent, harmless action and a rare, destructive one drawn as equals.
+    private var recentSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Recent Recordings").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Recent").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+                Spacer()
+                Button("Open Archive") { model.openArchive() }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+            }
             if state.recordings.isEmpty {
                 Text("No recordings yet").font(.caption).foregroundStyle(.tertiary)
             } else {
-                ForEach(state.recordings.prefix(5), id: \.directory) { recording in
+                // ⚠️ The same constant that bounded the `info.md` reads. Drawing more rows than were
+                // hydrated would show a row with no title and no date — indistinguishable from a
+                // damaged recording.
+                ForEach(state.recordings.prefix(RecordingController.hydratedRecentCount),
+                        id: \.directory) { recording in
                     recordingRow(recording)
                 }
             }
         }
     }
 
+    /// ⚠️ **The green dot is gone: colour marked the ordinary.** Every saved recording carried one,
+    /// which is most of them, so the eye learned to ignore it — and a recovered or unfinished recording
+    /// sat in that same field of dots with nothing but a hue to set it apart. Now the ordinary is
+    /// quiet, and the exceptions are marked **by symbol and by word**, which also survives a user who
+    /// cannot tell the two hues apart.
+    ///
+    /// ⚠️ **The row shows the real title.** It used to show `directory.lastPathComponent` — a slug that
+    /// repeats the date the folder name already carries, truncated through the middle. The title has
+    /// been on disk in `info.md` since the first version; the listing simply never read it back.
     private func recordingRow(_ recording: MeetingStore.Recording) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(color(for: recording.manifest?.status)).frame(width: 7, height: 7)
+        let row = RecentRecordingRow.make(recording, operation: state.operation,
+                                          activeDirectory: state.activeRecordingDirectory)
+        return HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(recording.directory.lastPathComponent)
+                Text(row.title)
                     .font(.caption)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(statusLabel(recording.manifest?.status))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    // Tail, not middle: the beginning of a title identifies it, the end rarely does.
+                    .truncationMode(.tail)
+                secondLine(row)
             }
             Spacer()
             Button {
@@ -713,6 +783,65 @@ struct MenuContent: View {
             }
             .buttonStyle(.borderless)
             .help("Open folder in Finder")
+        }
+    }
+
+    /// When it happened and how long it ran — or, when the recording is not an ordinary finished one,
+    /// what is different about it.
+    @ViewBuilder
+    private func secondLine(_ row: RecentRecordingRow) -> some View {
+        let marker = Self.marker(for: row.state)
+        HStack(spacing: 4) {
+            if let marker {
+                Image(systemName: marker.symbol).font(.system(size: 9)).foregroundStyle(marker.tint)
+                Text(marker.word).font(.caption2).foregroundStyle(marker.tint)
+            }
+            // ⚠️ The stamp is dropped, not faked, when nothing in the folder said when it started.
+            if let stamp = row.stamp {
+                Text(marker == nil ? stamp : "· \(stamp)")
+                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            // Present only for a finished recording whose duration was actually measured.
+            if let duration = row.duration {
+                Text("· \(duration)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+        }
+    }
+
+    /// ⚠️ **Six states, six answers.** `saved` is the silent one; everything else says what it is. The
+    /// three live states are spelled out separately because a folder being written to, one being
+    /// finalised and one abandoned mid-write are three different facts about the same marker.
+    private static func marker(for state: RecentRecordingRow.State)
+        -> (symbol: String, word: String, tint: Color)? {
+        switch state {
+        case .saved: return nil
+        case .starting: return ("clock", "Starting", .secondary)
+        case .live: return ("record.circle", "Recording", .red)
+        case .saving: return ("square.and.arrow.down", "Saving", .secondary)
+        case .recovered: return ("arrow.clockwise", "Recovered", .orange)
+        case .unfinished: return ("exclamationmark.triangle", "Unfinished", .red)
+        // Not folded into "saved": an unreadable marker is a thing we do not know, and the project's
+        // rule is that unknown never renders as ordinary.
+        case .unknown: return ("questionmark.circle", "Unknown", .secondary)
+        }
+    }
+
+    /// The panel's last line: what build this is, and the way out.
+    ///
+    /// ⚠️ **Quit stops being a bordered button.** It and "Open Archive" were two identical bordered
+    /// buttons — one frequent and harmless, one rare and destructive. "Open Archive" moved to the list
+    /// it belongs to, and what is left is a quiet verb that has to be aimed at.
+    private var utilityLine: some View {
+        HStack {
+            if BuildFlavor.current == .dev {
+                Text(BuildFlavor.revision)
+                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            Spacer()
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -771,11 +900,14 @@ struct MenuContent: View {
         }
     }
 
-    /// ⚠️ **`.starting` used to say "Ready to record", and that was a lie the panel told about itself.**
-    /// Capture is already writing segments during a start — the button two centimetres below already
-    /// said "Starting…" — so the header claimed no recording was under way while one was. The comment
-    /// this replaces defended it as reproducing the old phase-driven header; reproducing a defect
-    /// faithfully is still shipping it.
+    /// The state in words. **No longer drawn as a line in the header** — it is the tile's
+    /// accessibility label, which is where it still earns its place: a reader that cannot see a red
+    /// dot and a running timer needs the sentence.
+    ///
+    /// ⚠️ `.starting` used to answer "Ready to record" here, and that was a lie the panel told about
+    /// itself: capture is already writing segments during a start, and the button below already said
+    /// "Starting…". Two elements four centimetres apart asserted different things, and the button was
+    /// the one telling the truth.
     private var statusText: String {
         if state.lifecycleFailure != nil { return "Error" }
         switch state.operation {
@@ -786,21 +918,4 @@ struct MenuContent: View {
         }
     }
 
-    private func color(for status: SessionManifest.Status?) -> Color {
-        switch status {
-        case .done: return .green
-        case .recovered: return .orange
-        case .recording: return .red
-        case nil: return .gray
-        }
-    }
-
-    private func statusLabel(_ status: SessionManifest.Status?) -> String {
-        switch status {
-        case .done: return "saved"
-        case .recovered: return "recovered"
-        case .recording: return "unfinished"
-        case nil: return "—"
-        }
-    }
 }

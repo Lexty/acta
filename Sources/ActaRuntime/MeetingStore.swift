@@ -17,9 +17,20 @@ public struct MeetingStore {
         public var directory: URL
         public var manifest: SessionManifest?
 
-        public init(directory: URL, manifest: SessionManifest? = nil) {
+        /// What `info.md` said, when there was one to read.
+        ///
+        /// ⚠️ **The folder name is not the title.** It is a slug: lower-cased, punctuation stripped,
+        /// truncated, and prefixed with a date the title usually repeats. The real title is written to
+        /// `info.md` at start and has been all along — the listing simply never read it back, which is
+        /// why the menu showed `2026-01-15_2007__t…am-2026-01-15-20-07`. Optional because a folder
+        /// without a readable `info.md` is still a real recording.
+        public var info: ArchivedMeetingInfo?
+
+        public init(directory: URL, manifest: SessionManifest? = nil,
+                    info: ArchivedMeetingInfo? = nil) {
             self.directory = directory
             self.manifest = manifest
+            self.info = info
         }
     }
 
@@ -71,16 +82,50 @@ public struct MeetingStore {
     ///
     /// Sorting by folder name descending = by start time descending (the name begins with
     /// `YYYY-MM-DD_HHMM`).
-    public func listRecordings() -> [Recording] {
+    /// ⚠️ **`hydratingFirst` bounds the `info.md` reads, and nothing else.** Every folder is returned
+    /// either way — the wire listing and `openInFinder` depend on that and must not silently start
+    /// seeing five recordings. What the parameter buys is that a menu showing five rows does not read
+    /// a file per folder in an archive of a thousand. The sort happens *before* hydration, so the
+    /// hydrated entries are the newest ones rather than whichever the file system happened to name
+    /// first. Zero — the default — reads no `info.md` at all.
+    public func listRecordings(hydratingFirst hydrated: Int = 0) -> [Recording] {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: archiveRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
         ) else {
             return []
         }
-        return dirs
+        let sorted = dirs
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false }
-            .map { Recording(directory: $0, manifest: manifestStore.read(from: $0)) }
-            .sorted { $0.directory.lastPathComponent > $1.directory.lastPathComponent }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        return sorted.enumerated().map { index, directory in
+            Recording(directory: directory,
+                      manifest: manifestStore.read(from: directory),
+                      info: index < hydrated ? readInfo(from: directory) : nil)
+        }
+    }
+
+    /// Read `info.md` back out of a meeting folder, or nil if there is nothing usable there.
+    ///
+    /// ⚠️ **Best-effort by contract.** A missing file, an unreadable one, non-UTF-8 bytes and a file
+    /// with no front matter all answer nil — the same answer, because the caller does the same thing
+    /// with each: shows what it does know, and the folder's row survives regardless.
+    ///
+    /// ⚠️ **A prefix, never the whole file.** `info.md` is not small by contract: `appendingNote`
+    /// writes into it, and the archive doc this store itself generates invites the user's Claude Code
+    /// to keep transcription and notes there. The front matter is the first few lines by construction,
+    /// so reading beyond `frontMatterReadLimit` buys nothing and risks pulling a transcript into
+    /// memory once per row. A truncated read cannot corrupt the answer: the parser requires a closing
+    /// `---`, and a prefix that does not contain one parses as nothing rather than as a half-record.
+    static let frontMatterReadLimit = 8 * 1024
+
+    func readInfo(from directory: URL) -> ArchivedMeetingInfo? {
+        let url = directory.appendingPathComponent(MeetingArchive.infoFileName)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: Self.frontMatterReadLimit),
+              let text = String(data: data, encoding: .utf8),
+              let info = MeetingInfo.parse(text), !info.isEmpty else { return nil }
+        return info
     }
 
     /// Fences around the part of `~/Acta/CLAUDE.md` that Acta generates.

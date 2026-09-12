@@ -182,8 +182,11 @@ public struct MeetingInfo: Equatable, Sendable {
         return "\"\(escaped)\""
     }
 
-    /// Collapse newlines into spaces — for a single-line markdown heading.
-    static func singleLine(_ value: String) -> String {
+    /// Collapse newlines into spaces — for a single-line markdown heading, and for a menu row.
+    ///
+    /// ⚠️ **Presentation only.** The stored title keeps its line breaks; this is what a one-line row
+    /// shows. Flattening on the way *into* the archive would lose the user's text for good.
+    public static func singleLine(_ value: String) -> String {
         value.split(whereSeparator: \.isNewline).joined(separator: " ")
     }
 
@@ -192,5 +195,209 @@ public struct MeetingInfo: Equatable, Sendable {
     /// strict-concurrency error.
     static func iso8601(from date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
+    }
+}
+
+// MARK: - Reading `info.md` back
+
+/// What `info.md` turned out to hold — **every field optional, and nil means "the file did not say"**.
+///
+/// ⚠️ **Why not `MeetingInfo`.** `MeetingInfo` is what we *write*, and every field of it is required
+/// because at write time every field is known. Reading is the opposite situation: the file may predate
+/// a field, may have been hand-edited, may be half-written after a crash. A parser that returned
+/// `MeetingInfo` would have to invent a date or a duration to satisfy the type — and an invented
+/// duration displayed next to a real one is exactly the class of defect this project keeps finding.
+/// Absent stays absent all the way to the view, which then shows nothing rather than a guess.
+public struct ArchivedMeetingInfo: Equatable, Sendable {
+    public var title: String?
+    public var date: Date?
+    public var source: String?
+    public var durationSeconds: Int?
+    public var status: SessionManifest.Status?
+
+    public init(title: String? = nil, date: Date? = nil, source: String? = nil,
+                durationSeconds: Int? = nil, status: SessionManifest.Status? = nil) {
+        self.title = title
+        self.date = date
+        self.source = source
+        self.durationSeconds = durationSeconds
+        self.status = status
+    }
+
+    /// Whether the file said nothing we could use. A front-matter block that parsed but held no
+    /// recognised key is as useless to a caller as no front matter at all.
+    public var isEmpty: Bool {
+        title == nil && date == nil && source == nil && durationSeconds == nil && status == nil
+    }
+}
+
+extension MeetingInfo {
+    /// Parse the front matter `rendered()` writes. Returns nil when there is no front-matter block —
+    /// which is a different answer from "a block with nothing in it we understood".
+    ///
+    /// ⚠️ **Deliberately not a YAML parser.** It reads the block between the first pair of `---`
+    /// exactly as `patchedFrontMatter` does, and every value it cannot make sense of becomes nil
+    /// rather than a default. The one asymmetry with `rendered()` worth naming: `duration` is written
+    /// as a *formatted* `HH:MM:SS` string, so reading it back is parsing a display format — the seconds
+    /// it yields are therefore whole, and a file whose duration is not three numeric fields yields nil.
+    public static func parse(_ contents: String) -> ArchivedMeetingInfo? {
+        let lines = contents.components(separatedBy: "\n")
+        guard let first = lines.firstIndex(where: { !$0.isEmpty }), lines[first] == "---",
+              let closing = lines[(first + 1)...].firstIndex(of: "---") else {
+            return nil
+        }
+        var info = ArchivedMeetingInfo()
+        // ⚠️ **A key seen twice makes that field unknown, rather than last-one-wins.** Two `title:`
+        // lines are a file we do not understand; picking one of them is picking at random and
+        // presenting the result as fact. Only the repeated field is lost — the rest of the block is
+        // still perfectly legible.
+        var seen = Set<String>()
+        for line in lines[(first + 1)..<closing] {
+            // Split at the **first** colon only: every value we write may contain one, and a title
+            // reading "Acta: the meeting" is ordinary.
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            let key = String(line[line.startIndex..<separator])
+            let rest = String(line[line.index(after: separator)...])
+                .trimmingCharacters(in: .whitespaces)
+            guard ["title", "source", "date", "duration", "status"].contains(key) else { continue }
+            guard seen.insert(key).inserted else {
+                switch key {
+                case "title": info.title = nil
+                case "source": info.source = nil
+                case "date": info.date = nil
+                case "duration": info.durationSeconds = nil
+                default: info.status = nil
+                }
+                continue
+            }
+            switch key {
+            case "title": info.title = unquote(rest).flatMap { $0.isEmpty ? nil : $0 }
+            case "source": info.source = unquote(rest).flatMap { $0.isEmpty ? nil : $0 }
+            case "date": info.date = ISO8601DateFormatter().date(from: rest)
+            case "duration": info.durationSeconds = unquote(rest).flatMap(parseDuration)
+            default: info.status = SessionManifest.Status(rawValue: rest)
+            }
+        }
+        return info
+    }
+
+    /// Undo `quote(_:)`. An unquoted scalar is returned as written; a quoted one has its escapes
+    /// resolved. A value that opens a quote and never closes it is **not** a string we understood.
+    static func unquote(_ value: String) -> String? {
+        guard value.hasPrefix("\"") else { return value }
+        var result = ""
+        var escaping = false
+        var closed = false
+        for character in value.dropFirst() {
+            if escaping {
+                switch character {
+                case "n": result.append("\n")
+                case "r": result.append("\r")
+                case "t": result.append("\t")
+                default: result.append(character)
+                }
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else if character == "\"" {
+                closed = true
+                break
+            } else {
+                result.append(character)
+            }
+        }
+        // A trailing backslash that never got its escapee is a truncated value, not a valid one.
+        return closed && !escaping ? result : nil
+    }
+
+    /// `HH:MM:SS` back to seconds. Anything else — an empty string, two fields, a negative, a word,
+    /// seventy-five minutes — is nil, because a duration shown wrong is worse than a duration not
+    /// shown.
+    ///
+    /// ⚠️ **Hours are unbounded, minutes and seconds are not.** `formatDuration` writes hours
+    /// unpadded beyond two digits, so a twenty-six-hour recording is `26:00:00` and must read back;
+    /// but `00:75:00` is not a duration this project ever wrote, and accepting it as an hour and a
+    /// quarter would invent a number out of a malformed file. The arithmetic is overflow-checked for
+    /// the same reason: a huge hour field must fail, not wrap into something plausible.
+    static func parseDuration(_ value: String) -> Int? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var numbers: [Int] = []
+        for part in parts {
+            guard !part.isEmpty, part.allSatisfy(\.isNumber), let number = Int(part) else { return nil }
+            numbers.append(number)
+        }
+        guard numbers[1] < 60, numbers[2] < 60 else { return nil }
+        let (minutes, overflow) = numbers[0].multipliedReportingOverflow(by: 3600)
+        guard !overflow else { return nil }
+        let (sum, overflow2) = minutes.addingReportingOverflow(numbers[1] * 60 + numbers[2])
+        guard !overflow2 else { return nil }
+        return sum
+    }
+}
+
+// MARK: - Display formatting
+
+extension MeetingInfo {
+    /// A duration for reading rather than for `info.md`: `41:12`, `1:07:55`. The hour is dropped when
+    /// it is zero, which is the common case, and never zero-padded when it is not.
+    ///
+    /// ⚠️ Separate from `formatDuration(seconds:)` on purpose. That one is a **file format** — fixed
+    /// width, parsed back by `parse(_:)` — and changing it to look nicer would change what is written
+    /// to disk. Two jobs, two functions.
+    public static func formatCompactDuration(seconds: Int) -> String {
+        let total = max(0, seconds)
+        let (hours, minutes, remainder) = (total / 3600, (total % 3600) / 60, total % 60)
+        return hours > 0 ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+                         : String(format: "%d:%02d", minutes, remainder)
+    }
+
+    /// When a recording happened, as a person would say it: `Today 20:07`, `Yesterday 18:05`,
+    /// `9 Sep 09:40`.
+    ///
+    /// ⚠️ **Every input is a parameter, including "now".** A relative stamp computed against the wall
+    /// clock cannot be tested for the boundary that actually matters — midnight — and that boundary is
+    /// where "Today" silently becomes a lie about a recording made four minutes ago.
+    ///
+    /// ⚠️ **The time format follows the locale, not a hardcoded 24-hour pattern.** A Mac set to
+    /// 12-hour time shows 12-hour time everywhere else; `dateFormat(fromTemplate:)` is what makes the
+    /// panel agree with the rest of the system instead of imposing the developer's clock.
+    public static func relativeStamp(for date: Date, now: Date = Date(),
+                                     calendar: Calendar = .current,
+                                     locale: Locale = .current) -> String {
+        let time = formatted(date, template: "jmm", calendar: calendar, locale: locale)
+        if calendar.isDate(date, inSameDayAs: now) { return "Today \(time)" }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) {
+            return "Yesterday \(time)"
+        }
+        // Within the same calendar year the year is noise; outside it, it is the point.
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        let day = formatted(date, template: sameYear ? "dMMM" : "dMMMyyyy",
+                            calendar: calendar, locale: locale)
+        return "\(day) \(time)"
+    }
+
+    /// A rendering that takes its **conventions** from the user's locale and its **language** from
+    /// English.
+    ///
+    /// ⚠️ **Two locales, deliberately, and the split is the whole point.** The pattern comes from the
+    /// user's locale, so field order and the twelve-versus-twenty-four-hour cycle are the ones their
+    /// Mac uses everywhere else; the rendering is done under `en_US_POSIX`, so the month name is
+    /// English like the rest of this interface. Passing the user's locale to the formatter as well —
+    /// which is what this function did first — produced `9 февр. 15:40` on a Russian Mac: a stamp half
+    /// in each language, next to a `Today` that could only ever be English.
+    ///
+    /// The formatter is built per call: `DateFormatter` is not `Sendable`, and a shared static would
+    /// be both a data race and a cache of the wrong locale.
+    private static func formatted(_ date: Date, template: String,
+                                  calendar: Calendar, locale: Locale) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = DateFormatter.dateFormat(fromTemplate: template, options: 0,
+                                                        locale: locale) ?? template
+        return formatter.string(from: date)
     }
 }

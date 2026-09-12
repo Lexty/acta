@@ -165,7 +165,8 @@ public final class ControlAPI {
                            suggestedTitle: controller.suggestedTitle,
                            settings: controller.settings,
                            recordings: controller.recordings,
-                           elapsedSeconds: controller.elapsedSeconds)
+                           elapsedSeconds: controller.elapsedSeconds,
+                           activeRecordingDirectory: controller.activeRecordingDirectory)
     }
 
     // MARK: - Title and settings
