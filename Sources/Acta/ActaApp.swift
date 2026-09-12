@@ -208,12 +208,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// The chooser's measured content height, so a bounded scroll view can size to it.
-private struct ChooserHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
 private extension View {
     /// Make a `DisclosureGroup`'s label behave like the row it looks like: the whole strip toggles the
     /// section, not just the chevron.
@@ -481,17 +475,25 @@ struct MenuContent: View {
                 // that, so a Mac with two microphones would show the list above a large empty gap. The
                 // height is the content's own, clamped — so short content sizes naturally and only long
                 // content scrolls.
+                // ⚠️ **`onGeometryChange`, not a `PreferenceKey` — and the old way had never worked.**
+                // The measurement travelled through `ChooserHeightKey` and `onPreferenceChange` into
+                // `chooserHeight`, and `chooserHeight` stayed at its initial zero: with zero meaning
+                // "not measured", `BoundedSectionLayout` hands back the **bound**, so this section was
+                // always exactly 320 pt tall. That was invisible for as long as the chooser's content
+                // was taller than 320 — it filled the frame and scrolled, which is what it looked like
+                // it was doing. Removing the enable toggle and the duplicate Settings link took the
+                // content under the bound, and 70-odd points of empty space appeared under the last
+                // line. Measured off the user's screenshot before this was touched: content ≈ 234 pt
+                // in a frame of ≈ 300, against a bound of 320.
                 ScrollView {
                     microphoneChooser(mic)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(GeometryReader { proxy in
-                            Color.clear.preference(key: ChooserHeightKey.self,
-                                                   value: proxy.size.height)
-                        })
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            chooserHeight = height
+                        }
                 }
                 .frame(height: BoundedSectionLayout.height(measured: chooserHeight,
                                                            bound: Self.chooserMaxHeight))
-                .onPreferenceChange(ChooserHeightKey.self) { chooserHeight = $0 }
             } label: {
                 // ⚠️ **The section heading "Microphone" is gone; the summary *is* the row.** The
                 // heading was `.headline` — the same 13 pt bold as the app's own name at the top of

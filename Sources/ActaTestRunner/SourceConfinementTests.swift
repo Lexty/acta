@@ -8,19 +8,28 @@ import Testing
 /// a test rather than joining that list.
 @Suite("Source confinement")
 struct SourceConfinementTests {
-    /// ⚠️ **One persistent setting, one editor — held as a rule because it had already broken twice.**
-    /// The Settings window was introduced precisely so configuration would stop living in two places,
-    /// and its own commit said the microphone list had moved. `Toggle("Keep the Mac's input on my
-    /// list")` nevertheless stayed in `ActaApp.swift` as well, so the same setting had two editors for
-    /// four commits before Codex noticed. Nothing in the type system can see that; a guard can.
+    /// A regression guard for one leak that actually happened: the Settings window was introduced so
+    /// configuration would stop living in two places, its own commit said the microphone controls had
+    /// moved, and `Toggle("Keep the Mac's input on my list")` went on standing in `ActaApp.swift`
+    /// beside the identical one in `SettingsWindow.swift` for four commits, through several reviews.
+    ///
+    /// ⚠️ **What this actually establishes, stated narrowly because the first version of this comment
+    /// claimed more.** Each of the **listed literal strings** occurs in exactly one file under
+    /// `Sources/Acta`, and that file is `SettingsWindow.swift`. It does **not**: count occurrences
+    /// *within* that file, recognise the same setting written under a different label, or cover a
+    /// persistent control added later. A new control is caught only when someone adds its label below
+    /// — deliberately, which is the intended cost. It is a guard against this leak recurring, not a
+    /// general rule that configuration cannot appear in the panel, and nothing here should be reported
+    /// as the latter.
     ///
     /// ⚠️ The check runs on **comment-stripped** source, so the doc comment in `ActaApp.swift` that
     /// explains why the control is not there does not trip it — which is the same reason the parser
     /// strips comments for the import guards.
-    @Test("a persistent setting has exactly one editor, and it is the Settings window")
+    @Test("the listed persistent controls appear only in the Settings window")
     func persistentControlsLiveOnlyInSettings() {
         // The labels of controls that write a *setting* — as opposed to acting on what is happening
-        // now, which is what the panel keeps.
+        // now, which is what the panel keeps. Extend this list by hand when a persistent control is
+        // added; it is a list of known labels, not a definition of what a persistent control is.
         let persistentControls = [
             "Keep the Mac's input on my list",
             "Offer to start recording when another app uses microphone input",
