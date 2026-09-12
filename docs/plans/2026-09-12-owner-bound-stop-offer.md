@@ -272,9 +272,14 @@ both. The named one bites; the control is not uniquely scoped to it.
    store's retention limit all produce it as readily as a dead poll task.
 2. ⚠️ **The both-off test proved nothing about the HAL.** It asserted the *payload* said `notObserved`;
    `ScriptedReader` had no counter, so an illicit `readSnapshot()` would have left it green. The reader
-   now counts, and the test asserts zero reads. ⚠️ **Deliberately only for both-off**: Codex also
-   suggested pinning start-off/quiet-on, which is true today and is exactly what Task 6 changes.
-   Pinning it would make a planned change look like a regression.
+   now counts, and the test asserts zero reads.
+
+⚠️ **And my reason for declining his second suggestion was wrong, in a way that condemned my own test.**
+I refused to pin start-off/quiet-on because Task 6 changes it — then kept a test that left
+`offersStopWhenOwnerReleases` at its new default `true`, which Task 6 changes in exactly the same way.
+The quiet reminder never governed the read: it measures audio, not processes. The durable matrix is
+**start=false and release=false → zero reads for either quiet value; release=true → one read even from
+idle**. The test now sets all three explicitly and is named for that.
 
 Also on his review: `defer` now closes over `let settings` read *before* it is registered, so an early
 return inserted later cannot make the beat report both reminders off — a fabricated fact in the one line
@@ -402,6 +407,11 @@ and Codex notes it would also be circular.
 - [ ] when neither feature is enabled, read nothing
 - [ ] write a test: with the start reminder off and release-stop on, observation happens from idle
 - [ ] write a test: with both off, `readSnapshot` is never called (counted on the scripted reader)
+      — ⚠️ **"both" means the start and release reminders**, the two that consume process observations;
+      the quiet one measures audio and never gated this read. The matrix to land here:
+      start=false/release=false → zero reads for **either** quiet value; start=false/release=true → one
+      read from idle. `ScriptedReader` already counts (Task 1), and
+      `noReminderEnabledBeatsNotObserved` already pins the zero-read half.
 - [ ] **negative control**: move the read back inside the start branch → the first test fails
 - [ ] run `bash Scripts/test.sh`
 

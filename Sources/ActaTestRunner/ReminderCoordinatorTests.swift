@@ -767,14 +767,24 @@ struct ReminderCoordinatorTests {
         #expect(beats.map(\.tick) == [1, 3, 5, 7])
     }
 
-    @Test("with both reminders off the heartbeat reports that nothing was observed")
+    /// ⚠️ **Every reminder off, and the two that consume process observations named explicitly.** The
+    /// quiet reminder does not govern the read at all — it measures audio, not processes — so "both
+    /// preferences off" was never the gate. The gate is the start reminder *or* the release reminder,
+    /// and the durable matrix is: neither of those two → zero reads for either value of the quiet one;
+    /// the release one on → a read even from idle, which is what Task 6 introduces.
+    ///
+    /// ⚠️ Codex caught this after the commit: an earlier version left `offersStopWhenOwnerReleases` at
+    /// its default `true` and claimed to be the case that *survives* Task 6. It was the case Task 6
+    /// breaks — the same objection I had just used to decline a test of his.
+    @Test("with every reminder off the heartbeat reports that nothing was observed")
     @available(macOS 15.0, *)
-    func bothPreferencesOffBeatsNotObserved() async {
+    func noReminderEnabledBeatsNotObserved() async {
         let (harness, coordinator, reader, _) = makeClockedCoordinator()
         defer { harness.tearDown() }
         var settings = harness.controller.settings
-        settings.offersRecordingWhenMicrophoneBusy = false
-        settings.offersStopWhenQuiet = false
+        settings.offersRecordingWhenMicrophoneBusy = false   // consumes the snapshot today
+        settings.offersStopWhenOwnerReleases = false         // will consume it from Task 6
+        settings.offersStopWhenQuiet = false                 // consumes audio summaries, never the HAL
         harness.controller.settings = settings
         harness.controller.saveSettings()
         reader.set(Self.holding(Self.slack))        // held, and deliberately never looked at
@@ -783,11 +793,10 @@ struct ReminderCoordinatorTests {
         #expect(coordinator.lastHeartbeat?.observation == .notObserved)
         #expect(coordinator.lastHeartbeat?.offersRecordingWhenMicrophoneBusy == false)
         #expect(coordinator.lastHeartbeat?.offersStopWhenQuiet == false)
+        #expect(coordinator.lastHeartbeat?.offersStopWhenOwnerReleases == false)
         // ⚠️ **The assertion that makes the payload mean something.** Without it the test passes beside
-        // a diagnostic read the design refuses. ⚠️ Deliberately only for the *both-off* case: Codex
-        // suggested asserting it for start-off/quiet-on as well, and that one is true today but is
-        // exactly what Task 6 changes — the release rule has to observe from idle. Pinning it here
-        // would make a planned change look like a regression.
+        // a diagnostic read the design refuses, because `notObserved` describes the payload rather than
+        // the reader.
         #expect(reader.readCount == 0, "the process list was read for a feature nobody enabled")
     }
 
