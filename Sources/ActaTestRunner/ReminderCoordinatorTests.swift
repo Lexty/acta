@@ -257,6 +257,119 @@ struct ReminderCoordinatorTests {
         #expect(!started, "an acceptance survived the rule that minted its episode")
     }
 
+    /// ⚠️ **A press must always leave something on screen.** The whole defect the user reported was
+    /// that it did not: the acceptance path took the prompt down, awaited the settings barrier, found
+    /// the episode stale and returned — so the button vanished, nothing recorded, and the app said
+    /// nothing at all about why.
+    @Test("a click parked at the barrier reports staleness instead of disappearing")
+    @available(macOS 15.0, *)
+    func aParkedClickThatGoesStaleSaysSo() async {
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+
+        var wanted = harness.controller.settings
+        wanted.microphonePriority = ["BuiltInMicrophoneDevice"]
+        wanted.managesSystemDefaultInput = true
+        harness.controller.settings = wanted
+        harness.controller.saveSettings()
+        devices.setWritesTakeEffect(false)
+        gate.hold()
+        manager.applySettings(wanted)
+
+        coordinator.acceptStart(episodeID: token)
+        // The click is acknowledged the instant it is taken, before anything is known about it.
+        #expect(coordinator.prompt.map { if case .checkingStart = $0 { true } else { false } } == true,
+                "the click produced no feedback while it was being checked")
+
+        let parked = await awaitCondition { gate.isHoldingSleeper }
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        // The application releases the input while the click waits: the offer is now stale.
+        reader.set(Self.quiet)
+        clock.advance(1)
+        coordinator.tick()
+
+        gate.release()
+        let told = await awaitCondition {
+            MainActor.assumeIsolated {
+                if case .startNoLongerAvailable = coordinator.prompt { return true }
+                return false
+            }
+        }
+        #expect(told, "a stale click said nothing")
+        // And it started nothing.
+        let started = await awaitCondition(timeoutMilliseconds: forbiddenOutcomeWindow) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(!started, "a stale click started a recording")
+        await stopAndSettle(harness)
+    }
+
+    /// ⚠️ **A late answer must not speak over a newer one.** The acceptance path suspends, so a refusal
+    /// belonging to an old press can arrive after a fresh offer is already on screen. It must be
+    /// dropped, not drawn.
+    @Test("a stale result cannot overwrite a newer prompt")
+    @available(macOS 15.0, *)
+    func aLateRefusalDoesNotOverwriteWhatCameAfterIt() async {
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+
+        var wanted = harness.controller.settings
+        wanted.microphonePriority = ["BuiltInMicrophoneDevice"]
+        wanted.managesSystemDefaultInput = true
+        harness.controller.settings = wanted
+        harness.controller.saveSettings()
+        devices.setWritesTakeEffect(false)
+        gate.hold()
+        manager.applySettings(wanted)
+
+        coordinator.acceptStart(episodeID: token)
+        let parked = await awaitCondition { gate.isHoldingSleeper }
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        // While that press is parked, its episode dies and a **new** call raises a fresh offer.
+        reader.set(Self.quiet)
+        clock.advance(1)
+        coordinator.tick()
+        // ⚠️ The re-arm has to expire **while the input is still quiet**. A held reading returns
+        // `.releasing` straight to `.spent`, so jumping the clock and only then presenting a hold
+        // revives the old episode instead of closing it — and no second offer is ever minted. The
+        // first version of this test did exactly that and failed on its own premise.
+        clock.advance(40)
+        coordinator.tick()
+        reader.set(Self.holding(Self.slack))
+        var fresh: UInt64?
+        for _ in 0..<8 {
+            coordinator.tick()
+            if case .offerToRecord(let episodeID, _, _, _, _) = coordinator.prompt {
+                fresh = episodeID
+                break
+            }
+            clock.advance(1)
+        }
+        guard let fresh else {
+            Issue.record("no second offer was raised, so there is nothing to overwrite"); return
+        }
+        #expect(fresh != token, "the second offer reused the first offer's identity")
+
+        gate.release()
+        // The parked refusal now resolves. It must not replace the offer standing on screen.
+        let overwritten = await awaitCondition(timeoutMilliseconds: forbiddenOutcomeWindow) {
+            MainActor.assumeIsolated {
+                if case .offerToRecord = coordinator.prompt { return false }
+                return true
+            }
+        }
+        #expect(!overwritten, "a late refusal replaced a newer offer")
+        await stopAndSettle(harness)
+    }
+
     @Test("an acceptance parked at the barrier still starts when nothing invalidated it")
     @available(macOS 15.0, *)
     func aParkedAcceptanceStillStarts() async {

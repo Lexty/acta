@@ -17,6 +17,19 @@ public enum ReminderPrompt: Equatable, Sendable {
     /// recording count is a different number. A prompt that answers "will I lose what is recorded" with
     /// the wrong figure is worse than one that does not answer it.
     case offerToStop(recordingID: UInt64, title: String, elapsedSeconds: Int)
+    /// A click has been taken and the answer is not known yet.
+    ///
+    /// ⚠️ **It exists because the click used to produce nothing at all.** The acceptance path takes the
+    /// prompt down, then awaits the microphone-settings barrier, then re-checks identity — and if any
+    /// check refuses, the panel had already gone and the user was left looking at a button that had
+    /// vanished without recording anything. A press must always produce something to look at.
+    case checkingStart(attempt: UInt64, title: String)
+    /// The click arrived after its offer had gone stale.
+    ///
+    /// ⚠️ **It does not say the call ended.** Losing sight of an application's input proves nothing
+    /// about whether people are still talking — it is the absence of evidence, not evidence of absence —
+    /// so the words point at the offer, not at the meeting.
+    case startNoLongerAvailable(attempt: UInt64)
     /// A start was accepted from a prompt and capture has not confirmed yet.
     ///
     /// ⚠️ **Acta never reports recording before data is being written** — that is the app's oldest rule,
@@ -91,6 +104,14 @@ public final class ReminderCoordinator: ObservableObject {
 
     /// A monotonic id per recording, minted here because `ControlState` has no notion of one.
     private var recordingID: UInt64 = 0
+
+    /// Identifies one press of one button.
+    ///
+    /// ⚠️ **A late answer must never speak over a newer one.** The acceptance path suspends at the
+    /// settings barrier, so two presses — or a press and a fresh offer raised while the first was still
+    /// parked — can land out of order. Every prompt this path publishes carries the attempt that
+    /// produced it, and publishes only while it is still the current attempt.
+    private var currentAttempt: UInt64 = 0
     private var wasRecording = false
     /// The capture generation the quiet rule is currently calibrated for.
     ///
@@ -423,10 +444,14 @@ public final class ReminderCoordinator: ObservableObject {
               shown == token else { return }
         guard let episodeID = episode(in: token) else { return }
         let acceptedEpoch = observationEpoch
-        // The prompt comes down now; the episode is resolved explicitly rather than by a later
-        // `dismiss()` that would be looking at a different prompt by then.
-        prompt = nil
+        // ⚠️ **The offer is replaced, not simply removed.** It used to become `nil` here, so between
+        // the click and whatever the checks below decided there was nothing on screen at all — and if a
+        // check refused, that was the whole of the user's feedback: the panel vanished and no recording
+        // began. Every exit from this path now leaves something visible.
+        currentAttempt &+= 1
+        let attempt = currentAttempt
         activityRule.offerResolved(episodeID: episodeID)
+        present(.checkingStart(attempt: attempt, title: intendedTitle))
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -439,28 +464,58 @@ public final class ReminderCoordinator: ObservableObject {
             // ⚠️ **Everything is re-checked after the await, in this turn, with no suspension between
             // the check and the command.** Quit may have begun, the preference may have been switched
             // off, the call may have ended, and a recording may have started by another route.
-            guard !self.isClosing else { return }
-            guard self.service.settings.offersRecordingWhenMicrophoneBusy else { return }
+            // ⚠️ Quitting is the one exit that shows nothing: a panel reopening as the app goes away
+            // is worse than silence, and there is nobody left to act on it.
+            guard !self.isClosing else {
+                self.withdrawAttempt(attempt)
+                return
+            }
+            guard self.service.settings.offersRecordingWhenMicrophoneBusy else {
+                self.withdrawAttempt(attempt)
+                return
+            }
             // ⚠️ **The rule that minted this id must still be the rule being asked.** A reset during the
             // wait restarts episode numbering at one, and numeric equality inside a fresh rule is not
             // identity continuity — it is a different call wearing the same number.
             guard self.observationEpoch == acceptedEpoch else {
                 self.log.info("start offer \(token, privacy: .public) outlived the rule that made it")
+                self.reportStale(attempt)
                 return
             }
             guard self.activityRule.isEpisodeActionable(episodeID) else {
                 self.log.info("start offer \(episodeID, privacy: .public) is no longer actionable")
+                self.reportStale(attempt)
                 return
             }
-            guard self.service.state.canStart else { return }
+            // Already recording by some other route: not stale, just already done.
+            guard self.service.state.canStart else {
+                self.withdrawAttempt(attempt)
+                return
+            }
             // ⚠️ The title the prompt promised, not whatever the field holds now: "Will save as X" has
             // to be true, and `service.title` can have been edited in the menu since.
             self.service.start(title: intendedTitle)
             // Honest until the recorder says otherwise; `trackRecordingIdentity` promotes or withdraws it.
             self.awaitingConfirmation = intendedTitle
             self.awaitingConfirmationAfter = self.recordingID
+            // ⚠️ "Starting…" only **after** the command is issued, never while the barrier is awaited.
+            // The panel's oldest rule is that it does not claim a recording is under way before one is.
             self.present(.startingRecording(title: intendedTitle))
         }
+    }
+
+    /// Say that the offer went stale — but only if this attempt is still the one on screen.
+    private func reportStale(_ attempt: UInt64) {
+        guard currentAttempt == attempt else { return }
+        guard case .checkingStart(let shown, _) = prompt, shown == attempt else { return }
+        present(.startNoLongerAvailable(attempt: attempt))
+    }
+
+    /// Take this attempt's panel down without saying anything — for the exits where there is nothing
+    /// useful to say, or nobody left to say it to.
+    private func withdrawAttempt(_ attempt: UInt64) {
+        guard currentAttempt == attempt else { return }
+        if case .checkingStart(let shown, _) = prompt, shown == attempt { prompt = nil }
     }
 
     public func declineStart(episodeID token: UInt64) {

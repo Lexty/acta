@@ -221,6 +221,16 @@ public struct MicrophoneActivityRule: Sendable {
     private var hasBaseline = false
     /// The episode a standing offer belongs to, so its end can be withdrawn exactly once.
     private var standingOffer: UInt64?
+
+    /// The last episode an offer was actually **raised** for — never cleared when the offer is resolved
+    /// or withdrawn.
+    ///
+    /// ⚠️ It is what separates "spent because we offered, and the application was holding when we did"
+    /// from "spent at baseline, because it was already holding when Acta started and we deliberately
+    /// stayed silent". Both are `.spent`, and only the first is evidence a person could act on. Without
+    /// it, tolerating an unreadable moment would let a baselined episode — one nobody was ever shown —
+    /// answer yes to a question about evidence.
+    private var lastOfferedEpisode: UInt64?
     /// The last name the system supplied for a key.
     ///
     /// ⚠️ **Remembered rather than read at offer time, and never invented.** The snapshot that
@@ -280,7 +290,21 @@ public struct MicrophoneActivityRule: Sendable {
 
         expireFinishedRearms(at: now)
 
-        if let standing = standingOffer, !isEpisodeLive(standing) {
+        // ⚠️ **Withdrawal asks the question acceptance asks — `isEpisodeActionable`, not a looser
+        // liveness.** It used to ask `isEpisodeLive`, which also accepts `.releasing` and an
+        // `.unreadable` wrapper around it. Those two predicates disagreeing opened a window as long as
+        // the whole re-arm — thirty seconds by default — in which the panel kept showing "Start
+        // Recording" for an episode the admission check would refuse. The user pressed it and nothing
+        // happened. The reason for refusing the click is exactly the reason the offer should already
+        // have come down, so there is one predicate now.
+        //
+        // ⚠️ The episode itself stays in `.releasing`: that is anti-duplicate bookkeeping, and it is why
+        // an application that re-acquires the input inside the window returns to `.spent` rather than to
+        // `.holding` and mints no second offer. Withdrawing the offer does **not** revive it on
+        // re-acquisition, and that cost is accepted deliberately — a brief device handoff can take away
+        // an offer nobody answered. Restoring it would mean admitting a click after the evidence that
+        // justified it had gone.
+        if let standing = standingOffer, !isEpisodeActionable(standing) {
             standingOffer = nil
             return .withdraw(episodeID: standing)
         }
@@ -490,6 +514,7 @@ public struct MicrophoneActivityRule: Sendable {
         guard standingOffer == nil else { return .none }
 
         standingOffer = episodeID
+        lastOfferedEpisode = episodeID
         return .offer(MicrophoneActivityEpisode(id: episodeID,
                                                 bundleID: bundleIdentifier(of: key),
                                                 displayName: names[key],
@@ -518,20 +543,23 @@ public struct MicrophoneActivityRule: Sendable {
     public func isEpisodeActionable(_ episodeID: UInt64) -> Bool {
         phases.values.contains { phase in
             if case .spent(let id) = phase { return id == episodeID }
-            return false
-        }
-    }
-
-    private func isEpisodeLive(_ episodeID: UInt64) -> Bool {
-        phases.values.contains { phase in
-            switch phase {
-            case .spent(let id), .releasing(_, let id): return id == episodeID
-            case .unreadable(let previous):
-                if case .spent(let id) = previous { return id == episodeID }
-                if case .releasing(_, let id) = previous { return id == episodeID }
-                return false
-            case .unseen, .idle, .holding: return false
+            // ⚠️ **An unreadable snapshot is not evidence that the application stopped** — it is the
+            // project's oldest rule about this reader, and three tests exist to hold it. What we last
+            // *observed* was this application holding the input, and a failed HAL read says nothing
+            // about whether it still is. So a wrapper around `.spent` stays actionable, and a wrapper
+            // around `.releasing` does not: there the last thing we saw was the release itself.
+            //
+            // ⚠️ This is a deliberate divergence from the review that asked for withdrawal on unknown
+            // evidence. That instruction was right about the *symptom* — a visible button must never be
+            // one the admission check would refuse — but the two predicates can be reconciled in either
+            // direction, and refusing on unknown would take a valid offer away over a transient read
+            // failure, with nothing to bring it back. Tolerating on both sides keeps the button and the
+            // click agreeing without treating a blind moment as an answer.
+            if case .unreadable(let previous) = phase, case .spent(let id) = previous {
+                // Only for an episode a prompt was actually raised for — see `lastOfferedEpisode`.
+                return id == episodeID && lastOfferedEpisode == episodeID
             }
+            return false
         }
     }
 

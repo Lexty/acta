@@ -35,6 +35,10 @@ final class ReminderPanelController {
         // panel that vanished first would leave the click looking like it did nothing.
         case .startingRecording: return 12
         case .startedRecording: return 3
+        // ⚠️ Long enough to read, short enough not to sit in the way. Both are answers to a press, so
+        // the user is looking at the panel when they appear.
+        case .checkingStart: return 12
+        case .startNoLongerAvailable: return 6
         }
     }
 
@@ -142,6 +146,10 @@ private struct ReminderPanelView: View {
                 started(title: title, confirmed: false)
             case .startedRecording(let title):
                 started(title: title, confirmed: true)
+            case .checkingStart(_, let title):
+                checking(title: title)
+            case .startNoLongerAvailable:
+                noLongerAvailable()
             }
         }
         .padding(12)
@@ -247,6 +255,35 @@ private struct ReminderPanelView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(confirmed ? "Recording" : "Starting…").font(.headline)
                 Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+
+    /// ⚠️ **The press is acknowledged before its outcome is known.** Between the click and the answer
+    /// the app awaits the microphone-settings barrier, which is not instant; this is what the user looks
+    /// at meanwhile. It does **not** say "Recording" — nothing is recording yet.
+    @ViewBuilder
+    private func checking(title: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            tile(systemImage: "clock", tint: .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Checking…").font(.headline)
+                Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+
+    /// ⚠️ **It names the offer, never the meeting.** Acta lost sight of an application's microphone
+    /// input; that is not evidence the call ended, and saying so would be stating a fact nobody has.
+    /// The second line is the way forward rather than an apology.
+    @ViewBuilder
+    private func noLongerAvailable() -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            tile(systemImage: "clock.badge.xmark", tint: .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This offer is no longer available").font(.headline)
+                Text("Open Acta to start a recording.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

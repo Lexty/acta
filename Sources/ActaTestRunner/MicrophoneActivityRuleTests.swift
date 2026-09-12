@@ -153,17 +153,30 @@ struct MicrophoneActivityRuleTests {
         #expect(Self.offeredEpisode(outcome) != nil)
     }
 
-    @Test("a brief release inside a call does not start a second episode")
-    func aShortReleaseDoesNotRearm() {
+    /// ⚠️ **The offer comes down on the release; the episode does not.** Those are two different
+    /// things and this test now asserts both, because conflating them was the defect: withdrawal used
+    /// to wait for the whole re-arm window while acceptance refused immediately, so for up to thirty
+    /// seconds the panel showed a "Start Recording" the admission check would decline. The user pressed
+    /// it and nothing happened.
+    ///
+    /// ⚠️ The **episode** staying alive is what this test was originally about and still guards: a
+    /// device handoff must not mint a second episode, so a re-acquisition returns to `.spent` and
+    /// offers nothing. The accepted cost is visible right here — after the handoff no new prompt
+    /// appears, so a brief blip does take away an offer nobody answered.
+    @Test("a release withdraws the offer, and the re-acquisition mints no second episode")
+    func aShortReleaseWithdrawsButDoesNotRearm() {
         var rule = Self.armedRule()
         let context = MicrophoneActivityRule.Context()
         _ = rule.observe(Self.holding([Self.slack]), at: Self.at(1), context: context)
         #expect(Self.offeredEpisode(rule.observe(Self.holding([Self.slack]), at: Self.at(4.1),
                                                  context: context)) != nil)
         // A device handoff: the input is released for five seconds, far short of the re-arm.
-        // ⚠️ Not withdrawn here: a released input inside the re-arm window is a handoff, not an ending,
-        // and the episode it belongs to is still the live one.
-        #expect(rule.observe(Self.quiet, at: Self.at(20), context: context) == .none)
+        #expect(rule.observe(Self.quiet, at: Self.at(20), context: context) == .withdraw(episodeID: 1))
+        // And the click it would have carried is refused from the same moment — one predicate.
+        #expect(rule.isEpisodeActionable(1) == false)
+        // Withdrawn once, not on every sample afterwards.
+        #expect(rule.observe(Self.quiet, at: Self.at(21), context: context) == .none)
+        // Re-acquired inside the re-arm: no second offer, and no revival of the first.
         #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(25), context: context) == .none)
         #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(40), context: context) == .none)
     }
@@ -175,10 +188,12 @@ struct MicrophoneActivityRuleTests {
         _ = rule.observe(Self.holding([Self.slack]), at: Self.at(1), context: context)
         #expect(Self.offeredEpisode(rule.observe(Self.holding([Self.slack]), at: Self.at(4.1),
                                                  context: context)) != nil)
-        _ = rule.observe(Self.quiet, at: Self.at(10), context: context)
-        // Thirty-one seconds of *observed* idleness closes the episode — and closing it is what makes
-        // a prompt still on screen stale, so the withdrawal lands on this very sample.
-        #expect(rule.observe(Self.quiet, at: Self.at(41), context: context) == .withdraw(episodeID: 1))
+        // ⚠️ The withdrawal is **here**, on the release itself, not thirty-one seconds later when the
+        // episode finally closes. That is the whole correction: the offer stops being acceptable the
+        // moment the input is dropped, so it must stop being *shown* at the same moment.
+        #expect(rule.observe(Self.quiet, at: Self.at(10), context: context) == .withdraw(episodeID: 1))
+        // Once. The episode goes on closing quietly in the background.
+        #expect(rule.observe(Self.quiet, at: Self.at(41), context: context) == .none)
         #expect(rule.observe(Self.holding([Self.slack]), at: Self.at(42), context: context) == .none)
         let second = rule.observe(Self.holding([Self.slack]), at: Self.at(46), context: context)
         #expect(Self.offeredEpisode(second) != nil)
