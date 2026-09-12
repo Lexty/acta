@@ -40,6 +40,47 @@ public enum ReminderPrompt: Equatable, Sendable {
     case startedRecording(title: String)
 }
 
+/// One prompt as handed to the screen, with the identity its acknowledgement must name.
+public struct ReminderPresentation: Equatable, Sendable {
+    /// Stable for the life of this prompt on screen; a new prompt, even an equal one, gets a new id.
+    public let id: UInt64
+    public let prompt: ReminderPrompt
+    /// Whole seconds left on the countdown this prompt carries, or `nil` when it carries none.
+    ///
+    /// ⚠️ **A rendering of the coordinator's deadline, never a source of it.** Nothing a presenter does
+    /// with this number reaches back into the countdown.
+    public let secondsRemaining: Int?
+
+    public init(id: UInt64, prompt: ReminderPrompt, secondsRemaining: Int?) {
+        self.id = id
+        self.prompt = prompt
+        self.secondsRemaining = secondsRemaining
+    }
+}
+
+/// What the coordinator talks to in order to put a prompt in front of the user.
+///
+/// ⚠️ **The contract exists because `prompt != nil` is not proof of presentation.** The coordinator
+/// cannot observe a screen: a published prompt may be drawn late, drawn on a display that is asleep, or
+/// not drawn at all. A countdown that may *act* therefore starts only when the presenter says, by id,
+/// that the prompt is on screen — `ReminderCoordinator.acknowledgePresentation(_:)` — and a presenter
+/// that stops being able to show it says that too — `ReminderCoordinator.presentationLost(_:)`. A
+/// presenter that never calls back authorises nothing.
+///
+/// ⚠️ **Showing and updating are different calls, on purpose.** `show` is a new prompt: it may place the
+/// panel, arm its dismissal and watch for clicks. `updateCountdown` is the same prompt with a new number,
+/// and must do none of those — a panel that re-placed itself every second would walk across the screen
+/// under the pointer and never let its own dismissal fire.
+@MainActor
+public protocol ReminderPresenting: AnyObject {
+    /// Put this presentation on screen, replacing whatever was there. Acknowledge it once it is visible.
+    func show(_ presentation: ReminderPresentation)
+    /// Redraw the countdown of the presentation already on screen, in place. Ignore any other id.
+    func updateCountdown(_ presentation: ReminderPresentation)
+    /// Take this presentation off the screen, if it is the one showing.
+    func withdraw(_ presentationID: UInt64)
+}
+
 /// One line of proof that the reminder tick is still running.
 ///
 /// ⚠️ **It does not fix the silence, it makes it observable.** On 2026-09-12 an instance that had been
@@ -120,7 +161,34 @@ public final class ReminderCoordinator: ObservableObject {
     private let log = Logger(subsystem: BuildFlavor.logSubsystem, category: "ReminderCoordinator")
 
     /// What the panel should show. `nil` means nothing.
-    @Published public private(set) var prompt: ReminderPrompt?
+    ///
+    /// ⚠️ **Every route that takes a prompt down passes through here**, so this is where the presenter
+    /// is told and where a countdown still attached to it is revoked. A call site that names a more
+    /// specific reason revokes first; this catches the ones that do not, including any added later.
+    @Published public private(set) var prompt: ReminderPrompt? {
+        didSet {
+            guard prompt == nil, oldValue != nil else { return }
+            revokeCountdown(.withdrawn)
+            presenter?.withdraw(presentation)
+        }
+    }
+
+    /// Who puts prompts on screen. `nil` shows nothing, and so acknowledges nothing.
+    ///
+    /// ⚠️ Weak: the app owns the panel, and a coordinator must not keep a window alive past it.
+    public weak var presenter: (any ReminderPresenting)?
+
+    /// The countdown attached to the prompt on screen, if it carries one — **the authoritative
+    /// deadline**. See `AcknowledgedCountdown`.
+    private(set) var countdown: AcknowledgedCountdown?
+    /// The last number handed to the presenter, so an unchanged second is not redrawn.
+    private var lastRenderedSeconds: Int?
+    /// The presentation whose countdown last ran its full acknowledged duration.
+    ///
+    /// ⚠️ **Authorisation, and nothing acts on it yet.** The stop offer that consumes it lands together
+    /// with its cancellation UI and the `AGENTS.md` exception that allows a timer to act; until then a
+    /// completed countdown takes its prompt down and records that it would have been allowed to.
+    private(set) var authorisedCountdown: UInt64?
 
     private let service: ControlAPI
     private let reader: any AudioProcessReading
@@ -300,6 +368,7 @@ public final class ReminderCoordinator: ObservableObject {
     /// Quit has begun. Called **synchronously** at quit initiation, before any finalisation.
     public func beginClosing() {
         isClosing = true
+        revokeCountdown(.closing)
         prompt = nil
         stop()
     }
@@ -426,6 +495,9 @@ public final class ReminderCoordinator: ObservableObject {
         }
 
         evaluateQuiet()
+        // ⚠️ **Last, after everything this tick observed.** Evidence that should cancel a countdown has to
+        // reach it before the countdown is asked whether it has run out.
+        evaluateCountdown()
     }
 
     /// Feed the start reminder's rule one snapshot, and act on what it says.
@@ -507,6 +579,10 @@ public final class ReminderCoordinator: ObservableObject {
         resetActivityRule()
         adoptReservedEpoch()
         quietRule.invalidate()
+        // ⚠️ **No catch-up after a wake.** A countdown the Mac slept through never gave the user the
+        // interval it promised; it is withdrawn, and only fresh evidence and a new, fully shown countdown
+        // may ask again.
+        if revokeCountdown(.observationLapsed) { prompt = nil }
         if case .offerToRecord = prompt {
             prompt = nil
         }
@@ -538,6 +614,10 @@ public final class ReminderCoordinator: ObservableObject {
         }
         if !settings.offersStopWhenQuiet, case .offerToStop = prompt {
             quietRule.offerResolved()
+            prompt = nil
+        }
+        // ⚠️ The countdown belongs to the release offer, and only that preference governs it.
+        if !settings.offersStopWhenOwnerReleases, revokeCountdown(.preferenceOff) {
             prompt = nil
         }
     }
@@ -656,17 +736,98 @@ public final class ReminderCoordinator: ObservableObject {
     }
 
     private func present(_ newPrompt: ReminderPrompt) {
+        present(newPrompt, countdown: nil)
+    }
+
+    /// Publish a prompt that carries a countdown. The countdown does not run until the presenter
+    /// acknowledges this presentation as on screen.
+    ///
+    /// ⚠️ **Internal, and nothing in production calls it yet.** The release stop offer is its consumer,
+    /// and it lands together with its cancellation UI rather than several commits ahead of it.
+    func presentCountdown(_ newPrompt: ReminderPrompt,
+                          configuration: AcknowledgedCountdown.Configuration = .default) {
+        present(newPrompt, countdown: configuration)
+    }
+
+    private func present(_ newPrompt: ReminderPrompt,
+                         countdown configuration: AcknowledgedCountdown.Configuration?) {
         // ⚠️ One at a time, never a stack. A second prompt replaces the first rather than queueing
         // behind it: two offers about two different moments, both stale by the time they are read, is
-        // worse than one.
-        //
+        // worse than one. A countdown on the prompt being replaced is revoked, never inherited.
+        revokeCountdown(.replaced)
         // ⚠️ **The deadline is set once per prompt and never extended by a redraw.** Re-publishing the
         // same offer must not buy it another twenty seconds; that is how an offer outlives the evidence
         // behind it.
         presentation &+= 1
         promptDeadline = now().addingTimeInterval(Self.lifetime(of: newPrompt))
         log.debug("prompt \(self.presentation, privacy: .public) presented, answerable for \(Self.lifetime(of: newPrompt), privacy: .public)s")
+        let attached = configuration.map { AcknowledgedCountdown(presentation: presentation, configuration: $0) }
+        countdown = attached
+        lastRenderedSeconds = attached?.fullSeconds
         prompt = newPrompt
+        // ⚠️ **After the state is in place.** A presenter may acknowledge from inside `show`, and that
+        // acknowledgement must find the countdown it names.
+        presenter?.show(ReminderPresentation(id: presentation, prompt: newPrompt,
+                                             secondsRemaining: attached?.fullSeconds))
+    }
+
+    // MARK: - The presenter contract
+
+    /// The presenter says this presentation is on screen.
+    ///
+    /// ⚠️ **The only thing that starts a countdown.** Its deadline is measured from here, on this
+    /// coordinator's clock; a second acknowledgement, or one for a presentation that has been replaced,
+    /// changes nothing.
+    public func acknowledgePresentation(_ id: UInt64) {
+        guard !isClosing, var current = countdown else { return }
+        guard current.acknowledge(presentation: id, at: now()) else { return }
+        countdown = current
+        log.info("countdown for prompt \(id, privacy: .public) acknowledged on screen")
+    }
+
+    /// The presenter can no longer show this presentation — the screen locked or went to sleep.
+    ///
+    /// ⚠️ **Withdraws a countdown, and leaves every other prompt alone.** A prompt without a countdown
+    /// authorises nothing by staying up, so losing sight of it changes nothing it could do.
+    public func presentationLost(_ id: UInt64) {
+        guard id == presentation, countdown?.presentation == id else { return }
+        if revokeCountdown(.presentationLost) {
+            log.info("countdown for prompt \(id, privacy: .public) lost its presentation")
+            prompt = nil
+        }
+    }
+
+    /// End the attached countdown early. Returns whether one was live.
+    @discardableResult
+    private func revokeCountdown(_ reason: AcknowledgedCountdown.Revocation) -> Bool {
+        guard var current = countdown, current.revoke(reason) else { return false }
+        countdown = current
+        log.info("countdown for prompt \(current.presentation, privacy: .public) revoked: \(String(describing: reason), privacy: .public)")
+        return true
+    }
+
+    /// Ask the countdown where it stands, and pass the answer on.
+    private func evaluateCountdown() {
+        guard !isClosing, var current = countdown else { return }
+        let outcome = current.evaluate(at: now())
+        countdown = current
+        switch outcome {
+        case .none:
+            break
+        case .remaining(let seconds):
+            guard seconds != lastRenderedSeconds, let shown = prompt else { return }
+            lastRenderedSeconds = seconds
+            presenter?.updateCountdown(ReminderPresentation(id: current.presentation, prompt: shown,
+                                                            secondsRemaining: seconds))
+        case .completed:
+            log.notice("countdown for prompt \(current.presentation, privacy: .public) ran its full acknowledged duration")
+            authorisedCountdown = current.presentation
+            prompt = nil
+        case .revoked(let reason):
+            let id = current.presentation
+            log.info("countdown for prompt \(id, privacy: .public) revoked: \(String(describing: reason), privacy: .public)")
+            prompt = nil
+        }
     }
 
     /// Test-facing: whether the rule still considers this token's episode actionable. It exists so a
@@ -896,6 +1057,7 @@ public final class ReminderCoordinator: ObservableObject {
     }
 
     public func dismiss() {
+        revokeCountdown(.dismissed)
         if case .offerToRecord(let shown, _, _, _, _) = prompt,
            let episodeID = episode(in: shown) {
             activityRule.offerResolved(episodeID: episodeID)

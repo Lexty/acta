@@ -1,4 +1,3 @@
-import Combine
 import SwiftUI
 import ActaKit
 import ActaRuntime
@@ -67,7 +66,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// without being asked.
     /// Reachable from the menu, which is the only thing that knows whether it is open.
     var reminders: AnyObject?
-    private var reminderObserver: AnyCancellable?
     /// Type-erased for the same reason `socketHost` is: the panel is macOS 15+ and this delegate is not
     /// gated.
     private var reminderPanelBox: AnyObject?
@@ -104,16 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // hosted: they read settings and state, and never write either without a click.
             let coordinator = ReminderCoordinator.live()
             reminders = coordinator
-            reminderPanelBox = ReminderPanelController()
-            reminderObserver = coordinator.$prompt.sink { [weak self] prompt in
-                guard let self else { return }
-                guard let panel = self.reminderPanelBox as? ReminderPanelController else { return }
-                if let prompt {
-                    panel.present(prompt, coordinator: coordinator)
-                } else {
-                    panel.dismiss()
-                }
-            }
+            // ⚠️ **The panel is the coordinator's presenter, not a subscriber to its prompt.** A countdown
+            // may only run from an acknowledged presentation, and a sink on `$prompt` has no way back.
+            // The coordinator holds it weakly; this box is what keeps it alive.
+            let panel = ReminderPanelController(coordinator: coordinator)
+            reminderPanelBox = panel
+            coordinator.presenter = panel
             coordinator.start()
 
             hostingTask = Task { @MainActor [weak self] in
@@ -139,7 +133,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         isTerminating = true
         hostingTask?.cancel()
-        reminderObserver?.cancel()
         if #available(macOS 15.0, *) {
             (reminders as? ReminderCoordinator)?.stop()
             (reminderPanelBox as? ReminderPanelController)?.dismiss()

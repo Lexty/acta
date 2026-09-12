@@ -17,13 +17,30 @@ import SwiftUI
 ///
 /// ⚠️ **No default key equivalent, deliberately.** The panel appears while the user is typing into a
 /// meeting; a Return or Space that answered it would be answered by accident.
+///
+/// ⚠️ **It is the coordinator's presenter, and keeps its half of that contract.** It acknowledges a
+/// presentation only once the panel is ordered in and its window reports itself visible, reports a
+/// presentation lost when the screen locks or sleeps or the window stops being visible, and updates a
+/// countdown **in place** — see `updateCountdown(_:)`. What it cannot prove is that a person saw it:
+/// rendered visibility is human acceptance, not something this class or its tests establish.
 @available(macOS 15.0, *)
 @MainActor
-final class ReminderPanelController {
+final class ReminderPanelController: ReminderPresenting {
     private var panel: NSPanel?
+    private var hosting: NSHostingView<ReminderPanelView>?
     private var dismissal: Timer?
     private var clickMonitor: Any?
     private weak var coordinator: ReminderCoordinator?
+    /// The presentation on screen, if any.
+    private var shownID: UInt64?
+    /// A presentation shown but not yet visible, waiting for its window to say so.
+    private var awaitingAcknowledgement: UInt64?
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    init(coordinator: ReminderCoordinator) {
+        self.coordinator = coordinator
+        watchForLostPresentation()
+    }
 
     /// How long each prompt stays up. **Expiry is always the safe outcome**: an expired offer to record
     /// records nothing, and an expired offer to stop keeps recording.
@@ -42,11 +59,14 @@ final class ReminderPanelController {
         }
     }
 
-    func present(_ prompt: ReminderPrompt, coordinator: ReminderCoordinator) {
-        self.coordinator = coordinator
-        let content = ReminderPanelView(prompt: prompt, coordinator: coordinator)
+    /// A new prompt: build, place, arm, watch. Everything `updateCountdown(_:)` must not repeat.
+    func show(_ presentation: ReminderPresentation) {
+        guard let coordinator else { return }
+        let prompt = presentation.prompt
+        let content = ReminderPanelView(presentation: presentation, coordinator: coordinator)
         let hosting = NSHostingView(rootView: content)
         hosting.frame = NSRect(x: 0, y: 0, width: 300, height: hosting.fittingSize.height)
+        self.hosting = hosting
 
         let existing = panel ?? makePanel()
         panel = existing
@@ -55,11 +75,32 @@ final class ReminderPanelController {
         position(existing)
         existing.orderFrontRegardless()
 
+        shownID = presentation.id
+        awaitingAcknowledgement = presentation.id
         arm(lifetime: Self.lifetime(of: prompt), for: prompt)
         watchForClicksOutside(for: prompt)
+        acknowledgeIfVisible()
+    }
+
+    /// The same prompt, a new number.
+    ///
+    /// ⚠️ **Only the content changes.** `show` re-places the panel from the pointer, re-arms the dismissal
+    /// timer and reinstalls the click monitor; doing that once a second would walk the panel across the
+    /// screen and reset its dismissal forever. The size is left alone too — resizing a window moves its
+    /// top edge, which is the edge anchored under the menu bar.
+    func updateCountdown(_ presentation: ReminderPresentation) {
+        guard presentation.id == shownID, let hosting, let coordinator else { return }
+        hosting.rootView = ReminderPanelView(presentation: presentation, coordinator: coordinator)
+    }
+
+    func withdraw(_ presentationID: UInt64) {
+        guard presentationID == shownID else { return }
+        dismiss()
     }
 
     func dismiss() {
+        shownID = nil
+        awaitingAcknowledgement = nil
         dismissal?.invalidate()
         dismissal = nil
         if let clickMonitor {
@@ -88,7 +129,62 @@ final class ReminderPanelController {
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.becomesKeyOnlyIfNeeded = true
+        // ⚠️ Occlusion is the window server's own answer to "can this be seen", which is the closest thing
+        // to presentation this process can observe. Visible acknowledges; not visible loses it.
+        let center = NotificationCenter.default
+        let token = center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                       object: panel, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.occlusionChanged() }
+        }
+        observers.append((center, token))
         return panel
+    }
+
+    // MARK: - Presentation evidence
+
+    private var isVisibleOnScreen: Bool {
+        guard let panel else { return false }
+        return panel.isVisible && panel.occlusionState.contains(.visible)
+    }
+
+    private func acknowledgeIfVisible() {
+        guard let pending = awaitingAcknowledgement, isVisibleOnScreen else { return }
+        awaitingAcknowledgement = nil
+        coordinator?.acknowledgePresentation(pending)
+    }
+
+    private func occlusionChanged() {
+        guard let shownID else { return }
+        if awaitingAcknowledgement != nil {
+            acknowledgeIfVisible()
+        } else if !isVisibleOnScreen {
+            coordinator?.presentationLost(shownID)
+        }
+    }
+
+    /// ⚠️ **A lock or a display sleep takes away the interval a countdown promised**, whether or not the
+    /// window server reports an occlusion change for it. Each is reported as lost; the coordinator
+    /// decides what that withdraws, and it withdraws nothing but a countdown.
+    private func watchForLostPresentation() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reportLost() }
+            }
+            observers.append((workspace, token))
+        }
+        let distributed = DistributedNotificationCenter.default()
+        let token = distributed.addObserver(forName: Notification.Name("com.apple.screenIsLocked"),
+                                            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reportLost() }
+        }
+        observers.append((distributed, token))
+    }
+
+    private func reportLost() {
+        guard let shownID else { return }
+        coordinator?.presentationLost(shownID)
     }
 
     /// Top right of the display the pointer is on, under the menu bar.
@@ -131,12 +227,12 @@ final class ReminderPanelController {
 
 @available(macOS 15.0, *)
 private struct ReminderPanelView: View {
-    let prompt: ReminderPrompt
+    let presentation: ReminderPresentation
     let coordinator: ReminderCoordinator
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            switch prompt {
+            switch presentation.prompt {
             case .offerToRecord(let episodeID, let application, let bundleID, let title, let mic):
                 offerToRecord(episodeID: episodeID, application: application, bundleID: bundleID,
                               title: title, microphone: mic)

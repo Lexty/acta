@@ -668,22 +668,85 @@ panel across the screen and reset its timer forever.
 **Files:** Modify `Sources/Acta/ReminderPanel.swift`, `Sources/ActaRuntime/ReminderCoordinator.swift`,
 Create `Sources/ActaTestRunner/ReminderPresenterTests.swift`
 
-- [ ] introduce a presenter protocol the coordinator talks to, with **acknowledgement**: the countdown
+- [x] introduce a presenter protocol the coordinator talks to, with **acknowledgement**: the countdown
       starts from acknowledged presentation, bound to a stable presentation identity
-- [ ] separate **initial presentation** from **updating an existing countdown** in the panel: an update
+- [x] separate **initial presentation** from **updating an existing countdown** in the panel: an update
       must not reposition, re-arm the dismissal timer or reinstall the monitor
-- [ ] the authoritative deadline lives in the coordinator and is never re-derived from a rendering
+- [x] the authoritative deadline lives in the coordinator and is never re-derived from a rendering
       update
-- [ ] revoke on: dismissal, replacement by another prompt, the preference being turned off, quit, and
+- [x] revoke on: dismissal, replacement by another prompt, the preference being turned off, quit, and
       loss of presentation eligibility
-- [ ] ⚠️ **sleep/lock/wake**: no catch-up stop after a wake in which the user never had the promised
+- [x] ⚠️ **sleep/lock/wake**: no catch-up stop after a wake in which the user never had the promised
       cancellation interval — withdraw, and require fresh release evidence and a newly presented full
       countdown
-- [ ] write tests through an **injected presenter**, including a **parked acknowledgement**
-- [ ] write a test: a stalled or unavailable presenter never authorises a stop
-- [ ] **negative control**: start the countdown on publication instead of acknowledgement → the parked
+- [x] write tests through an **injected presenter**, including a **parked acknowledgement**
+- [x] write a test: a stalled or unavailable presenter never authorises a stop
+- [x] **negative control**: start the countdown on publication instead of acknowledgement → the parked
       test fails
-- [ ] run `bash Scripts/test.sh`
+- [x] run `bash Scripts/test.sh`
+
+**Done.** 924 tests pass (907 before; 17 new, in `ReminderPresenterTests`). The contract has three parts:
+
+- `AcknowledgedCountdown` (ActaKit, pure, clock-injected): `awaitingAcknowledgement → running(deadline) →
+  completed | revoked(reason)`. Only `acknowledge(presentation:at:)` with the matching id starts it; a
+  second acknowledgement is refused, so nothing can move the deadline. An evaluation gap over 2.5 s — or a
+  backwards clock — revokes, checked **before** the deadline, so a wake past the deadline never completes.
+- `ReminderPresenting` (ActaRuntime): `show` / `updateCountdown` / `withdraw`, each carrying a
+  `ReminderPresentation` with a stable `id` (the coordinator's `presentation` counter). The presenter calls
+  back `acknowledgePresentation(_:)` and `presentationLost(_:)`. The coordinator holds it weakly; `nil`
+  shows nothing and so authorises nothing.
+- `ReminderCoordinator` owns the countdown. `presentCountdown(_:configuration:)` is **internal** and has no
+  production caller — Task 9 adds one. The tick evaluates it **last**, so evidence gathered in the same tick
+  reaches it first; `.remaining` is sent through `updateCountdown` only when the whole second changes.
+
+⚠️ **Decided here: what a completed countdown does before Task 9.** It records `authorisedCountdown` (the
+presentation id) and takes its prompt down. Nothing acts on it. Task 9 replaces that with the stop.
+
+⚠️ **Decided here: the panel is the presenter, not a `$prompt` subscriber.** `ActaApp` sets
+`coordinator.presenter = panel`; the Combine sink (and `import Combine` there) is gone. The panel acknowledges
+when `isVisible && occlusionState.contains(.visible)` — right after `orderFrontRegardless`, or on the next
+`didChangeOcclusionStateNotification`. It reports lost on occlusion becoming not-visible, `willSleep`,
+`screensDidSleep`, `sessionDidResignActive` and `com.apple.screenIsLocked`. The coordinator ignores a loss
+for a presentation that carries no countdown, so existing prompts behave as before.
+
+Revocation points: `dismiss()` (`.dismissed`), `present` of anything (`.replaced` — and the new prompt's
+countdown **overwrites** the old one, so nothing is inherited), release preference off (`.preferenceOff`),
+`beginClosing` (`.closing`), `presentationLost` (`.presentationLost`), the rebaseline and the countdown's own
+gap (`.observationLapsed`). A `didSet` on `prompt` revokes with `.withdrawn` on any other route to `nil` and
+tells the presenter to withdraw.
+
+⚠️ **Carried into Task 9:**
+- The countdown prompt needs its own `lifetime(of:)` in **both** switches; the panel's dismissal timer
+  otherwise dismisses it at whatever that case returns, which revokes it (`.dismissed`).
+- **No acknowledgement timeout.** A late acknowledgement still starts a *full* countdown, which keeps the
+  user's interval intact. It does not keep the release evidence fresh: Task 9 must revoke on
+  `ownerReturned` / `evidenceLost` whether the countdown is awaiting or running.
+- "Fresh release evidence" after a wake is not enforced here. The ownership rule's own gap revocation
+  provides it, and Task 9 must feed that rule, not a cached qualification.
+- A main thread stalled for more than 2.5 s between ticks revokes the countdown. That is the conservative
+  direction, and it is a judgement, not a measurement.
+
+**Negative controls, run** (each restored after, against the presenter suite):
+- Starting the countdown at publication (the plan's control) failed the named parked-acknowledgement test,
+  plus the stalled-presenter and no-presenter tests.
+- Removing the gap check failed the four gap and wake tests. Removing the rebaseline revocation failed only
+  the rebaseline test. Removing the preference revocation failed only the preference test, and removing the
+  lost-presentation revocation failed only the lost-presentation test.
+- Letting a prompt without a countdown keep the old one failed only the replacement test.
+- Sending updates through `show` failed only the in-place update test.
+- Letting a second acknowledgement reset the deadline failed the update test and the pure acknowledgement
+  test. Ignoring the id failed the stalled-presenter test and the pure acknowledgement test.
+- Removing the dismissal revocation, or the closing revocation, failed only its own test, each on the
+  reason alone, because the `didSet` then revokes with `.withdrawn`.
+- ⚠️ **Removing only the `didSet` revocation stayed green.** Every route that can take a countdown prompt
+  down today names its own reason, so the `didSet` has no route of its own to catch. It is there for routes
+  Task 9 adds; its presenter `withdraw` half *is* pinned, by the dismissal, lost-presentation and completion
+  tests.
+
+⚠️ **Not checked:** the panel. Acknowledging on visibility, reporting loss on lock and sleep, and an update
+that leaves the panel in place all live in the executable and need a human (see Post-Completion). Also not
+checked: `bash Scripts/lint.sh`, because `swiftlint` is not installed. No added line is over 140 columns;
+the one existing over-long log line in `present` moved and was not lengthened.
 
 ### Task 9: The stop offer, its UI, and the narrow exception — one increment
 
@@ -736,6 +799,9 @@ cancellation UI exists or before `AGENTS.md` says a timer may act.
 *Needs a human, a real call, and a real machine.*
 
 - The prompt **visible and clickable over a full-screen huddle**, on a second display, after unlock.
+- **The panel's half of the presenter contract** (Task 8): that a countdown is acknowledged only once the
+  panel is on screen, that locking the screen or sleeping the displays withdraws it, and that the
+  once-a-second update leaves the panel where it is and does not reset its dismissal.
 - Whether 25 s nominal feels right on a live call; the number is a judgement and may change on evidence.
 - **The long-uptime silence**: hours of uptime with Task 1's heartbeat, then a huddle. The plan
   deliberately does not pre-empt this diagnosis; if the tick has stopped, the heartbeat says so and the
