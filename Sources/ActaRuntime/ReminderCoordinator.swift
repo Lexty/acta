@@ -134,7 +134,8 @@ public final class ReminderCoordinator: ObservableObject {
             currentGeneration = summary.generation
             quietRule.beginGeneration(summary.generation)
         }
-        quietRule.ingest(summary, at: Date())
+        // ⚠️ The time the audio was measured, not the time this hop happened to run.
+        quietRule.ingest(summary, at: summary.observedAt)
         evaluateQuiet()
     }
 

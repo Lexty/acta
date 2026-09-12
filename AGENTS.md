@@ -547,6 +547,54 @@ reached the log while the other three reached the user.
   deallocates, so `pmset` cannot distinguish a proper release from a dropped token — that half needs
   an injected seam that counts calls.
 
+## The reminders
+
+Two prompts, added 2026-09-12: one offers to record when another application takes the microphone, one
+offers to stop when a recording has gone quiet. Both are off-limits to the socket and both are
+**offers**.
+
+**Nothing in this feature acts on its own.** A timer may withdraw a prompt; no timer may answer one. An
+expired offer to record records nothing; an expired offer to stop keeps recording. If you are changing
+this code and a path appears where a timeout starts or stops a recording, that is the bug, not a
+feature.
+
+**Say what was measured, not what it implies.** `kAudioProcessPropertyIsRunningInput` means the process
+runs IO with an active input stream — not that a meeting started. A muted participant usually keeps the
+stream open; a listen-only one may never open it. The stop rule measures *energy*, not speech: it is not
+a voice detector and must never be described as one. The prompts say "microphone activity" and "little
+audio activity" for exactly this reason.
+
+**Attribution is measured and mostly absent.** On this machine `NSRunningApplication` names 16 of 33
+audio processes, and a call in a Safari tab is held by `com.apple.WebKit.GPU`, "Safari Graphics and
+Media"; Chrome's audio is `com.google.Chrome.helper`. `activationPolicy == .regular` separates
+user-facing applications from helpers, so only a regular application's name may go in a prompt.
+Everything else is an unattributed prompt. Never map a helper to a parent application by guessing.
+
+**Unknown is never idle, and never quiet.** An unreadable property, a partial process list, a failed
+measurement, a stalled track, a generation change: each of these resets a clock rather than advancing
+one. Collapsing any of them into "nothing is happening" produces a second prompt for one conversation,
+or an offer to stop a live meeting. Every one of those has a regression test, and they were all found by
+executing the rule rather than by reading it.
+
+**The prompts are an in-app panel, and this was decided by measurement.** A `UNUserNotificationCenter`
+banner does not show its action buttons — they appear on hover, in both the Temporary and Persistent
+alert styles, verified with a registered two-action category. `UNNotificationSettings.alertStyle` is
+read-only, and time-sensitive delivery needs an entitlement this app does not have. So the panel is
+ours; it is **not** a notification, it does not respect Focus, and no copy anywhere may claim it does.
+
+**Identity travels with every prompt, and is re-checked at the admission point.** An episode staying
+*alive* through its anti-duplicate grace is not the same as a call still in progress
+(`isEpisodeActionable`, not `isEpisodeLive`). A start from a prompt awaits the same microphone barrier a
+socket `start` awaits, and re-checks quit, preference, episode and `canStart` after that await with no
+suspension before the command. Quit latches `beginClosing()` synchronously at `applicationShouldTerminate`,
+for the same reason the socket is torn down there.
+
+**The meter is a passenger.** It runs on the capture queue after the write, behind a gate read before
+anything else happens; with the stop reminder off, `AudioRecorder` does not call in at all. It keeps no
+audio, starts no tasks, and publishes one coarse value per track per half-second. If a change here can
+make a recording wait on analysis, the change is wrong.
+
+
 ## Not verified automatically (needs a human)
 - Granting TCC permissions (Screen Recording, Microphone) — only via System Settings.
 - Real audio capture — by running the app.

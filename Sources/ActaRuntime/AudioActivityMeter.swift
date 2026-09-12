@@ -145,8 +145,10 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
         lock.unlock()
 
         guard let emitted else { return }
+        // ⚠️ Stamped here, on the capture queue, where the audio actually was.
         publish(AudioActivitySummary(track: track, generation: tag,
-                                     duration: emitted.duration, power: emitted.power))
+                                     duration: emitted.duration, power: emitted.power,
+                                     observedAt: Date()))
     }
 
     // MARK: - Buffer arithmetic
@@ -195,18 +197,40 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
             return nil
         }
 
-        let isFloat = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
-        let isSignedInteger = asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+        // ⚠️ **Only layouts this meter positively decodes.** Endianness, packing and alignment are not
+        // decoration: a valid big-endian Int16 buffer read as host-endian yields a confident number
+        // about audio that was never there, and a high-aligned or padded layout reads the wrong bytes.
+        // Anything else is refused as unmeasurable, which the rule treats as unknown.
+        let flags = asbd.mFormatFlags
+        let isFloat = flags & kAudioFormatFlagIsFloat != 0
+        let isSignedInteger = flags & kAudioFormatFlagIsSignedInteger != 0
+        let isBigEndian = flags & kAudioFormatFlagIsBigEndian != 0
+        let isPacked = flags & kAudioFormatFlagIsPacked != 0
+        let isAlignedHigh = flags & kAudioFormatFlagIsAlignedHigh != 0
         let bits = asbd.mBitsPerChannel
+        guard !isBigEndian, isPacked, !isAlignedHigh else { return nil }
+        guard asbd.mSampleRate.isFinite else { return nil }
+        // The stream must describe whole frames of the width it claims.
+        let expectedChannels = Int(asbd.mChannelsPerFrame)
+        guard expectedChannels > 0, bits == 32 || bits == 16 else { return nil }
 
         var totalPower = 0.0
         var channelsSeen = 0
         var maximumFrames = 0
 
         for audioBuffer in UnsafeMutableAudioBufferListPointer(listPointer) {
-            guard let data = audioBuffer.mData, audioBuffer.mDataByteSize > 0 else { continue }
+            // ⚠️ **A missing or empty plane is refused, not skipped.** Skipping it would let a partial
+            // channel set become a confident measurement — precisely the "one bad buffer spoils the
+            // window" policy, quietly violated at the level below it.
+            guard let data = audioBuffer.mData, audioBuffer.mDataByteSize > 0 else { return nil }
             let interleaved = Int(audioBuffer.mNumberChannels)
-            guard interleaved > 0 else { continue }
+            guard interleaved > 0 else { return nil }
+            // The plane must hold whole frames of the declared width.
+            let bytesPerSample = Int(bits) / 8
+            guard bytesPerSample > 0,
+                  Int(audioBuffer.mDataByteSize) % (bytesPerSample * interleaved) == 0 else {
+                return nil
+            }
 
             if isFloat, bits == 32 {
                 let count = Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.size
@@ -239,7 +263,8 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
             }
         }
 
-        guard channelsSeen > 0, maximumFrames > 0 else { return nil }
+        // Every channel the format promised must have been accounted for.
+        guard channelsSeen == expectedChannels, maximumFrames > 0 else { return nil }
         return Measurement(meanSquare: totalPower / Double(channelsSeen),
                            frames: maximumFrames,
                            impliedDuration: Double(maximumFrames) / asbd.mSampleRate)

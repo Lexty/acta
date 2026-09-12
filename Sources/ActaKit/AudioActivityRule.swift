@@ -28,17 +28,25 @@ public struct AudioActivitySummary: Equatable, Sendable {
     public var generation: UInt64
     /// How much audio this summary covers, seconds.
     public var duration: TimeInterval
+    /// When the audio this summary covers was **measured**, not when it was delivered.
+    ///
+    /// ⚠️ **Carried rather than stamped on arrival.** The publication hops to the main actor; a backlog
+    /// there would turn audio measured a minute ago into evidence about now, and a quiet interval
+    /// computed from delivery times measures the scheduler rather than the room.
+    public var observedAt: Date
     /// Mean power over that audio in dBFS, or `nil` when it could not be measured.
     ///
     /// ⚠️ Digital silence is a **finite** value, not `-infinity`: exact zeroes are ordinary in a stream
     /// that has not started yet, and an infinity poisons every average it touches.
     public var power: Double?
 
-    public init(track: Track, generation: UInt64, duration: TimeInterval, power: Double?) {
+    public init(track: Track, generation: UInt64, duration: TimeInterval, power: Double?,
+                observedAt: Date = Date()) {
         self.track = track
         self.generation = generation
         self.duration = duration
         self.power = power
+        self.observedAt = observedAt
     }
 }
 
