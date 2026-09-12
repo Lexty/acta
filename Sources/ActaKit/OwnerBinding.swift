@@ -126,6 +126,10 @@ public enum OwnerAdmission: Equatable, Sendable {
         /// The latest evidence belongs to a different observation epoch from the one the prompt was
         /// minted in, so it cannot vouch for that prompt's episode.
         case evidenceFromAnotherEpoch
+        /// The latest evidence is older than the gap after which the tick throws its picture away. The epoch
+        /// alone cannot say so: it only moves when the next tick notices the gap, and an acceptance can
+        /// resume before that tick.
+        case evidenceStale
     }
 
     /// The binding, when there is one.

@@ -1110,12 +1110,22 @@ public final class ReminderCoordinator: ObservableObject {
     ///
     /// ⚠️ **Every answer starts a recording.** A withheld binding is logged with its reason and the start
     /// proceeds unbound.
+    ///
+    /// ⚠️ **`releaseEvidence` is only as current as the last tick.** The tick is what clears it when the
+    /// preference goes off and what moves the epoch after a gap, and an acceptance can resume between that
+    /// change and the tick that would notice it. So the preference and the evidence's age are read here, now.
     private func resolveOwner(episodeID: UInt64, bundleID: String?, application: String?,
                               acceptedEpoch: UInt64) -> OwnerAdmission {
         let admission: OwnerAdmission
-        if let observed = releaseEvidence {
+        let threshold = rebaselineThreshold.components
+        let maximumAge = TimeInterval(threshold.seconds) + Double(threshold.attoseconds) * 1e-18
+        if !service.settings.offersStopWhenOwnerReleases {
+            admission = .unbound(.releaseNotObserved)
+        } else if let observed = releaseEvidence {
             if observed.epoch != acceptedEpoch {
                 admission = .unbound(.evidenceFromAnotherEpoch)
+            } else if now().timeIntervalSince(observed.observedAt) > maximumAge {
+                admission = .unbound(.evidenceStale)
             } else {
                 admission = OwnerAdmission.admit(
                     episode: MicrophoneActivityEpisode(id: episodeID, bundleID: bundleID, displayName: nil),

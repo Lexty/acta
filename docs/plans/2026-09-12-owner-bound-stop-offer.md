@@ -634,6 +634,12 @@ also logs it at `.notice`. The controller stores it next to `currentDirectory` a
   countdown must hold its recording identity itself, not re-read the owner mid-stop.
 - With the release preference off at admission, the recording is `.unbound(.releaseNotObserved)`, and
   switching the preference on later does **not** bind it.
+- ⚠️ **Corrected in review (Codex): "re-checks time" was not true of the code.** `releaseEvidence` is only
+  as current as the last tick — the tick clears it when the preference goes off and moves the epoch after a
+  gap — so an acceptance resuming before that tick bound from a picture the tick was about to discard. The
+  resolver now reads the preference itself (off → `.releaseNotObserved`) and refuses evidence older than
+  `rebaselineThreshold` with a sixth reason, `.evidenceStale`. Tests: `staleEvidenceAtAdmissionStartsUnbound`
+  and `releasePreferenceIsRecheckedAtAdmission`; both failed against the unfixed resolver (admitted bound).
 - `ControlAPI.start(title:resolvingOwner:)` writes the title before the controller's guard, as
   `start(title:)` always has. The owner does not follow it: it is resolved after the guard.
 

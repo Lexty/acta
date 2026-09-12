@@ -557,6 +557,61 @@ struct ReminderCoordinatorTests {
         await stopAndSettle(harness)
     }
 
+    @Test("evidence older than an observation gap does not bind, even inside its epoch")
+    @available(macOS 15.0, *)
+    func staleEvidenceAtAdmissionStartsUnbound() async {
+        // ⚠️ **The epoch moves only when a tick notices the gap.** An acceptance resuming after a polling
+        // gap but before that tick still sees the old epoch, and the last `.held` reading in it would
+        // otherwise hand stop authority to a picture nobody has refreshed.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        let parked = await acceptParkedAtTheBarrier(token, harness, coordinator, gate, manager, devices)
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+        #expect(coordinator.releaseEvidence?.evidence.readings[.bundle(Self.slack)] == .held,
+                "the precondition is evidence that would bind")
+
+        let threshold = coordinator.rebaselineThreshold.components
+        clock.advance(TimeInterval(threshold.seconds) + 1)
+
+        gate.release()
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started, "stale evidence refused the start instead of leaving it unbound")
+        #expect(harness.controller.ownerAdmission == .unbound(.evidenceStale))
+        await stopAndSettle(harness)
+    }
+
+    @Test("switching the release reminder off during the barrier admits unbound before any tick")
+    @available(macOS 15.0, *)
+    func releasePreferenceIsRecheckedAtAdmission() async {
+        // ⚠️ **The evidence is cleared only on the next tick.** Binding from it would let a later re-enable
+        // offer to stop a recording that was admitted while the user had the offer switched off.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        let parked = await acceptParkedAtTheBarrier(token, harness, coordinator, gate, manager, devices)
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        var settings = harness.controller.settings
+        settings.offersStopWhenOwnerReleases = false
+        harness.controller.settings = settings
+        #expect(coordinator.releaseEvidence != nil, "the precondition is evidence no tick has discarded yet")
+
+        gate.release()
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started, "a preference switched off refused the start instead of leaving it unbound")
+        #expect(harness.controller.ownerAdmission == .unbound(.releaseNotObserved))
+        await stopAndSettle(harness)
+    }
+
     @Test("evidence from a finished recording cannot warm its successor")
     @available(macOS 15.0, *)
     func queuedEvidenceIsRefusedAfterAReplacement() async {
