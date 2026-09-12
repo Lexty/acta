@@ -19,8 +19,9 @@
 // ⚠️ **The sampling interval is a floor on what can be seen, not a measurement of the signal.** At
 // 250 ms, a release and re-acquisition inside one interval is invisible. Measured on 2026-09-12 with
 // Slack 4.52.155 on macOS 26.6.2: every huddle join was followed within 1.4–2.4 s by a release and
-// re-acquisition lasting ~270 ms — the same order as the interval, so shorter flaps may exist and go
-// unseen. Anything built on this signal must qualify a release as "false continuously for N", never as
+// re-acquisition. Three flaps were seen: 273 ms, 266 ms and 551 ms. They are the same order as the
+// interval, so shorter ones may exist and go unseen, and they are intervals between observed states
+// rather than physical durations — do not tune a threshold to them. Anything built on this signal must qualify a release as "false continuously for N", never as
 // "a sample said false", or it will stop a recording two seconds into a call.
 //
 // Also measured in that run, and both are load-bearing: muting does **not** release the input (Slack

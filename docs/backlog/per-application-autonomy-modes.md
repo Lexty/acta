@@ -135,6 +135,32 @@ discover:
   actions without stopping or deleting audio already captured. Define precedence against "Never for this
   app" and the two existing switches. Keep every mode **off `WireSettings`** and preserve it across
   every wire round-trip, as `reminderExcludedBundleIDs` already is.
+- **Ownership survives an unqualified release** — added after the flap was measured, and it is the
+  contract the flap forces. Track `held → release-candidate → qualified-release` **separately** from
+  the prompt rule's spent/re-arm phases. While a release is unqualified: keep capturing, and show no
+  stop prompt. Any positive input from the **same owner** cancels the candidate and the countdown and
+  keeps the *same* session — never stop and restart to compensate for a flap, which would fragment a
+  recording for no reason. Unknown evidence, or an observation gap, **revokes** qualification: no
+  countdown may commit on stale evidence. After a cancellation, a fresh full release interval is
+  required before another stop attempt. Release qualification and the countdown are two different
+  durations and the user-visible total is the sum — say what it is.
+- **"Continuously released" needs a definition that polling can actually satisfy.** A sufficiently
+  fresh *sequence* of released observations spanning N on the monotonic clock, with a maximum
+  permitted gap between samples. One false sample followed by a late callback does not qualify.
+  ⚠️ Polling cannot prove the absence of sub-sample holds — and the production observer runs at 1 Hz
+  while the trace that found the flaps ran at 250 ms, so they see different worlds. Test the rule by
+  replaying these recorded events at several 1 Hz sampling offsets, and cover the **two-flap** sequence
+  actually observed, not a single clean release and re-acquire.
+- **Qualifier clocks and owner identity live outside the prompt slot.** Dismissing or consuming a toast
+  must not delete the binding, and a brief re-acquisition must not create a second recording. The final
+  stop admission still re-checks recording identity, ownership, settings, quit state and a *fresh*
+  qualified release after every await.
+- ⚠️ **"Another app still holds the input, so demote the auto-stop" was wrong, and the measurement is
+  what killed it.** `com.apple.CoreSpeech` holds the input persistently on this machine — so that rule
+  would let a system speech service veto every automatic stop, forever. A competing owner has to be
+  defined narrowly: another *enrolled* meeting scope observed active during this recording, not any
+  system process holding input. How unknown competing activity is treated is a policy choice that still
+  has to be made. The binding stays with the original owner and is never transferred.
 - **Lifecycle defaults**: startup and wake must not auto-start because an application already holds the
   input, nor auto-stop because observation was lost. After a crash, recover the audio but do not resume
   an armed countdown or infer permission for a new recording from an old one. Revalidate every pending
@@ -253,27 +279,42 @@ Captured 2026-09-12 in one uninterrupted run. **macOS 26.6.2 (25G83), Slack 4.52
 ```
 
 ⚠️ **The finding that changes the design: holding is not smooth.** Every join was followed within
-1.4–2.4 s by a release and re-acquisition lasting ~270 ms. **An auto-stop firing on the first observed
-release would stop the recording two seconds into the call.** A debounce is not a precaution here, it
-is a measured requirement. And the flaps (266–273 ms) are the same order as the 250 ms sampling
-interval, so **shorter ones may exist unseen**: the real signal is at least this noisy and possibly
-noisier. Any release qualification must be expressed as "released continuously for N", never as "a
-sample said false".
+1.4–2.4 s by a release and re-acquisition. Three flaps were observed, of **273 ms, 266 ms and 551 ms**
+— the last on the second join. ⚠️ The first version of this paragraph said "~270 ms" and "266–273 ms",
+**omitting the longest gap, which is twice the others**; the raw trace above had it all along. Anyone
+tempted to pick a threshold from these numbers should not: they are intervals between *observed
+states*, not physical release durations, and the sampling interval bounds them from below.
 
-**Mute does not release the input.** The user muted and unmuted shortly before leaving huddle #1 —
-roughly 13:22:45–56 — and there is no transition in that range. The decisive control is huddle #2,
-where nothing was muted and the join flap happened anyway: the flap belongs to joining, not to muting.
-So a recording will not be stopped by someone muting themselves, which the naive reading of "released
-the microphone" would have got wrong.
+**An auto-stop firing on the first observed release would stop a running recording two seconds into
+the call.** A debounce is not a precaution here, it is a measured requirement. ⚠️ That statement is
+about a recording that is **already running** — started by hand, or by an earlier automatic start. It
+is *not* demonstrated for the current qualified-*start* rule, whose hold is
+`RecordingSettings.microphoneActivityHold` = 3 s: both initial holds in this trace (1.9 s, 1.4 s) are
+shorter than that, so today's rule would not have offered until after a stable re-acquisition anyway.
+
+And because the flaps are the same order as the 250 ms sampling interval, **shorter ones may exist
+unseen**. Any release qualification must therefore be expressed as "released continuously for N",
+never as "a sample said false".
+
+**Mute caused no observed release in the interval tested.** The user muted and unmuted shortly before
+leaving huddle #1 — roughly 13:22:45–56 — and there is no transition in that range. Huddle #2, where
+nothing was muted and the join flap happened anyway, shows that muting is **not necessary** for a
+join-associated flap. ⚠️ That is not a proof of mechanism: it says muting did not release the input
+*here*, not that Slack never releases on mute. It is still enough to reject the naive reading of
+"released the microphone means the call ended", which would have stopped a recording the moment its
+owner muted.
 
 **The helper is not restarted between calls.** `pid=81379 object=182` in every transition, across both
-huddles. A pid-keyed mode would have survived *this* sequence — so pid turnover is not the argument
-against pid keys; the argument is that nothing guarantees it, and the bundle key does not depend on it.
-⚠️ Still unmeasured: recurrence across a **Slack restart**, which is the case that actually decides it.
+huddles. A pid-keyed mode would have survived *this* sequence. ⚠️ That does **not** weaken the case
+against pid-keyed persistent preferences: restart, crash and relaunch are part of an application's
+ordinary lifetime, not hypothetical exceptions, and a preference that silently stops applying after a
+relaunch is worse than one that was never offered. Recurrence of the *bundle* key across a Slack
+restart is still unmeasured, and that is the measurement that settles it.
 
-**Every release was "object present, input now false", never a disappearance.** The process stays alive
-and observable across the whole sequence, so an owner-tracking observer does not have to distinguish
-"let go" from "died" for this application.
+**Every release in this trace was "object present, input now false", never a disappearance.** ⚠️ That
+describes this five-minute sequence and nothing more: quitting or crashing Slack still exists, so
+disappearance and unknown must stay in the owner contract rather than being designed out on the
+strength of one trace in which nobody quit anything.
 
 ### Scope ambiguity, which the key does not solve
 
