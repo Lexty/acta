@@ -140,6 +140,90 @@ discover:
   an armed countdown or infer permission for a new recording from an old one. Revalidate every pending
   action against current settings, owner, recording identity, quit state and policy after each await.
 
+## What the research and the first measurements established, 2026-09-12
+
+Asked for by the user. Two independent efforts: a direct HAL probe on this machine
+(`Scripts/probe-audio-process-objects.swift`, committed so it can be re-run) and a web search by
+Codex. **The headline is that the durable key exists far more often than the original assessment
+assumed** — but nothing here settles Slack or Teams, which is the case the proposal is actually about.
+
+### Documented by Apple, verified in the installed SDK headers
+
+- The whole per-process interface is five selectors, and that is all there is:
+  `kAudioProcessPropertyPID 'ppid'`, `BundleID 'pbid'`, `Devices 'pdv#'`, `IsRunning 'pir?'`,
+  `IsRunningInput 'piri'`, `IsRunningOutput 'piro'`
+  (`MacOSX.sdk/.../CoreAudio.framework/Headers/AudioHardware.h:1977-1983`). ⚠️ **`'ppid'` is the
+  process's own pid, not a parent pid** — the four-character code invites exactly that misreading.
+  There is **no** durable per-process UID, no responsible-application id, no audio-client name and no
+  parent relation.
+- The header says only "A CFString that contains the bundle ID of the process" (line 1956). It does not
+  say when it is absent. Apple's Swift surface goes one step further and no further: `var bundleID:
+  String? { get throws }` — optionality is documented, the absence matrix is not.
+  <https://developer.apple.com/documentation/coreaudio/audiohardwareprocess/bundleid>
+- `AudioHardwareObject.owner` is **audio-object** ownership, not the responsible application, and the
+  generic object `name` carries no persistence guarantee. So "nothing like an owner exists" would be
+  wrong; "nothing documented as the durable application identity this needs" is right.
+- `AVCaptureDevice.isInUseByAnotherApplication` answers *whether*, never *who*.
+
+### Measured here, 2026-09-12, macOS 15
+
+32 process objects. **29 carried a bundle identifier** — including several that
+`NSRunningApplication` could not resolve at all (`com.apple.CoreSpeech`, `com.apple.audiomxd`,
+`com.apple.cmio.ContinuityCaptureAgent`). So the bundle id is a **more** available identifier than the
+display name, which inverts the assumption the first assessment was built on, and a missing name must
+never be allowed to discard a valid HAL key.
+
+Chrome appeared as three objects: `com.google.Chrome` (regular) and two helpers, both reporting
+`com.google.Chrome.helper`, one resolving to "Google Chrome Helper" (accessory) and one not resolving
+at all. `com.apple.WebKit.GPU` was present as "Safari Graphics and Media".
+
+⚠️ **What this snapshot does and does not show.** It shows those objects exist with those identifiers.
+It does **not** show that the Chrome helper is what holds input during a Chrome call — no Chrome call
+was running, and `IsRunningInput` was true only for `com.apple.CoreSpeech`. That the helper is the
+capture holder comes from an implementer's report, not from this measurement
+(<https://macnotetaker.com/blog/which-app-is-using-mic-coreaudio-process-objects>, 2026-07-23, which
+also reports `com.apple.WebKit.GPU` for WebKit capture and notes bare binaries with empty bundle ids).
+A single snapshot also says nothing about **stability across process restarts**, which is the property
+an enrolment actually depends on.
+
+`com.apple.CoreSpeech` (pid 1136) was holding the input at two observations about seven minutes apart,
+same pid. A system speech service, not a meeting — a live instance of the false-positive class, and
+evidence that holding can be *long*, not only brief.
+
+### Scope ambiguity, which the key does not solve
+
+A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
+audio use a call". `com.google.Chrome.helper` is shared across all Chrome media use and says nothing
+about the site; **`com.apple.WebKit.GPU` is worse**, being shared by every WebKit-hosting application.
+
+### Alternatives, and what they cost
+
+- **EndpointSecurity** has genuine attribution metadata — `es_process_t.responsible_audit_token`,
+  `parent_audit_token`, `signing_id`, `team_id` — but there is **no documented microphone
+  acquisition/release event**, and `ES_EVENT_TYPE_NOTIFY_TCC_MODIFY` is a *permission change*, not a
+  use. Already-granted access starts repeatedly with no TCC event. It also needs the ES entitlement and
+  Full Disk Access, which is a large deployment change from what Acta is today.
+- **OverSight** achieves attribution through device-state listeners plus `com.apple.coremedia` system
+  log messages, read with **private LoggingSupport APIs** (Wardle, *The Art of Mac Malware* vol. 2 ch.
+  12, pp. 288-292, which warns Apple changes those messages). Its own product page admits attribution
+  sometimes fails. Evidence that a route exists; not a supported one.
+- No public API returning Control Center's own attribution list was found. The orange indicator proves
+  the **system** can attribute; it does not give third parties that bookkeeping.
+
+### Unverified, and to be treated as such
+
+A secondary source claims **Slack opens a brief audio session outside huddles** — for the mute button
+and device-availability checks. If true, an enrolled "always record for Slack" would fire outside
+calls. Neither of us found primary evidence. It is also not automatically fatal: whether a brief
+session clears the qualification hold depends on its duration, which nobody has measured. **Test it
+rather than inherit it.**
+
+### The decision this supports
+
+Per-application enrolment stays viable — for identity scopes that have been *measured* and are
+*understandable*. Unknown or shared identities stay manual: keep the offer, omit the "always" controls.
+One application failing to be identifiable does not sink the feature.
+
 ## The measurement that comes first
 
 ⚠️ **Mint-time logging alone is not enough** — that was the original plan and Codex is right that it
