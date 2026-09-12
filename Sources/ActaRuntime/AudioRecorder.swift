@@ -346,6 +346,11 @@ public final class AudioRecorder: @unchecked Sendable {
             log.info("Skipping a restart for a capture that has already been replaced")
             throw StartupFailure.captureSuperseded
         }
+        // ⚠️ **The meter's calibration describes audio that is about to stop existing.** A restart can
+        // change the device and the format, so a floor learned before it is a confident number about a
+        // signal that is gone. Invalidating here also mints a fresh epoch, which is what stops a partial
+        // window from before the restart being published as if it belonged to after.
+        activityMeter?.invalidate()
         // ⚠️ Checked at **admission**, before the source is torn down, so a late switch cannot even
         // interrupt a finished recording — never mind reopen one.
         guard !isStopped else {

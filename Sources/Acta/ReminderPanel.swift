@@ -48,8 +48,8 @@ final class ReminderPanelController {
         position(existing)
         existing.orderFrontRegardless()
 
-        arm(lifetime: Self.lifetime(of: prompt))
-        watchForClicksOutside()
+        arm(lifetime: Self.lifetime(of: prompt), for: prompt)
+        watchForClicksOutside(for: prompt)
     }
 
     func dismiss() {
@@ -98,21 +98,24 @@ final class ReminderPanelController {
         panel.setFrameOrigin(origin)
     }
 
-    private func arm(lifetime: TimeInterval) {
+    /// ⚠️ **Scoped to the prompt it was armed for.** These callbacks hop through a `Task`, so an expiry
+    /// enqueued for prompt A can land after prompt B has replaced it; dismissing "whatever is showing"
+    /// would take B off the screen a fraction of a second after it appeared.
+    private func arm(lifetime: TimeInterval, for prompt: ReminderPrompt) {
         dismissal?.invalidate()
         dismissal = Timer.scheduledTimer(withTimeInterval: lifetime, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 // ⚠️ Expiry dismisses. It never answers.
-                self?.coordinator?.dismiss()
+                self?.coordinator?.dismiss(prompt)
             }
         }
     }
 
-    private func watchForClicksOutside() {
-        guard clickMonitor == nil else { return }
+    private func watchForClicksOutside(for prompt: ReminderPrompt) {
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] _ in
-            Task { @MainActor in self?.coordinator?.dismiss() }
+            Task { @MainActor in self?.coordinator?.dismiss(prompt) }
         }
     }
 }

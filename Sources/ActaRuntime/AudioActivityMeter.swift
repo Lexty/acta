@@ -19,6 +19,9 @@ public protocol AudioActivityMetering: AnyObject, Sendable {
     func measure(_ buffer: CMSampleBuffer,
                  track: AudioActivitySummary.Track,
                  generation: UInt64)
+    /// A capture restart, a device change or a format change: whatever was accumulated describes audio
+    /// that no longer exists.
+    func invalidate()
 }
 
 /// Measures how loud each capture track is, coarsely, for the stop reminder.
@@ -45,10 +48,33 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
     private var accumulators: [AudioActivitySummary.Track: ActivityAccumulator] = [:]
     private let interval: TimeInterval
 
+    /// The epoch every summary is tagged with.
+    ///
+    /// ⚠️ **Globally monotonic, and emphatically not the recorder's per-instance generation.** That one
+    /// starts at zero in every `AudioRecorder`, so a recording that restarted to generation 3 was
+    /// followed by a fresh recorder emitting generation 1 — and a consumer that only adopts rising
+    /// numbers would drop the new recording's measurements for ever, silently. A global counter cannot
+    /// collide across sessions.
+    private var epoch: UInt64
+    private static let epochs = EpochCounter()
+    private static func mintEpoch() -> UInt64 { epochs.next() }
+
+    /// A monotonic counter, safe to reach from any queue.
+    private final class EpochCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 1
+        func next() -> UInt64 {
+            lock.lock(); defer { lock.unlock() }
+            defer { value += 1 }
+            return value
+        }
+    }
+
     public init(enabled: Bool, interval: TimeInterval = 0.5, publish: @escaping Publish) {
         self.enabled = enabled
         self.interval = interval
         self.publish = publish
+        self.epoch = Self.mintEpoch()
     }
 
     public var isEnabled: Bool {
@@ -65,6 +91,9 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
         lock.lock()
         enabled = newValue
         accumulators.removeAll()
+        // ⚠️ A new epoch, so measurement already under way cannot write its half-finished window back
+        // after the switch and be published as current.
+        epoch = Self.mintEpoch()
         lock.unlock()
     }
 
@@ -73,6 +102,7 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
     public func invalidate() {
         lock.lock()
         accumulators.removeAll()
+        epoch = Self.mintEpoch()
         lock.unlock()
     }
 
@@ -82,6 +112,11 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
                         generation: UInt64) {
         lock.lock()
         guard enabled else { lock.unlock(); return }
+        // ⚠️ The epoch is captured **before** the walk and re-checked before the result is stored or
+        // published. The walk happens with the lock released, so a `setEnabled(false)` or an
+        // `invalidate()` can land in the middle of it; without the fence, the discarded window would be
+        // written back afterwards and a quick off-on would publish it as current.
+        let startingEpoch = epoch
         var accumulator = accumulators[track] ?? ActivityAccumulator(interval: interval)
         lock.unlock()
 
@@ -101,12 +136,16 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
 
         let emitted = accumulator.emit()
         lock.lock()
+        guard enabled, epoch == startingEpoch else {
+            lock.unlock()
+            return
+        }
         accumulators[track] = accumulator
-        let stillEnabled = enabled
+        let tag = epoch
         lock.unlock()
 
-        guard stillEnabled, let emitted else { return }
-        publish(AudioActivitySummary(track: track, generation: generation,
+        guard let emitted else { return }
+        publish(AudioActivitySummary(track: track, generation: tag,
                                      duration: emitted.duration, power: emitted.power))
     }
 

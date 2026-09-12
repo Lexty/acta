@@ -362,6 +362,37 @@ public final class ControlViewModel: ObservableObject {
                 set: { [weak self] in self?.update(.deleteSegmentsAfterAssembly($0)) })
     }
 
+    // MARK: - Reminders
+
+    public var offersRecordingBinding: Binding<Bool> {
+        Binding(get: { [weak self] in self?.api.settings.offersRecordingWhenMicrophoneBusy
+                          ?? RecordingSettings.default.offersRecordingWhenMicrophoneBusy },
+                set: { [weak self] in self?.update(.offersRecordingWhenMicrophoneBusy($0)) })
+    }
+
+    public var offersStopBinding: Binding<Bool> {
+        Binding(get: { [weak self] in self?.api.settings.offersStopWhenQuiet
+                          ?? RecordingSettings.default.offersStopWhenQuiet },
+                set: { [weak self] in self?.update(.offersStopWhenQuiet($0)) })
+    }
+
+    public var quietMinutesBinding: Binding<Int> {
+        Binding(get: { [weak self] in self?.api.settings.quietMinutesBeforeStopOffer
+                          ?? RecordingSettings.default.quietMinutesBeforeStopOffer },
+                set: { [weak self] in self?.update(.quietMinutesBeforeStopOffer($0)) })
+    }
+
+    /// The excluded applications, in the order they were added.
+    public var excludedBundleIDs: [String] { api.settings.reminderExcludedBundleIDs }
+
+    /// ⚠️ **Remove-only from the UI**, because adding is not a thing a person can do sensibly here: the
+    /// identifier they would have to type is `com.google.Chrome.helper`, which they have no way to know.
+    /// Entries arrive from the prompt's own "never for this app", where the identifier is the one that
+    /// was actually observed holding the input.
+    public func removeExcludedBundleID(_ bundleID: String) {
+        update(.reminderExcludedBundleIDs(excludedBundleIDs.filter { $0 != bundleID }))
+    }
+
     // MARK: - Commands
 
     /// Start recording. The title written through `setTitle` is already the façade's `title`, so this

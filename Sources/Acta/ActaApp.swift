@@ -160,6 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The idle branch used to return `.terminateNow` immediately, which meant the microphone shutdown
     /// it had just started never ran at all.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // ⚠️ **Synchronously, at quit *initiation*, for the same reason the socket is torn down here.**
+        // A reminder still on screen could otherwise admit a start into the `.terminateLater`
+        // finalisation — the very window the socket teardown exists to close.
+        if #available(macOS 15.0, *) {
+            (reminders as? ReminderCoordinator)?.beginClosing()
+            (reminderPanelBox as? ReminderPanelController)?.dismiss()
+        }
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {

@@ -43,6 +43,14 @@ public final class ReminderCoordinator: ObservableObject {
     private var activityRule = MicrophoneActivityRule()
     private var quietRule = AudioActivityRule()
     private var pollTask: Task<Void, Never>?
+    private var stateTask: Task<Void, Never>?
+    /// Latched at quit **initiation**, synchronously.
+    ///
+    /// ⚠️ **The same window the socket teardown exists to close.** `applicationShouldTerminate` begins a
+    /// `.terminateLater` finalisation; a prompt still on screen could otherwise admit a start into it.
+    /// Stopping the coordinator in `applicationWillTerminate` is too late — that runs *after* the
+    /// finalisation.
+    private var isClosing = false
 
     /// Whether the menu is open, so a prompt does not duplicate what is already on screen.
     public var isMenuOpen = false
@@ -85,15 +93,34 @@ public final class ReminderCoordinator: ObservableObject {
         }
         pollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.poll()
+                self?.tick()
                 try? await Task.sleep(for: Self.pollInterval)
             }
         }
+        // ⚠️ **Recording identity comes from the state stream, not from sampling a Boolean once a
+        // second.** A recording that stops and another that starts between two polls left the sampled
+        // flag true throughout, so the id never changed — and a stop prompt raised for the first could
+        // stop the second. The stream emits on every transition.
+        stateTask = Task { @MainActor [weak self] in
+            guard let stream = self?.service.states() else { return }
+            for await state in stream {
+                self?.trackRecordingIdentity(state)
+            }
+        }
+    }
+
+    /// Quit has begun. Called **synchronously** at quit initiation, before any finalisation.
+    public func beginClosing() {
+        isClosing = true
+        prompt = nil
+        stop()
     }
 
     public func stop() {
         pollTask?.cancel()
         pollTask = nil
+        stateTask?.cancel()
+        stateTask = nil
         ActivitySink.shared.setHandler(nil)
         ActivitySink.shared.setEnabled(false)
     }
@@ -113,15 +140,22 @@ public final class ReminderCoordinator: ObservableObject {
 
     // MARK: - Polling
 
-    private func poll() {
+    /// One observation step.
+    ///
+    /// ⚠️ **Public so it can be driven.** Production calls this from a one-second timer; a test calls it
+    /// directly, which is the only way the admission rules — a stale episode, a quit already begun, a
+    /// preference switched off between the prompt and the click — can be decided rather than raced.
+    public func tick() {
+        guard !isClosing else { return }
         let settings = service.settings
+        applyPreferenceChanges(settings)
         quietRule.setQuietInterval(TimeInterval(settings.quietMinutesBeforeStopOffer * 60))
         // ⚠️ Applied to the *live* meter too, not only to the next one built: switching the reminder off
         // during a recording has to stop the measuring there and then, and switching it on has to start
         // a fresh warm-up rather than resume an estimate nobody was allowed to build.
         ActivitySink.shared.setEnabled(settings.offersStopWhenQuiet)
         if !settings.offersStopWhenQuiet { quietRule.invalidate() }
-        trackRecordingIdentity()
+        trackRecordingIdentity(service.state)
 
         let context = MicrophoneActivityRule.Context(
             isEnabled: settings.offersRecordingWhenMicrophoneBusy,
@@ -130,6 +164,11 @@ public final class ReminderCoordinator: ObservableObject {
             excludedBundleIDs: Set(settings.reminderExcludedBundleIDs),
             ownBundleIDs: Self.ownBundleIDs,
             ownPIDs: [ProcessInfo.processInfo.processIdentifier])
+
+        // ⚠️ **The HAL is not read at all when the reminder is off.** Keeping the rule's episode state
+        // warm is not worth a property walk per second for a feature nobody asked for; a re-enable
+        // rebaselines instead.
+        guard settings.offersRecordingWhenMicrophoneBusy else { return }
 
         switch activityRule.observe(reader.readSnapshot(), at: Date(), context: context) {
         case .none:
@@ -147,15 +186,32 @@ public final class ReminderCoordinator: ObservableObject {
         evaluateQuiet()
     }
 
+    /// A preference switched off must take the prompt it governs off the screen, and must never act on
+    /// the recording while doing so.
+    private func applyPreferenceChanges(_ settings: RecordingSettings) {
+        if !settings.offersRecordingWhenMicrophoneBusy {
+            if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
+                activityRule.offerResolved(episodeID: episodeID)
+                prompt = nil
+            }
+            // Re-enabling starts from a fresh baseline rather than from episodes nobody was watching.
+            activityRule = MicrophoneActivityRule()
+        }
+        if !settings.offersStopWhenQuiet, case .offerToStop = prompt {
+            quietRule.offerResolved()
+            prompt = nil
+        }
+    }
+
     /// ⚠️ Both flavours, because they coexist on purpose and neither must offer to record the other.
     private static let ownBundleIDs: Set<String> = [
         "dev.personal.acta", "dev.personal.acta-dev",
         Bundle.main.bundleIdentifier,
     ].compactMap { $0 }.reduce(into: Set<String>()) { $0.insert($1) }
 
-    private func trackRecordingIdentity() {
+    private func trackRecordingIdentity(_ state: ControlState) {
         let isRecording: Bool
-        switch service.state.operation {
+        switch state.operation {
         case .recording, .starting: isRecording = true
         case .idle, .saving: isRecording = false
         }
@@ -212,15 +268,36 @@ public final class ReminderCoordinator: ObservableObject {
     /// says nothing about whether a call is still in progress. `isEpisodeActionable` is the question
     /// that does.
     public func acceptStart(episodeID: UInt64) {
-        defer { dismiss() }
-        guard case .offerToRecord(let shown, _, _, _, _) = prompt, shown == episodeID else { return }
-        guard activityRule.isEpisodeActionable(episodeID) else {
-            log.info("start offer \(episodeID, privacy: .public) is no longer actionable")
-            return
+        guard case .offerToRecord(let shown, _, _, let intendedTitle, _) = prompt,
+              shown == episodeID else { return }
+        // The prompt comes down now; the episode is resolved explicitly rather than by a later
+        // `dismiss()` that would be looking at a different prompt by then.
+        prompt = nil
+        activityRule.offerResolved(episodeID: episodeID)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // ⚠️ **The same barrier a socket `start` waits on.** Settings reach the microphone owner
+            // asynchronously; starting before the capture policy has landed records under the previous
+            // one — the defect this barrier was added for. A click is no more entitled to skip it than
+            // a socket client is.
+            await self.service.settleMicrophoneSettings()
+
+            // ⚠️ **Everything is re-checked after the await, in this turn, with no suspension between
+            // the check and the command.** Quit may have begun, the preference may have been switched
+            // off, the call may have ended, and a recording may have started by another route.
+            guard !self.isClosing else { return }
+            guard self.service.settings.offersRecordingWhenMicrophoneBusy else { return }
+            guard self.activityRule.isEpisodeActionable(episodeID) else {
+                self.log.info("start offer \(episodeID, privacy: .public) is no longer actionable")
+                return
+            }
+            guard self.service.state.canStart else { return }
+            // ⚠️ The title the prompt promised, not whatever the field holds now: "Will save as X" has
+            // to be true, and `service.title` can have been edited in the menu since.
+            self.service.start(title: intendedTitle)
+            self.present(.startedRecording(title: intendedTitle))
         }
-        guard service.state.canStart else { return }
-        service.start()
-        present(.startedRecording(title: service.title))
     }
 
     public func declineStart(episodeID: UInt64) {
@@ -243,8 +320,11 @@ public final class ReminderCoordinator: ObservableObject {
     /// ⚠️ **Bound to the recording it was raised for.** A prompt about a recording that has already been
     /// stopped, and replaced by another, must not stop the replacement.
     public func acceptStop(recordingID id: UInt64) {
-        defer { dismiss() }
         guard case .offerToStop(let shown, _, _) = prompt, shown == id else { return }
+        prompt = nil
+        quietRule.offerResolved()
+        guard !isClosing else { return }
+        guard service.settings.offersStopWhenQuiet else { return }
         guard id == recordingID else {
             log.info("stop offer \(id, privacy: .public) belongs to a finished recording")
             return
@@ -267,6 +347,14 @@ public final class ReminderCoordinator: ObservableObject {
     }
 
     /// The prompt expired, or the user clicked away. **Never an action.**
+    ///
+    /// ⚠️ **Identity-scoped.** An expiry enqueued for prompt A must not take prompt B off the screen;
+    /// the caller says which prompt it is dismissing.
+    public func dismiss(_ expected: ReminderPrompt) {
+        guard prompt == expected else { return }
+        dismiss()
+    }
+
     public func dismiss() {
         if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
             activityRule.offerResolved(episodeID: episodeID)

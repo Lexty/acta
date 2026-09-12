@@ -133,8 +133,15 @@ struct AudioActivityMeterPipelineTests {
                      generation: UInt64) {
             lock.lock(); calls += 1; lock.unlock()
         }
+        func invalidate() {
+            lock.lock(); invalidations += 1; lock.unlock()
+        }
+        private var invalidations = 0
         var callCount: Int {
             lock.lock(); defer { lock.unlock() }; return calls
+        }
+        var invalidationCount: Int {
+            lock.lock(); defer { lock.unlock() }; return invalidations
         }
     }
 
