@@ -524,8 +524,11 @@ struct MenuContent: View {
             Divider()
             managementControls(mic)
 
+            // ⚠️ Labelled for where it actually goes. `SettingsLink` opens the window at whichever tab
+            // it last showed, and promising "Microphone Settings" while landing on General is a small
+            // lie the user pays for every time.
             SettingsLink {
-                Text("Microphone Settings…").font(.caption)
+                Text("Settings…").font(.caption)
             }
             .buttonStyle(.plain)
         }

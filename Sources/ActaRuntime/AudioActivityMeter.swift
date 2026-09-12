@@ -46,7 +46,23 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
     private let lock = NSLock()
     private var enabled: Bool
     private var accumulators: [AudioActivitySummary.Track: ActivityAccumulator] = [:]
+    /// The stream format each track was last measured in.
+    ///
+    /// ⚠️ **A format change is a discontinuity even when capture did not restart.** The sample rate,
+    /// the channel count and the sample width all decide what a mean square *means*; a window that spans
+    /// a change is a mixture of two different measurements, and a floor learned before it describes a
+    /// signal that no longer exists. Nothing outside this class is in a position to notice, because the
+    /// format arrives with the buffers.
+    private var formats: [AudioActivitySummary.Track: FormatSignature] = [:]
     private let interval: TimeInterval
+
+    /// What has to stay the same for two buffers to belong to one measurement.
+    struct FormatSignature: Equatable {
+        var sampleRate: Double
+        var channels: UInt32
+        var bits: UInt32
+        var flags: UInt32
+    }
 
     /// The epoch every summary is tagged with.
     ///
@@ -91,6 +107,7 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
         lock.lock()
         enabled = newValue
         accumulators.removeAll()
+        formats.removeAll()
         // ⚠️ A new epoch, so measurement already under way cannot write its half-finished window back
         // after the switch and be published as current.
         epoch = Self.mintEpoch()
@@ -100,10 +117,24 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
     /// A capture restart, a device change or a format change: the partial windows describe audio that
     /// no longer exists.
     public func invalidate() {
+        _ = reserveNextEpoch()
+    }
+
+    /// Discard everything accumulated and move to a fresh epoch, returning it.
+    ///
+    /// ⚠️ **The return value is the point.** A consumer that only learns the new epoch when new data
+    /// arrives is defenceless in the gap between the two: a summary queued by the *previous* recording
+    /// still carries the epoch the consumer considers current, and warms the successor's estimate before
+    /// its first real measurement lands. Reserving lets the consumer refuse that evidence immediately.
+    @discardableResult
+    public func reserveNextEpoch() -> UInt64 {
         lock.lock()
         accumulators.removeAll()
+        formats.removeAll()
         epoch = Self.mintEpoch()
+        let reserved = epoch
         lock.unlock()
+        return reserved
     }
 
     /// Measure one buffer. Called synchronously on the capture source's per-track queue.
@@ -119,6 +150,20 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
         let startingEpoch = epoch
         var accumulator = accumulators[track] ?? ActivityAccumulator(interval: interval)
         lock.unlock()
+
+        // ⚠️ Checked before anything is accumulated, and it mints a fresh epoch: a partial window from
+        // the old format must not be published as belonging to the new one.
+        if let signature = Self.signature(of: buffer) {
+            lock.lock()
+            let previous = formats[track]
+            if previous != nil, previous != signature {
+                accumulator = ActivityAccumulator(interval: interval)
+                accumulators[track] = nil
+                epoch = Self.mintEpoch()
+            }
+            formats[track] = signature
+            lock.unlock()
+        }
 
         let duration = CMSampleBufferGetDuration(buffer).seconds
         let span = duration.isFinite && duration > 0 ? duration : 0
@@ -145,10 +190,25 @@ public final class AudioActivityMeter: AudioActivityMetering, @unchecked Sendabl
         lock.unlock()
 
         guard let emitted else { return }
-        // ⚠️ Stamped here, on the capture queue, where the audio actually was.
+        // ⚠️ Stamped here, on the capture queue, where the audio actually was — and on the monotonic
+        // timeline, because the consumer compares this against its own "now" to decide freshness and
+        // how long a quiet interval has lasted. Two clocks would make a wall-clock correction look like
+        // minutes of silence.
         publish(AudioActivitySummary(track: track, generation: tag,
                                      duration: emitted.duration, power: emitted.power,
-                                     observedAt: Date()))
+                                     observedAt: MonotonicClock.now()))
+    }
+
+    /// The format a buffer declares, or `nil` when it declares none this meter can read.
+    static func signature(of buffer: CMSampleBuffer) -> FormatSignature? {
+        guard let format = CMSampleBufferGetFormatDescription(buffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else {
+            return nil
+        }
+        return FormatSignature(sampleRate: asbd.mSampleRate,
+                               channels: asbd.mChannelsPerFrame,
+                               bits: asbd.mBitsPerChannel,
+                               flags: asbd.mFormatFlags)
     }
 
     // MARK: - Buffer arithmetic
@@ -314,6 +374,14 @@ public final class ActivitySink: @unchecked Sendable {
     public var isWanted: Bool {
         lock.lock(); defer { lock.unlock() }
         return enabled && handler != nil
+    }
+
+    /// Revoke whatever the live meter had accumulated and reserve the epoch the next summaries will
+    /// carry, so a consumer can refuse everything older at once. Returns `nil` when no meter exists.
+    @discardableResult
+    public func reserveNextEpoch() -> UInt64? {
+        lock.lock(); let meter = currentMeter; lock.unlock()
+        return meter?.reserveNextEpoch()
     }
 
     /// Build the meter for one capture, and remember it so the preference can reach it mid-recording.

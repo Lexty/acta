@@ -56,6 +56,13 @@ struct ReminderCoordinatorTests {
         return nil
     }
 
+    /// A counter safe to reach from the clock's callback.
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+    }
+
     /// A clock the test moves, shared by the summaries and the coordinator.
     final class ManualClock: @unchecked Sendable {
         private let lock = NSLock()
@@ -178,6 +185,138 @@ struct ReminderCoordinatorTests {
         #expect(harness.controller.phase == .idle)
     }
 
+    /// A coordinator whose microphone application can be **held open**, so an acceptance can be caught
+    /// mid-barrier rather than before its task has begun.
+    ///
+    /// ⚠️ The Mac's default input is deliberately the *other* device: with the default already at the
+    /// head of the list there is nothing to enforce, the application finishes immediately, and there is
+    /// no barrier to park on. This is the same fixture shape the dispatcher's barrier test uses.
+    @available(macOS 15.0, *)
+    private func makeGatedCoordinator()
+        -> (ControllerHarness, ReminderCoordinator, ScriptedReader, ManualClock, GatedClock,
+            MicrophoneManager, FakeAudioDeviceDirectory) {
+        let harness = ControllerHarness(label: "reminders-gated")
+        let directory = FakeAudioDeviceDirectory(devices: [.builtInMic(), .airPods()],
+                                                 defaultInput: "00-00-5E-00-53-01:input")
+        let gate = GatedClock()
+        let manager = MicrophoneManager(wiring: MicrophoneWiring(makeDirectory: { directory },
+                                                                 makeClock: { gate },
+                                                                 makeWakeCenter: { NotificationCenter() }))
+        manager.start()
+        manager.refreshInventory()
+        let api = ControlAPI(controller: harness.controller, microphone: manager)
+        let reader = ScriptedReader()
+        let clock = ManualClock()
+        let coordinator = ReminderCoordinator(service: api, reader: reader, now: { clock.now })
+        return (harness, coordinator, reader, clock, gate, manager, directory)
+    }
+
+    @Test("an acceptance parked at the barrier is refused if its rule was replaced meanwhile")
+    @available(macOS 15.0, *)
+    func aResetDuringTheParkedBarrierRefusesTheStart() async {
+        // ⚠️ **The collision an ordinary sequence produces.** Episode ids restart at one in a fresh rule.
+        // An acceptance parked on the microphone barrier holds episode 1; a preference toggle replaces
+        // the rule; another application already holding the input is minted spent episode 1 at the new
+        // baseline; the parked acceptance resumes and its actionability check passes — against a
+        // different call. Numeric equality inside a fresh rule is not identity.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+
+        // Give the manager something to apply, so the acceptance has a barrier to wait on.
+        var wanted = harness.controller.settings
+        wanted.microphonePriority = ["BuiltInMicrophoneDevice"]
+        wanted.managesSystemDefaultInput = true
+        harness.controller.settings = wanted
+        harness.controller.saveSettings()
+        // ⚠️ **The write must not take.** A write that succeeds is verified immediately and the
+        // application finishes without ever sleeping — so there is nothing to park on, and the test
+        // would be measuring its own optimism.
+        devices.setWritesTakeEffect(false)
+        gate.hold()
+        manager.applySettings(wanted)
+
+        coordinator.acceptStart(episodeID: token)
+        // The acceptance is now inside `settleMicrophoneSettings`; the gate holds the application open.
+        let parked = await awaitCondition { gate.isHoldingSleeper }
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        // ⚠️ The rule is replaced while the acceptance waits — by a **wake rebaseline**, not by the
+        // preference. Switching the reminder off would be refused by its own guard, and the test would
+        // then prove nothing about identity.
+        coordinator.rebaselineThreshold = .milliseconds(50)
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        coordinator.tick()
+
+        gate.release()
+        let started = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(!started, "an acceptance survived the rule that minted its episode")
+    }
+
+    @Test("an acceptance parked at the barrier still starts when nothing invalidated it")
+    @available(macOS 15.0, *)
+    func aParkedAcceptanceStillStarts() async {
+        // ⚠️ The positive half: refusing everything is not a passing admission check.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        var wanted = harness.controller.settings
+        wanted.microphonePriority = ["BuiltInMicrophoneDevice"]
+        wanted.managesSystemDefaultInput = true
+        harness.controller.settings = wanted
+        harness.controller.saveSettings()
+        // ⚠️ **The write must not take.** A write that succeeds is verified immediately and the
+        // application finishes without ever sleeping — so there is nothing to park on, and the test
+        // would be measuring its own optimism.
+        devices.setWritesTakeEffect(false)
+        gate.hold()
+        manager.applySettings(wanted)
+
+        coordinator.acceptStart(episodeID: token)
+        let parked = await awaitCondition { gate.isHoldingSleeper }
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+        gate.release()
+
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started, "a valid acceptance never reached the recorder")
+        await stopAndSettle(harness)
+    }
+
+    @Test("evidence from a finished recording cannot warm its successor")
+    @available(macOS 15.0, *)
+    func queuedEvidenceIsRefusedAfterAReplacement() async {
+        // ⚠️ The gap the epoch alone did not close: until the successor's first summary announces a
+        // newer epoch, a queued summary from the predecessor carries exactly the epoch the coordinator
+        // considers current.
+        let (harness, coordinator, _, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        await startRecording(harness)
+        coordinator.tick()
+        feedQuiet(coordinator, clock, seconds: 80, generation: 5)
+        #expect(coordinator.trackStateForTesting(.microphone) != .unknown,
+                "the fixture never got any evidence in")
+
+        // The recording ends; everything measured describes audio that is no longer being recorded.
+        harness.controller.stop()
+        _ = await awaitCondition {
+            MainActor.assumeIsolated { harness.controller.activeRecordingDirectory } == nil
+        }
+        coordinator.tick()
+
+        // A straggler from the finished capture, carrying the epoch that was current when it was made.
+        feedQuiet(coordinator, clock, seconds: 5, generation: 5)
+        #expect(coordinator.trackStateForTesting(.microphone) == .unknown,
+                "a finished recording's audio was accepted as evidence about its successor")
+    }
+
     // MARK: - The stop reminder through the coordinator
 
     /// Feed both tracks at 1 Hz with fabricated observation times, which is what the summaries carry.
@@ -198,10 +337,48 @@ struct ReminderCoordinatorTests {
         }
     }
 
+    /// Start a recording and then **stop the audio**.
+    ///
+    /// ⚠️ **The harness wires `TestClock.onSleep` to emit a batch**, and a fake clock's sleep returns at
+    /// once — so every millisecond a test spends awaiting anything in real time, with a recording open,
+    /// pours another buffer of 48 kHz audio onto the disk. Tests that held a recording open across
+    /// ordinary bounded waits wrote several gigabytes each and filled this machine's disk. These tests
+    /// need the *state* of a recording, never its bytes.
+    /// Stop a recording and wait for the assembly to finish.
+    ///
+    /// ⚠️ **Required before a test ends.** `tearDown()` removes the archive root, but a recording still
+    /// finalising recreates it — so a test that walks away from a live recording leaves gigabyte-shaped
+    /// litter in the system temp directory. Leaving it to the harness is not enough.
+    @available(macOS 15.0, *)
+    private func stopAndSettle(_ harness: ControllerHarness) async {
+        guard harness.controller.phase != .idle else { return }
+        harness.controller.stop()
+        _ = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .idle
+        }
+    }
+
     @available(macOS 15.0, *)
     private func startRecording(_ harness: ControllerHarness) async {
+        // ⚠️ Mono rather than stereo: the fixture's buffer size is a frame count, so the only axis a
+        // test can cheaply shrink is the channel count. It halves what every batch writes.
+        harness.source.setFormat(FixtureAudioFormat(sampleRate: 48_000, channels: 1))
+        // Audio has to flow for the start to pass its own self-check...
+        harness.clock.onSleep { _ in harness.source.emitBatch() }
         harness.controller.start()
         _ = await awaitCondition { MainActor.assumeIsolated { harness.controller.phase } == .recording }
+        // ...and must then be **rationed**. ⚠️ The harness drives emission from `TestClock.onSleep`, and
+        // a fake clock's sleep returns at once — so every millisecond a test spends awaiting anything,
+        // with a recording open, pours another buffer of 48 kHz audio onto the disk. Tests that held a
+        // recording open across ordinary bounded waits wrote several gigabytes each and filled this
+        // machine's disk. Silencing it entirely is not the answer either: the flow watchdog exists to
+        // notice a recording that has stopped receiving audio, and it correctly stops one that has. So
+        // the fixture keeps feeding it, one batch in five, which is enough to stay alive and two
+        // orders of magnitude less to write. These tests need the *state* of a recording, not its bytes.
+        let tick = Counter()
+        harness.clock.onSleep { _ in
+            if tick.next().isMultiple(of: 5) { harness.source.emitBatch() }
+        }
     }
 
     @Test("a stop offer is raised for a quiet recording")
@@ -251,18 +428,24 @@ struct ReminderCoordinatorTests {
         // ⚠️ `stop()` rather than `stopAndWait()`: this test is about identity, and waiting for the
         // assembly of a fixture recording costs tens of seconds for nothing it asserts.
         harness.controller.stop()
-        _ = await awaitCondition {
-            MainActor.assumeIsolated { harness.controller.activeRecordingDirectory } == nil
+        // ⚠️ Wait for **idle**, not merely for the folder to clear: stopping is asynchronous and the
+        // assembly that follows it refuses a start, so a second recording begun too early never comes
+        // up — and the test then fails for a reason that has nothing to do with what it asserts.
+        let settled = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .idle
         }
+        #expect(settled, "the first recording never finished, so there was no successor to protect")
         await startRecording(harness)
         coordinator.tick()
 
+        #expect(harness.controller.phase == .recording, "the successor was not running to begin with")
         coordinator.acceptStop(recordingID: staleID)
-        let stopped = await awaitCondition {
+        let stopped = await awaitCondition(timeoutMilliseconds: 500) {
             MainActor.assumeIsolated { harness.controller.phase } != .recording
         }
-        #expect(!stopped, "a prompt about a finished recording stopped the one that replaced it")
-        harness.controller.stop()
+        let ended = harness.controller.phase
+        #expect(!stopped, "the successor left .recording for \(ended) after a prompt about its predecessor")
+        await stopAndSettle(harness)
     }
 
     @Test("quit fences summaries already queued for delivery")
@@ -283,7 +466,7 @@ struct ReminderCoordinatorTests {
         coordinator.beginClosing()
         feedQuiet(coordinator, clock, seconds: 300)
         #expect(coordinator.prompt == nil)
-        harness.controller.stop()
+        await stopAndSettle(harness)
     }
 
     @Test("a stop prompt refuses a successor the observer has not even noticed yet")
@@ -308,19 +491,25 @@ struct ReminderCoordinatorTests {
 
         // A ends and B begins, and nothing observes it: no tick, no state event consumed.
         harness.controller.stop()
-        _ = await awaitCondition {
-            MainActor.assumeIsolated { harness.controller.activeRecordingDirectory } == nil
+        // ⚠️ Wait for **idle**, not merely for the folder to clear: stopping is asynchronous and the
+        // assembly that follows it refuses a start, so a second recording begun too early never comes
+        // up — and the test then fails for a reason that has nothing to do with what it asserts.
+        let settled = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .idle
         }
+        #expect(settled, "the first recording never finished, so there was no successor to protect")
         await startRecording(harness)
 
+        #expect(harness.controller.phase == .recording, "the successor was not running to begin with")
         coordinator.acceptStop(recordingID: staleID)
         // ⚠️ A bounded wait for the **forbidden** outcome: `stop()` is asynchronous, so checking the
         // phase on the next line would pass even if the stop had been admitted.
-        let stopped = await awaitCondition {
+        let stopped = await awaitCondition(timeoutMilliseconds: 500) {
             MainActor.assumeIsolated { harness.controller.phase } != .recording
         }
-        #expect(!stopped, "an unobserved replacement was stopped by a prompt about its predecessor")
-        harness.controller.stop()
+        let ended = harness.controller.phase
+        #expect(!stopped, "the successor left .recording for \(ended) after a prompt about its predecessor")
+        await stopAndSettle(harness)
     }
 
     @Test("the two reminders are independent switches")
@@ -345,7 +534,7 @@ struct ReminderCoordinatorTests {
         } else {
             Issue.record("the stop reminder was disabled by the other preference")
         }
-        harness.controller.stop()
+        await stopAndSettle(harness)
     }
 
     @Test("a gap in which nothing was observed rebaselines instead of counting as elapsed time")

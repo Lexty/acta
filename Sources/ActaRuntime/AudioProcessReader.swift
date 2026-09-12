@@ -240,6 +240,10 @@ public final class CoreAudioProcessProperties: AudioProcessPropertyReading, @unc
         }
         let stride = MemoryLayout<AudioObjectID>.size
         guard size > 0 else { return .list([]) }
+        // ⚠️ **Validated before the allocation, not only after the read.** Refusing a malformed
+        // *returned* count cannot protect a buffer that was undersized going in: the size the HAL is
+        // told about must describe whole object ids too.
+        guard stride > 0, Int(size) % stride == 0 else { return .unreadable }
         var ids = [AudioObjectID](repeating: 0, count: Int(size) / stride)
         var readSize = size
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,

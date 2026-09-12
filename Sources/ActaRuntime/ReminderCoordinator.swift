@@ -47,6 +47,15 @@ public final class ReminderCoordinator: ObservableObject {
     private let service: ControlAPI
     private let reader: any AudioProcessReading
     private var activityRule = MicrophoneActivityRule()
+    /// How many times the activity rule has been replaced.
+    ///
+    /// ⚠️ **Episode ids restart at 1 in a fresh rule, and that is a collision waiting to be exploited by
+    /// an ordinary sequence of events.** An acceptance parked at the microphone barrier holds episode 1;
+    /// a preference toggle or a wake rebaseline replaces the rule; a different application already
+    /// holding the input is minted spent episode 1 at the new baseline; the parked acceptance resumes
+    /// and its actionability check passes — against the wrong call. The token a prompt carries is
+    /// therefore this epoch *and* the id, and both are re-checked.
+    private var observationEpoch: UInt64 = 1
     private var quietRule = AudioActivityRule()
     private var pollTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
@@ -91,6 +100,12 @@ public final class ReminderCoordinator: ObservableObject {
     private var currentGeneration: UInt64 = 0
     /// The title of a start accepted from a prompt whose capture has not confirmed yet.
     private var awaitingConfirmation: String?
+    /// The recording count at the moment that start was accepted.
+    ///
+    /// ⚠️ **A title is not an identity.** Promoting on any later `.recording` state lets a delayed event
+    /// — or a recording somebody started from the menu — announce success for a start that has not
+    /// happened. Only a recording that began *after* the acceptance can confirm it.
+    private var awaitingConfirmationAfter: UInt64 = 0
     /// The folder the recording `recordingID` names. Compared at the admission point, because a
     /// coordinator-minted counter says only how many transitions *this observer* saw.
     private var recordingDirectory: URL?
@@ -114,7 +129,7 @@ public final class ReminderCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
 
     public init(service: ControlAPI, reader: any AudioProcessReading,
-                now: @escaping @Sendable () -> Date = { Date() }) {
+                now: @escaping @Sendable () -> Date = { MonotonicClock.now() }) {
         self.service = service
         self.reader = reader
         self.now = now
@@ -175,6 +190,10 @@ public final class ReminderCoordinator: ObservableObject {
         // the handler, but tasks already enqueued on the main actor still arrive; without this, enough
         // of them could raise a fresh stop prompt during the quit finalisation.
         guard !isClosing, service.settings.offersStopWhenQuiet else { return }
+        // ⚠️ Older evidence is refused outright rather than merely ignored by the rule: after a
+        // discontinuity the coordinator has already moved to the reserved epoch, and anything below it
+        // belongs to a capture that no longer exists.
+        guard summary.generation >= currentGeneration else { return }
         if summary.generation > currentGeneration {
             currentGeneration = summary.generation
             quietRule.beginGeneration(summary.generation)
@@ -223,13 +242,13 @@ public final class ReminderCoordinator: ObservableObject {
             case .none:
                 break
             case .offer(let episode):
-                present(.offerToRecord(episodeID: episode.id,
+                present(.offerToRecord(episodeID: token(for: episode.id),
                                        application: episode.displayName,
                                        bundleID: episode.bundleID,
                                        suggestedTitle: service.state.suggestedTitle,
                                        microphone: service.microphoneStatus.captureSummary))
             case .withdraw(let episodeID):
-                withdrawStartOffer(episodeID)
+                withdrawStartOffer(token(for: episodeID))
             }
         }
 
@@ -244,10 +263,10 @@ public final class ReminderCoordinator: ObservableObject {
         log.info("rebaselining the reminders after an unobserved gap")
         // ⚠️ A fresh rule, not a cleared one: the baseline is what makes an application already holding
         // the input at this instant silent, and that is exactly the state a wake needs.
-        activityRule = MicrophoneActivityRule()
+        resetActivityRule()
+        adoptReservedEpoch()
         quietRule.invalidate()
-        if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
-            activityRule.offerResolved(episodeID: episodeID)
+        if case .offerToRecord = prompt {
             prompt = nil
         }
         if case .offerToStop = prompt {
@@ -267,17 +286,47 @@ public final class ReminderCoordinator: ObservableObject {
     /// the recording while doing so.
     private func applyPreferenceChanges(_ settings: RecordingSettings) {
         if !settings.offersRecordingWhenMicrophoneBusy {
-            if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
-                activityRule.offerResolved(episodeID: episodeID)
+            if case .offerToRecord(let shown, _, _, _, _) = prompt {
+                if let episodeID = episode(in: shown) {
+                    activityRule.offerResolved(episodeID: episodeID)
+                }
                 prompt = nil
             }
             // Re-enabling starts from a fresh baseline rather than from episodes nobody was watching.
-            activityRule = MicrophoneActivityRule()
+            resetActivityRule()
         }
         if !settings.offersStopWhenQuiet, case .offerToStop = prompt {
             quietRule.offerResolved()
             prompt = nil
         }
+    }
+
+    /// Move to the epoch the meter will stamp from now on, so everything already in flight is refused.
+    private func adoptReservedEpoch() {
+        // ⚠️ **The floor moves whether or not a meter exists.** Asking the sink and giving up when it
+        // answers nothing made the revocation conditional on something the coordinator does not own —
+        // and "no meter is running" is exactly the state in which stale deliveries are still in flight.
+        let reserved = ActivitySink.shared.reserveNextEpoch() ?? 0
+        currentGeneration = max(currentGeneration + 1, reserved)
+        quietRule.beginGeneration(currentGeneration)
+    }
+
+    /// The token a prompt carries: an observation epoch and an episode id, so an id minted by a
+    /// different rule cannot answer for this one.
+    private func token(for episodeID: UInt64) -> UInt64 {
+        (observationEpoch << 40) | (episodeID & 0xFF_FFFF_FFFF)
+    }
+
+    /// The episode id inside `token`, or `nil` when it belongs to a rule that has since been replaced.
+    private func episode(in token: UInt64) -> UInt64? {
+        guard token >> 40 == observationEpoch else { return nil }
+        return token & 0xFF_FFFF_FFFF
+    }
+
+    /// Replace the activity rule, and with it every token it ever minted.
+    private func resetActivityRule() {
+        observationEpoch += 1
+        activityRule = MicrophoneActivityRule()
     }
 
     /// ⚠️ Both flavours, because they coexist on purpose and neither must offer to record the other.
@@ -299,12 +348,18 @@ public final class ReminderCoordinator: ObservableObject {
         if isRecording, !wasRecording || directory != recordingDirectory {
             recordingID += 1
             recordingDirectory = directory
+            // ⚠️ **Evidence from the previous recording is revoked here, not when the next summary
+            // happens to arrive.** Until then a queued summary carries exactly the epoch this
+            // coordinator considers current, and would warm the new recording's estimate with the old
+            // one's audio.
+            adoptReservedEpoch()
             quietRule.beginRecording(recordingID, generation: currentGeneration)
             if case .offerToStop = prompt { prompt = nil }
         }
         // ⚠️ Promotion happens on `.recording`, never on `.starting`: capture writing segments is what
         // the confirmation claims, and `.starting` is precisely the state in which that is not yet known.
-        if case .recording = state.operation, let title = awaitingConfirmation {
+        if case .recording = state.operation, let title = awaitingConfirmation,
+           recordingID > awaitingConfirmationAfter {
             awaitingConfirmation = nil
             present(.startedRecording(title: title))
         }
@@ -315,6 +370,7 @@ public final class ReminderCoordinator: ObservableObject {
         }
         if !isRecording, wasRecording {
             recordingDirectory = nil
+            adoptReservedEpoch()
             quietRule.invalidate()
             if case .offerToStop = prompt { prompt = nil }
         }
@@ -346,11 +402,11 @@ public final class ReminderCoordinator: ObservableObject {
         prompt = newPrompt
     }
 
-    private func withdrawStartOffer(_ episodeID: UInt64) {
-        if case .offerToRecord(let shown, _, _, _, _) = prompt, shown == episodeID {
+    private func withdrawStartOffer(_ token: UInt64) {
+        if case .offerToRecord(let shown, _, _, _, _) = prompt, shown == token {
             prompt = nil
         }
-        activityRule.offerResolved(episodeID: episodeID)
+        if let episodeID = episode(in: token) { activityRule.offerResolved(episodeID: episodeID) }
     }
 
     // MARK: - Answers
@@ -362,9 +418,11 @@ public final class ReminderCoordinator: ObservableObject {
     /// arrives at t+15 — and the anti-duplicate grace that keeps the episode *alive* for thirty seconds
     /// says nothing about whether a call is still in progress. `isEpisodeActionable` is the question
     /// that does.
-    public func acceptStart(episodeID: UInt64) {
+    public func acceptStart(episodeID token: UInt64) {
         guard case .offerToRecord(let shown, _, _, let intendedTitle, _) = prompt,
-              shown == episodeID else { return }
+              shown == token else { return }
+        guard let episodeID = episode(in: token) else { return }
+        let acceptedEpoch = observationEpoch
         // The prompt comes down now; the episode is resolved explicitly rather than by a later
         // `dismiss()` that would be looking at a different prompt by then.
         prompt = nil
@@ -383,6 +441,13 @@ public final class ReminderCoordinator: ObservableObject {
             // off, the call may have ended, and a recording may have started by another route.
             guard !self.isClosing else { return }
             guard self.service.settings.offersRecordingWhenMicrophoneBusy else { return }
+            // ⚠️ **The rule that minted this id must still be the rule being asked.** A reset during the
+            // wait restarts episode numbering at one, and numeric equality inside a fresh rule is not
+            // identity continuity — it is a different call wearing the same number.
+            guard self.observationEpoch == acceptedEpoch else {
+                self.log.info("start offer \(token, privacy: .public) outlived the rule that made it")
+                return
+            }
             guard self.activityRule.isEpisodeActionable(episodeID) else {
                 self.log.info("start offer \(episodeID, privacy: .public) is no longer actionable")
                 return
@@ -393,12 +458,13 @@ public final class ReminderCoordinator: ObservableObject {
             self.service.start(title: intendedTitle)
             // Honest until the recorder says otherwise; `trackRecordingIdentity` promotes or withdraws it.
             self.awaitingConfirmation = intendedTitle
+            self.awaitingConfirmationAfter = self.recordingID
             self.present(.startingRecording(title: intendedTitle))
         }
     }
 
-    public func declineStart(episodeID: UInt64) {
-        activityRule.offerResolved(episodeID: episodeID)
+    public func declineStart(episodeID token: UInt64) {
+        if let episodeID = episode(in: token) { activityRule.offerResolved(episodeID: episodeID) }
         dismiss()
     }
 
@@ -460,7 +526,8 @@ public final class ReminderCoordinator: ObservableObject {
     }
 
     public func dismiss() {
-        if case .offerToRecord(let episodeID, _, _, _, _) = prompt {
+        if case .offerToRecord(let shown, _, _, _, _) = prompt,
+           let episodeID = episode(in: shown) {
             activityRule.offerResolved(episodeID: episodeID)
         }
         if case .offerToStop = prompt {
