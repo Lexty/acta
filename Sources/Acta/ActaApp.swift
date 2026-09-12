@@ -532,12 +532,8 @@ struct MenuContent: View {
             // cannot pause is as much a trap as a broken one they cannot turn off. Which verb it
             // offers comes from `managementAction`, the same projection the expanded chooser uses, so
             // the two cannot drift again.
-            if !microphoneExpanded, let action = mic.managementAction {
-                HStack(spacing: 8) {
-                    managementActionButton(action)
-                    Button("Turn off") { model.setManagingSystemInput(false) }
-                }
-                .font(.caption)
+            if !microphoneExpanded {
+                managementActions(mic)
             }
         }
     }
@@ -678,31 +674,46 @@ struct MenuContent: View {
         }
     }
 
-    /// Feature (B): opt-in, always says so, and Pause is always reachable.
+    /// Feature (B) in the panel: **what it is doing, and the two decisions that answer it.**
+    ///
+    /// ⚠️ **The enable toggle is not here — it is in Settings, and it was the last piece of the move
+    /// that had not actually moved.** `Toggle("Keep the Mac's input on my list")` stood in this
+    /// function *and* in `MicrophoneSettings`: one setting with two editors, which is the exact drift
+    /// the Settings window was introduced to end, and which its own commit claimed to have ended.
+    /// Turning the feature on is configuration and lives in the window. What stays here is the
+    /// obligation: Acta is changing an input device every other application shares, so the statement
+    /// that it is doing so, and the way to stop it, must never require opening a window.
     @ViewBuilder
     private func managementControls(_ mic: ControlAPI.MicrophoneStatus) -> some View {
-        Toggle("Keep the Mac's input on my list", isOn: Binding(
-            get: { mic.managingSystemInput },
-            set: { model.setManagingSystemInput($0) }
-        ))
-        .font(.callout)
-
         if mic.managingSystemInput {
             // ⚠️ Stated whenever it is on: the user must always be able to see that something is
             // changing a system setting on their behalf, and reach the off switch for it.
             Text("Acta is managing the Mac's input.")
                 .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Text(enforcementText(mic.enforcement)).font(.caption)
-                Spacer()
-                // The same projection the collapsed row reads: one decision, decided in one place.
-                if let action = mic.managementAction {
-                    managementActionButton(action).font(.caption)
-                }
-            }
+            Text(enforcementText(mic.enforcement)).font(.caption)
+            managementActions(mic)
         } else {
             Text("Acta is not changing your Mac's input.")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// The immediate decisions about enforcement — **one builder, used by the collapsed row and the
+    /// expanded chooser alike.**
+    ///
+    /// ⚠️ Two copies of this is how the collapsed row came to offer Pause where the expanded one
+    /// offered Resume. It is nil-returning on the same condition as `managementAction`, so "management
+    /// is off" is decided once.
+    @ViewBuilder
+    private func managementActions(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        if let action = mic.managementAction {
+            HStack(spacing: 8) {
+                managementActionButton(action)
+                // ⚠️ Turning it **off** is not configuration in the way turning it on is: it is the
+                // stop button for a change Acta is making to the machine right now.
+                Button("Turn off") { model.setManagingSystemInput(false) }
+            }
+            .font(.caption)
         }
     }
 

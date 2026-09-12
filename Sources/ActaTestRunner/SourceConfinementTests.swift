@@ -8,6 +8,41 @@ import Testing
 /// a test rather than joining that list.
 @Suite("Source confinement")
 struct SourceConfinementTests {
+    /// ⚠️ **One persistent setting, one editor — held as a rule because it had already broken twice.**
+    /// The Settings window was introduced precisely so configuration would stop living in two places,
+    /// and its own commit said the microphone list had moved. `Toggle("Keep the Mac's input on my
+    /// list")` nevertheless stayed in `ActaApp.swift` as well, so the same setting had two editors for
+    /// four commits before Codex noticed. Nothing in the type system can see that; a guard can.
+    ///
+    /// ⚠️ The check runs on **comment-stripped** source, so the doc comment in `ActaApp.swift` that
+    /// explains why the control is not there does not trip it — which is the same reason the parser
+    /// strips comments for the import guards.
+    @Test("a persistent setting has exactly one editor, and it is the Settings window")
+    func persistentControlsLiveOnlyInSettings() {
+        // The labels of controls that write a *setting* — as opposed to acting on what is happening
+        // now, which is what the panel keeps.
+        let persistentControls = [
+            "Keep the Mac's input on my list",
+            "Offer to start recording when another app uses microphone input",
+            "Offer to stop after low audio activity",
+            "Delete segments after assembly",
+        ]
+        let app = SourceConfinement.swiftFiles(under: SourceConfinement.sourcesRoot
+            .appendingPathComponent("Acta"))
+        for label in persistentControls {
+            let homes = app.filter { file in
+                guard let source = try? String(contentsOf: file, encoding: .utf8) else { return false }
+                return SourceConfinement.strippingComments(source).contains(label)
+            }
+            #expect(homes.count == 1,
+                    Comment(rawValue: "\(label.debugDescription) has \(homes.count) editors: "
+                            + homes.map(\.lastPathComponent).joined(separator: ", ")))
+            #expect(homes.first?.lastPathComponent == "SettingsWindow.swift",
+                    Comment(rawValue: "\(label.debugDescription) is edited in "
+                            + (homes.first?.lastPathComponent ?? "nowhere")))
+        }
+    }
+
     // MARK: - The parser, tested before anything is asked of it
 
     /// ⚠️ **This fixture is the whole point of the rewrite.** The guard that shipped before matched
