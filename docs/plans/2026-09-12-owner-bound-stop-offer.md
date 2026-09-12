@@ -584,33 +584,79 @@ the kind of green implementation both reviews warned about.
 `Sources/ActaRuntime/ReminderCoordinator.swift`,
 `Sources/ActaTestRunner/RecordingControllerGuardTests.swift`
 
-- [ ] put an **injected, synchronous binding resolver** at the common runtime start boundary, or route
+- [x] put an **injected, synchronous binding resolver** at the common runtime start boundary, or route
       all three paths through one admission service. ⚠️ The controller must never call the HAL; the
       coordinator supplies the resolver's observation state
-- [ ] ⚠️ **resolve after the last pre-admission `await`**, and attach in the **same actor turn** that
+- [x] ⚠️ **resolve after the last pre-admission `await`**, and attach in the **same actor turn** that
       successfully latches `isStarting`
-- [ ] ⚠️ **a `nil` binding starts the recording unbound — it never refuses the start.** Codex, on
+- [x] ⚠️ **a `nil` binding starts the recording unbound — it never refuses the start.** Codex, on
       Task 4: `guard let binding else { return }` recreates the dead-button defect and would also break
       pid-only prompt starts. Record *why* the binding was withheld, for diagnosis; do not attach an
       owner later when the input returns, which would move the frozen admission boundary
-- [ ] for a prompt: preserve the original episode identity across the barrier, but **re-check** its
+- [x] for a prompt: preserve the original episode identity across the barrier, but **re-check** its
       observation epoch, key and current evidence afterwards — never replace it with a newer candidate
-- [ ] freeze the accepted binding across the `recoveryTask` and `session.start` suspensions; an owner
+- [x] freeze the accepted binding across the `recoveryTask` and `session.start` suspensions; an owner
       change during them does not rebind. Release evidence later decides whether to offer a stop
-- [ ] ⚠️ a failed start discards **only that attempt's** binding, and a rejected second start must not
+- [x] ⚠️ a failed start discards **only that attempt's** binding, and a rejected second start must not
       overwrite a first start's pending one. Do **not** copy `ControlAPI.title`'s setter, which mutates
       before the controller's busy guard
-- [ ] keep raw owner selection **off** the socket payload
-- [ ] the controller stores the binding as opaque session metadata and projects it into
+- [x] keep raw owner selection **off** the socket payload
+- [x] the controller stores the binding as opaque session metadata and projects it into
       `ControllerSnapshot` / `ControlState`
-- [ ] write a test: **a parked microphone barrier during which the candidate changes** — the admitted
+- [x] write a test: **a parked microphone barrier during which the candidate changes** — the admitted
       binding is the re-checked one, not a newer holder
-- [ ] write a test: **a parked `session.start`** preserves the admitted binding
-- [ ] write a test: a rejected second start cannot alter a first start's pending binding
-- [ ] write a test: manual and socket starts share the admission mechanics and **deliberately produce
+- [x] write a test: **a parked `session.start`** preserves the admitted binding
+- [x] write a test: a rejected second start cannot alter a first start's pending binding
+- [x] write a test: manual and socket starts share the admission mechanics and **deliberately produce
       no binding** — ⚠️ the draft's "all three routes bind identically" contradicted Decision 2
-- [ ] **negative control**: resolve before the barrier instead of after → the parked-barrier test fails
-- [ ] run `bash Scripts/test.sh`
+- [x] **negative control**: resolve before the barrier instead of after → the parked-barrier test fails
+- [x] run `bash Scripts/test.sh`
+
+
+**Done.** 907 tests pass (899 before; 8 new). The seam is `RecordingController.start(resolvingOwner:)`: a
+**non-escaping, synchronous** resolver the controller calls only after its busy guard, in the turn that
+latches `isStarting`. `start()` is that same call with `{ .unbound(.notStartedFromPrompt) }`, so the menu
+(`ControlViewModel` → `ControlAPI.start(title:)`) and the socket (`ControlDispatcher` → `ControlServing.start`)
+converge on it. The prompt route is `ControlAPI.start(title:resolvingOwner:)`, which is **not** on
+`ControlServing` — the transport has no way to name an owner. The coordinator's resolver reads
+`releaseEvidence` (no HAL read), keeps the key from the prompt's episode, and re-checks epoch, reading and
+time against the evidence held after the barrier.
+
+⚠️ **Decided here: `OwnerAdmission` in ActaKit, not `OwnerBinding?`.** `.bound(binding)` or
+`.unbound(reason)`, with the reasons `notStartedFromPrompt`, `noBundleIdentifier`, `ownerNotHeld`,
+`releaseNotObserved` and `evidenceFromAnotherEpoch`. That is "record why it was withheld"; the coordinator
+also logs it at `.notice`. The controller stores it next to `currentDirectory` and projects it through
+`ControllerSnapshot` into `ControlState.ownerAdmission`; `WireProjection` does not read it.
+
+⚠️ **Carried into Tasks 8 and 9:**
+- The admission is cleared when a stop *begins* (with `currentDirectory`), so `.saving` carries none. A
+  countdown must hold its recording identity itself, not re-read the owner mid-stop.
+- With the release preference off at admission, the recording is `.unbound(.releaseNotObserved)`, and
+  switching the preference on later does **not** bind it.
+- `ControlAPI.start(title:resolvingOwner:)` writes the title before the controller's guard, as
+  `start(title:)` always has. The owner does not follow it: it is resolved after the guard.
+
+**Tests:** in `RecordingControllerGuardTests` — a parked `session.start` (parked by blocking the startup
+probe's sleep on a pool thread, `StartupProbePark`) while the resolver's world changes; a rejected second
+start, bound and unbound, while the first is parked; a failed start; menu and `.socket` dispatcher starts
+over a real `ControlAPI`. In `ReminderCoordinatorTests` — a parked barrier during which a second holder
+acquires and time moves (the admitted binding is Slack with the post-barrier `observedAt` and epoch); an owner
+unreadable after the barrier (episode still actionable, the recording **starts** `.unbound(.ownerNotHeld)`);
+the release preference off. One pure test in `OwnerBindingTests` for the reasons.
+
+**Negative controls, run:**
+- Resolving before the barrier (the plan's control) failed **two** tests: the named parked-barrier test
+  (`observedAt` from the click, not the re-check) and the unreadable-owner test (bound instead of unbound).
+- Resolving a second time and adopting it at `.recording` failed only the parked-`session.start` test, and
+  ⚠️ **only on the resolution count**: the second call ran in the same turn and returned the same owner.
+  A re-resolution *after* `session.start` is not constructible — the resolver is non-escaping — so the type,
+  not the test, holds that half.
+- Resolving before the busy guard failed only the rejected-second-start test.
+- Keeping the binding on a failed start failed only the failed-start test.
+- Treating an unbound admission as a refused start failed the unreadable-owner and release-off tests.
+- Not clearing the admission on stop failed the parked-`session.start` and menu/socket tests.
+
+⚠️ **Not checked:** `bash Scripts/lint.sh` — `swiftlint` is not installed. No added line exceeds 140 columns.
 
 ### Task 8: The presenter contract
 

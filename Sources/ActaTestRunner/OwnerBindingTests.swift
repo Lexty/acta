@@ -152,4 +152,23 @@ struct OwnerBindingTests {
             epoch: 1, observedAt: Self.observed)
         #expect(binding?.key == .bundle(Self.promptApp))
     }
+
+    // MARK: - The admission and its reasons
+
+    @Test("an admission names why a binding was withheld, and binds exactly when bind does")
+    func anAdmissionNamesItsReason() throws {
+        let holding = Self.readings([Self.process(501, Self.promptApp, true)])
+        let idle = Self.readings([Self.process(501, Self.promptApp, false)])
+        let bound = OwnerAdmission.admit(episode: Self.episode(7, Self.promptApp), holding: holding,
+                                         epoch: 3, observedAt: Self.observed)
+        let expected = try #require(OwnerBinding.bind(episode: Self.episode(7, Self.promptApp),
+                                                      holding: holding, epoch: 3, observedAt: Self.observed))
+        #expect(bound == .bound(expected))
+        #expect(bound.binding == expected)
+        #expect(OwnerAdmission.admit(episode: Self.episode(7, nil), holding: holding,
+                                     epoch: 3, observedAt: Self.observed) == .unbound(.noBundleIdentifier))
+        #expect(OwnerAdmission.admit(episode: Self.episode(7, Self.promptApp), holding: idle,
+                                     epoch: 3, observedAt: Self.observed) == .unbound(.ownerNotHeld))
+        #expect(OwnerAdmission.unbound(.ownerNotHeld).binding == nil)
+    }
 }

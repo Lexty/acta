@@ -699,7 +699,7 @@ public final class ReminderCoordinator: ObservableObject {
     /// says nothing about whether a call is still in progress. `isEpisodeActionable` is the question
     /// that does.
     public func acceptStart(episodeID token: UInt64) {
-        guard case .offerToRecord(let shown, _, _, let intendedTitle, _) = prompt,
+        guard case .offerToRecord(let shown, _, let bundleID, let intendedTitle, _) = prompt,
               shown == token else { return }
         // ⚠️ **The offer's own deadline, not the panel's timer.** The view arms a `Timer` to take the
         // prompt down, and a timer can be late or can fail to fire — a panel was observed still on
@@ -764,7 +764,12 @@ public final class ReminderCoordinator: ObservableObject {
             }
             // ⚠️ The title the prompt promised, not whatever the field holds now: "Will save as X" has
             // to be true, and `service.title` can have been edited in the menu since.
-            self.service.start(title: intendedTitle)
+            // ⚠️ **The owner is resolved inside the recorder's latching turn, after the barrier, from the
+            // episode captured before it.** Resolving at the click would bind evidence the barrier has
+            // since outdated; resolving from whatever holds the input now would bind a newer candidate.
+            self.service.start(title: intendedTitle) {
+                self.resolveOwner(episodeID: episodeID, bundleID: bundleID, acceptedEpoch: acceptedEpoch)
+            }
             // Honest until the recorder says otherwise; `trackRecordingIdentity` promotes or withdraws it.
             self.awaitingConfirmation = intendedTitle
             self.awaitingConfirmationAfter = self.recordingID
@@ -772,6 +777,38 @@ public final class ReminderCoordinator: ObservableObject {
             // The panel's oldest rule is that it does not claim a recording is under way before one is.
             self.present(.startingRecording(title: intendedTitle))
         }
+    }
+
+    /// The owner a prompt-started recording is admitted with, re-checked against the evidence held now.
+    ///
+    /// ⚠️ **The episode's identity is preserved, its evidence is not trusted.** The key comes from the
+    /// prompt, never from the readings; the epoch, the key's reading and the time are taken from the
+    /// latest release evidence. No HAL read happens here — this is the state the last tick already folded.
+    ///
+    /// ⚠️ **Every answer starts a recording.** A withheld binding is logged with its reason and the start
+    /// proceeds unbound.
+    private func resolveOwner(episodeID: UInt64, bundleID: String?, acceptedEpoch: UInt64) -> OwnerAdmission {
+        let admission: OwnerAdmission
+        if let observed = releaseEvidence {
+            if observed.epoch != acceptedEpoch {
+                admission = .unbound(.evidenceFromAnotherEpoch)
+            } else {
+                admission = OwnerAdmission.admit(
+                    episode: MicrophoneActivityEpisode(id: episodeID, bundleID: bundleID, displayName: nil),
+                    holding: observed.evidence.readings,
+                    epoch: observed.epoch,
+                    observedAt: observed.observedAt)
+            }
+        } else {
+            admission = .unbound(.releaseNotObserved)
+        }
+        switch admission {
+        case .bound(let binding):
+            log.notice("recording admitted bound to \(binding.bundleID, privacy: .public)")
+        case .unbound(let reason):
+            log.notice("recording admitted unbound: \(String(describing: reason), privacy: .public)")
+        }
+        return admission
     }
 
     /// Say that the offer went stale — but only if this attempt is still the one on screen.

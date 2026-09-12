@@ -23,7 +23,8 @@ extension ControlState {
                   suggestedTitle: snapshot.suggestedTitle,
                   settings: snapshot.settings,
                   recordings: snapshot.recordings,
-                  activeRecordingDirectory: snapshot.activeRecordingDirectory)
+                  activeRecordingDirectory: snapshot.activeRecordingDirectory,
+                  ownerAdmission: snapshot.ownerAdmission)
     }
 
     /// The operation, with explicit precedence — the order below **is** the contract.

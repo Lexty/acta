@@ -443,6 +443,120 @@ struct ReminderCoordinatorTests {
         await stopAndSettle(harness)
     }
 
+    /// Park an acceptance at the microphone barrier and return once it is held there.
+    @available(macOS 15.0, *)
+    private func acceptParkedAtTheBarrier(_ token: UInt64, _ harness: ControllerHarness,
+                                          _ coordinator: ReminderCoordinator, _ gate: GatedClock,
+                                          _ manager: MicrophoneManager,
+                                          _ devices: FakeAudioDeviceDirectory) async -> Bool {
+        var wanted = harness.controller.settings
+        wanted.microphonePriority = ["BuiltInMicrophoneDevice"]
+        wanted.managesSystemDefaultInput = true
+        harness.controller.settings = wanted
+        harness.controller.saveSettings()
+        // ⚠️ **The write must not take**, or the application finishes without sleeping and nothing parks.
+        devices.setWritesTakeEffect(false)
+        gate.hold()
+        manager.applySettings(wanted)
+        coordinator.acceptStart(episodeID: token)
+        return await awaitCondition { gate.isHoldingSleeper }
+    }
+
+    private static let dictation = "com.aaa.dictation"
+
+    @Test("a candidate that changes while the barrier is parked does not become the owner")
+    @available(macOS 15.0, *)
+    func theAdmittedBindingIsTheRecheckedOne() async throws {
+        // ⚠️ **The binding instant is the contract.** The prompt was about Slack. While the click waits
+        // on the barrier a dictation service acquires the input too — the counterexample's newer
+        // candidate — and time moves on. What is admitted is Slack, re-checked against the evidence read
+        // *after* the barrier: its time and epoch, not the ones current when the click arrived.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        let clickedAt = clock.now
+        let parked = await acceptParkedAtTheBarrier(token, harness, coordinator, gate, manager, devices)
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        clock.advance(2)
+        reader.set(AudioProcessSnapshot(processes: [
+            AudioProcessObservation(pid: 501, bundleID: Self.slack, displayName: "Slack",
+                                    processName: "Slack", isRunningInput: true),
+            AudioProcessObservation(pid: 777, bundleID: Self.dictation, displayName: nil,
+                                    processName: "dictation", isRunningInput: true),
+        ], isComplete: true))
+        coordinator.tick()
+        let recheckedAt = clock.now
+        let epoch = try #require(coordinator.releaseEvidence?.epoch)
+
+        gate.release()
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started, "a valid acceptance never reached the recorder")
+        let binding = try #require(harness.controller.ownerAdmission?.binding,
+                                   "a prompt start was admitted unbound: \(String(describing: harness.controller.ownerAdmission))")
+        #expect(binding.key == .bundle(Self.slack), "the admitted owner is not the prompt's application")
+        #expect(binding.observedAt == recheckedAt, "the binding carries evidence from before the barrier")
+        #expect(binding.observedAt != clickedAt)
+        #expect(binding.epoch == epoch)
+        await stopAndSettle(harness)
+    }
+
+    @Test("an owner the evidence cannot see after the barrier starts the recording unbound, not refused")
+    @available(macOS 15.0, *)
+    func anUnseenOwnerAfterTheBarrierStartsUnbound() async {
+        // ⚠️ **A withheld binding is never a refused start.** An unreadable moment keeps the episode
+        // actionable — the activity rule's oldest tolerance — so the click is admitted; but nothing now
+        // shows Slack holding, so no application is handed the authority to stop this recording.
+        let (harness, coordinator, reader, clock, gate, manager, devices) = makeGatedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        let parked = await acceptParkedAtTheBarrier(token, harness, coordinator, gate, manager, devices)
+        #expect(parked, "the barrier was never held, so nothing was parked to test")
+
+        clock.advance(1)
+        reader.set(AudioProcessSnapshot(processes: [
+            AudioProcessObservation(pid: 501, bundleID: Self.slack, displayName: "Slack",
+                                    processName: "Slack", isRunningInput: nil),
+        ], isComplete: false))
+        coordinator.tick()
+        #expect(coordinator.isEpisodeActionableForTesting(token), "the fixture no longer keeps the episode actionable")
+
+        gate.release()
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started, "a start whose owner could not be re-checked was refused instead of started unbound")
+        #expect(harness.controller.ownerAdmission == .unbound(.ownerNotHeld))
+        await stopAndSettle(harness)
+    }
+
+    @Test("with the release reminder off a prompt start is admitted unbound, and says why")
+    @available(macOS 15.0, *)
+    func aPromptStartWithoutReleaseObservationIsUnbound() async {
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        var settings = harness.controller.settings
+        settings.offersStopWhenOwnerReleases = false
+        harness.controller.settings = settings
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        #expect(coordinator.releaseEvidence == nil)
+        coordinator.acceptStart(episodeID: token)
+        let started = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(started)
+        #expect(harness.controller.ownerAdmission == .unbound(.releaseNotObserved))
+        await stopAndSettle(harness)
+    }
+
     @Test("evidence from a finished recording cannot warm its successor")
     @available(macOS 15.0, *)
     func queuedEvidenceIsRefusedAfterAReplacement() async {

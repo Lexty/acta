@@ -91,6 +91,16 @@ public final class RecordingController: ObservableObject {
     /// are indistinguishable by all of them. A prompt raised about one recording must be able to refuse
     /// to act on its successor, and this is what lets it.
     public var activeRecordingDirectory: URL? { currentDirectory }
+
+    /// What the start in flight, or the recording it produced, was admitted with.
+    ///
+    /// ⚠️ **Opaque session metadata.** The controller never reads it, never calls the HAL to produce it
+    /// and never re-resolves it: it is resolved once, by the caller's resolver, in the turn that latches
+    /// `isStarting`, and it is carried unchanged across the `recoveryTask` and `session.start` suspensions
+    /// — an owner change during them does not rebind. Discarded with the attempt when the start fails, and
+    /// with the recording when it stops.
+    public var ownerAdmission: OwnerAdmission? { currentOwner }
+    private var currentOwner: OwnerAdmission?
     private var currentTitle: String = ""
     private var currentSource: String = ""
     private var startedAt: Date?
@@ -233,10 +243,27 @@ public final class RecordingController: ObservableObject {
 
     // MARK: - Start/stop
 
-    /// Start recording. The title is taken from the field, or from the auto-suggestion if it is empty.
+    /// Start recording, unbound. The title is taken from the field, or from the auto-suggestion if it is
+    /// empty.
+    ///
+    /// ⚠️ **The menu's and the socket's route, and deliberately unbound.** It is not a second start path:
+    /// it is `start(resolvingOwner:)` with the one answer a start that did not come from a prompt can
+    /// honestly give.
     public func start() {
+        start(resolvingOwner: { .unbound(.notStartedFromPrompt) })
+    }
+
+    /// Start recording, admitted with whatever `resolve` answers.
+    ///
+    /// ⚠️ **The one admission seam every route shares.** `resolve` is synchronous and is called only after
+    /// the busy guard has passed, in the same turn that latches `isStarting` — so it runs after the
+    /// caller's last pre-admission `await`, a rejected start never calls it, and a rejected second start
+    /// cannot overwrite the first one's pending admission. ⚠️ Nothing is mutated before the guard: copying
+    /// `ControlAPI.start(title:)`'s title setter here would let a busy start leave its owner behind.
+    public func start(resolvingOwner resolve: () -> OwnerAdmission) {
         guard !isBusy, !isStarting, !isStopping else { return }
         isStarting = true
+        currentOwner = resolve()
         recoveredBanner = ""
         errorMessage = ""
         let source = SourceDetector.detectedSource() ?? ""
@@ -299,12 +326,14 @@ public final class RecordingController: ObservableObject {
             phase = .error
             errorMessage = failure.userMessage
             session = nil
+            currentOwner = nil
             FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start rejected by self-diagnosis: \(failure.userMessage, privacy: .public)")
         } catch {
             phase = .error
             errorMessage = ControllerMessage.startFailed(detail: error.localizedDescription).text
             session = nil
+            currentOwner = nil
             FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -326,6 +355,7 @@ public final class RecordingController: ObservableObject {
         let source = currentSource
         self.session = nil
         currentDirectory = nil
+        currentOwner = nil
         self.startedAt = nil
         elapsedSeconds = 0
 
@@ -396,6 +426,7 @@ public final class RecordingController: ObservableObject {
 
         self.session = nil
         currentDirectory = nil
+        currentOwner = nil
         self.startedAt = nil
         elapsedSeconds = 0
 

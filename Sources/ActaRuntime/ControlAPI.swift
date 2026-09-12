@@ -166,7 +166,8 @@ public final class ControlAPI {
                            settings: controller.settings,
                            recordings: controller.recordings,
                            elapsedSeconds: controller.elapsedSeconds,
-                           activeRecordingDirectory: controller.activeRecordingDirectory)
+                           activeRecordingDirectory: controller.activeRecordingDirectory,
+                           ownerAdmission: controller.ownerAdmission)
     }
 
     // MARK: - Title and settings
@@ -618,9 +619,23 @@ public final class ControlAPI {
     /// ⚠️ A title passed while the controller is busy still lands: the existing guard makes the *start*
     /// a no-op, and the title mutation happened before it. That is the controller's behaviour today,
     /// reproduced rather than replaced by a rejection this façade would have had to invent.
+    ///
+    /// ⚠️ **Unbound, deliberately.** This is the menu's and the socket's start, and neither carries a known
+    /// triggering identity; see `start(title:resolvingOwner:)`.
     public func start(title: String? = nil) {
         if let title { controller.title = title }
         controller.start()
+    }
+
+    /// Start recording from a prompt, admitted with whatever `resolve` answers.
+    ///
+    /// ⚠️ **Not on `ControlServing`, on purpose.** The transport's surface has no way to name an owner, so
+    /// raw owner selection cannot reach the socket payload. `resolve` runs inside the controller's latching
+    /// turn — see `RecordingController.start(resolvingOwner:)` — and must not call the HAL: the caller
+    /// supplies it from observation state it already holds.
+    public func start(title: String, resolvingOwner resolve: () -> OwnerAdmission) {
+        controller.title = title
+        controller.start(resolvingOwner: resolve)
     }
 
     /// Stop the recording, fire-and-forget — returns as soon as the work is kicked off.

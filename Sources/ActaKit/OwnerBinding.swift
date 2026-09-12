@@ -95,3 +95,58 @@ public struct OwnerBinding: Equatable, Sendable {
         return OwnerBinding(key: key, epoch: epoch, episodeID: episode.id, observedAt: observedAt)
     }
 }
+
+/// What a start was admitted with: a binding, or the reason there is none.
+///
+/// ⚠️ **An unbound admission is a start, never a refusal.** Every route reaches the recorder with one of
+/// these, and `.unbound` records a recording that works and for which no owner-release stop can be
+/// offered — nothing more. Treating it as a reason not to start would recreate the dead-button defect the
+/// `checkingStart` prompt exists to prevent.
+///
+/// ⚠️ **The reason is carried for diagnosis, and it is the whole of the diagnosis.** A recording that never
+/// offers to stop when its call ends is otherwise indistinguishable from one whose owner never let go.
+public enum OwnerAdmission: Equatable, Sendable {
+    case bound(OwnerBinding)
+    case unbound(Withheld)
+
+    /// Why a start carries no binding.
+    public enum Withheld: Equatable, Sendable {
+        /// Started from the menu or the control socket. Deliberate: only a prompt carries a *known*
+        /// triggering identity, and inferring one is the rule the counterexample on `OwnerBinding` killed.
+        case notStartedFromPrompt
+        /// The prompt's episode had no bundle identifier. A pid can be reused within one recording.
+        case noBundleIdentifier
+        /// The evidence read after the admission barrier did not show the prompt's application holding
+        /// the input — idle, unreadable, or not listed at all.
+        case ownerNotHeld
+        /// Nothing was being observed for the release side: its preference is off, or no tick has read the
+        /// process list yet. An owner is **not** attached later when observation resumes, because that
+        /// would move the admission boundary the binding is frozen at.
+        case releaseNotObserved
+        /// The latest evidence belongs to a different observation epoch from the one the prompt was
+        /// minted in, so it cannot vouch for that prompt's episode.
+        case evidenceFromAnotherEpoch
+    }
+
+    /// The binding, when there is one.
+    public var binding: OwnerBinding? {
+        if case .bound(let binding) = self { return binding }
+        return nil
+    }
+
+    /// Admit a prompt's episode against the evidence read at the admission point.
+    ///
+    /// ⚠️ **The same rule as `OwnerBinding.bind`, with the refusal named.** It never chooses a key from the
+    /// readings; it only asks whether they show the episode's own application holding.
+    public static func admit(episode: MicrophoneActivityEpisode,
+                             holding readings: [AudioProcessKey: MicrophoneInputReading],
+                             epoch: UInt64,
+                             observedAt: Date) -> OwnerAdmission {
+        guard episode.bundleID != nil else { return .unbound(.noBundleIdentifier) }
+        guard let binding = OwnerBinding.bind(episode: episode, holding: readings,
+                                              epoch: epoch, observedAt: observedAt) else {
+            return .unbound(.ownerNotHeld)
+        }
+        return .bound(binding)
+    }
+}

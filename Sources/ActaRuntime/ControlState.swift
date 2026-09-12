@@ -39,6 +39,8 @@ public struct ControllerSnapshot: Equatable, Sendable {
     public var elapsedSeconds: Int
     /// The folder the live recording is writing into, when there is one.
     public var activeRecordingDirectory: URL?
+    /// What the start in flight, or the live recording, was admitted with.
+    public var ownerAdmission: OwnerAdmission?
 
     public init(phase: RecordingController.Phase = .idle,
                 isStarting: Bool = false,
@@ -50,7 +52,8 @@ public struct ControllerSnapshot: Equatable, Sendable {
                 settings: RecordingSettings = .default,
                 recordings: [MeetingStore.Recording] = [],
                 elapsedSeconds: Int = 0,
-                activeRecordingDirectory: URL? = nil) {
+                activeRecordingDirectory: URL? = nil,
+                ownerAdmission: OwnerAdmission? = nil) {
         self.phase = phase
         self.isStarting = isStarting
         self.isSaving = isSaving
@@ -62,6 +65,7 @@ public struct ControllerSnapshot: Equatable, Sendable {
         self.recordings = recordings
         self.elapsedSeconds = elapsedSeconds
         self.activeRecordingDirectory = activeRecordingDirectory
+        self.ownerAdmission = ownerAdmission
     }
 }
 
@@ -194,6 +198,12 @@ public struct ControlState: Equatable, Sendable {
     /// ⚠️ Deliberately absent from the wire: `RecordingSummary` answers a different question, for a
     /// client that cannot see the menu at all.
     public var activeRecordingDirectory: URL?
+    /// What the start in flight, or the live recording, was admitted with; `nil` when neither exists.
+    ///
+    /// ⚠️ **Projected, never chosen here.** The controller carries it as opaque metadata and this is a
+    /// pure projection of it. ⚠️ Deliberately absent from the wire, in both directions: a socket `start`
+    /// cannot name an owner, and a client has no use for which application Acta believes it belongs to.
+    public var ownerAdmission: OwnerAdmission?
 
     public init(operation: Operation = .idle,
                 lifecycleFailure: ControlFailure? = nil,
@@ -203,7 +213,8 @@ public struct ControlState: Equatable, Sendable {
                 suggestedTitle: String = "",
                 settings: RecordingSettings = .default,
                 recordings: [MeetingStore.Recording] = [],
-                activeRecordingDirectory: URL? = nil) {
+                activeRecordingDirectory: URL? = nil,
+                ownerAdmission: OwnerAdmission? = nil) {
         self.operation = operation
         self.lifecycleFailure = lifecycleFailure
         self.notice = notice
@@ -213,6 +224,7 @@ public struct ControlState: Equatable, Sendable {
         self.settings = settings
         self.recordings = recordings
         self.activeRecordingDirectory = activeRecordingDirectory
+        self.ownerAdmission = ownerAdmission
     }
 
     /// Work that must not be cut short by quitting — the controller's `hasWorkInFlight`, restated over
