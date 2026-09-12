@@ -548,6 +548,34 @@ struct OwnerReleaseOfferTests {
         await settle(fixture.harness)
     }
 
+    /// ⚠️ **The countdown completes on the tick after its deadline, not at it.** A late acknowledgement puts the
+    /// prompt's deadline exactly on the countdown's, so for up to a tick the panel still reads "1 s" while the
+    /// deadline refuses the click — and the refusal was a dismissal, which declined the offer and revoked the
+    /// countdown that was about to stop the recording.
+    @Test("Stop Now pressed between a late-acknowledged countdown's deadline and its completing tick stops")
+    @available(macOS 15.0, *)
+    func aStopNowBeforeTheCompletingTickStops() async {
+        let fixture = makeFixture(acknowledging: false)
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, let offer = fixture.releaseOffer,
+              let id = fixture.presenter.shown.last?.id else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.run(seconds: 15)
+        fixture.coordinator.acknowledgePresentation(id)
+        fixture.run(seconds: 19)
+        guard case .running(let deadline)? = fixture.coordinator.countdown?.phase else {
+            Issue.record("the countdown was not running before its deadline"); return
+        }
+        fixture.clock.advance(1.4)          // past the deadline, before the tick that would complete it
+        #expect(fixture.clock.now >= deadline, "the click was not arranged past the deadline")
+        #expect(fixture.releaseOffer != nil)
+        fixture.coordinator.acceptReleaseStop(recordingID: offer.recordingID)
+        #expect(stopBegan(fixture.harness), "a Stop Now in the countdown's last tick was refused")
+        await settle(fixture.harness)
+    }
+
     /// ⚠️ **The lock that follows a call.** The offer is raised onto a screen that cannot show it, so it is
     /// never acknowledged and nothing reports it lost again; the panel's timer is what ends it. Counted as a
     /// dismissal, it declined the offer for the rest of the recording — the scenario the feature exists for,
@@ -608,6 +636,7 @@ struct OwnerReleaseOfferTests {
         fixture.coordinator.acceptReleaseStop(recordingID: offer.recordingID)
         #expect(!stopBegan(fixture.harness), "a Stop Now past the deadline stopped the recording")
         #expect(fixture.coordinator.prompt == nil)
+        #expect(fixture.coordinator.ownerWatch?.isDeclined == false, "a refused Stop Now was recorded as a decline")
         await settle(fixture.harness)
     }
 

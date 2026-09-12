@@ -992,6 +992,18 @@ public final class ReminderCoordinator: ObservableObject {
         return now() < promptDeadline
     }
 
+    /// Whether the countdown on screen has reached its deadline but not yet the tick that completes it.
+    ///
+    /// ⚠️ **The prompt's deadline ends where the countdown's does, and the countdown completes only on the
+    /// next evaluation** — up to a tick later, with the panel still reading "1 s". A Stop Now in that gap
+    /// asks for exactly what the countdown is about to do, so it stays answerable until the countdown could
+    /// no longer complete.
+    private func isCountdownAwaitingItsCompletionTick() -> Bool {
+        guard let current = countdown, current.presentation == presentation,
+              case .running(let deadline) = current.phase else { return false }
+        return now() < deadline.addingTimeInterval(current.configuration.maxEvaluationGap)
+    }
+
     private func withdrawStartOffer(_ token: UInt64) {
         if case .offerToRecord(let shown, _, _, _, _) = prompt, shown == token {
             prompt = nil
@@ -1198,9 +1210,17 @@ public final class ReminderCoordinator: ObservableObject {
     /// else a stop is bound to is re-checked, in this turn.
     public func acceptReleaseStop(recordingID id: UInt64) {
         guard case .offerToStopOnRelease(let shown, _, _) = prompt, shown == id else { return }
-        guard isWithinDeadline() else {
+        guard isWithinDeadline() || isCountdownAwaitingItsCompletionTick() else {
             log.info("release stop offer \(id, privacy: .public) was clicked after its deadline")
-            dismiss()
+            // ⚠️ **A refused Stop Now is not a decline.** The user asked for the stop; recording it as Keep
+            // would silence the offer for the rest of the recording. Ended as the panel's timer or the tick
+            // would have ended it, each of which leaves the release to be observed afresh.
+            if case .running? = countdown?.phase {
+                revokeCountdown(.observationLapsed)
+            } else {
+                revokeCountdown(.presentationLost)
+            }
+            prompt = nil
             return
         }
         dismiss()

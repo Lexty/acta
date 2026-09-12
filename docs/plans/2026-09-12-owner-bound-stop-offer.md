@@ -629,7 +629,8 @@ also logs it at `.notice`. The controller stores it next to `currentDirectory` a
 `ControllerSnapshot` into `ControlState.ownerAdmission`; `WireProjection` does not read it.
 
 ⚠️ **Carried into Tasks 8 and 9:**
-- The admission is cleared when a stop *begins* (with `currentDirectory`), so `.saving` carries none. A
+- The admission is cleared together with `currentDirectory`, when the stop's assembly *returns* — so
+  `.saving` still carries it (corrected in review: an earlier note said a stop's beginning cleared it). A
   countdown must hold its recording identity itself, not re-read the owner mid-stop.
 - With the release preference off at admission, the recording is `.unbound(.releaseNotObserved)`, and
   switching the preference on later does **not** bind it.
