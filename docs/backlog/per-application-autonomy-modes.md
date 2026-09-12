@@ -420,6 +420,36 @@ rather than of *the app*, so a new capture can begin while the previous archive 
 background — with the obvious constraints that the archive listing must not show a half-assembled
 recording as done, and that quitting must still wait for work in flight.
 
+### Acta's own reader, compared against the probe on the same huddle
+
+Both views of the same 15:22 huddle, Acta sampling at 1 Hz and the probe at 250 ms:
+
+```
+truth (250 ms)                        Acta (1 Hz)
+15:22:19.676  + slack.helper          15:22:19.794  [slack.helper]      +118 ms
+15:22:19.951  + CoreSpeech                  —                           not seen
+15:22:21.900  − slack.helper          15:22:21.943  []                   +43 ms
+15:22:22.439  + slack.helper          15:22:23.043  [slack.helper]      +604 ms
+15:22:53.280  − CoreSpeech                  —
+15:23:07.915  − slack.helper          15:23:08.070  []                  +155 ms
+```
+
+- **The flap was 539 ms and Acta caught it — by luck.** At 1 Hz a sub-second flap can fall entirely
+  between samples. This is the concrete argument for never expressing release qualification as "a
+  sample said false".
+- **The rule then behaved exactly right**: it saw the re-acquisition at :23.043 and minted at :26.357,
+  which is the 3 s hold measured from the *re-acquisition*, not from the first acquisition. The flap
+  restarted the qualification, which is what the review predicted and is why today's start rule is not
+  vulnerable to these flaps.
+- ⚠️ **Acta's reader does not report `com.apple.CoreSpeech` as holding** while the probe does — it held
+  from :19.951 to :53.280 and Acta's list is empty at :21.943 and :23.043. The likely explanation is
+  that Acta reads its input flag as `nil` (unreadable) where the probe reads `true`, and the diagnostic
+  filters on `== true`. Not necessarily a defect — unknown must stay unknown — but **a systematically
+  unreadable process behaves differently from an idle one**, and which one this is has not been
+  established.
+- The bundle identifier is present and the display name absent (`display=<none>`, `process=Slack
+  Helper`), now confirmed by **Acta's own reader** rather than only by the probe.
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
