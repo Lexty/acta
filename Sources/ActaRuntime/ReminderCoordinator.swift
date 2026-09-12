@@ -115,6 +115,9 @@ public final class ReminderCoordinator: ObservableObject {
 
     /// Which presentation is on screen, and when it stops being answerable. Both exist so the
     /// admission point can refuse an expired offer without asking the view anything.
+    /// Diagnostic only — the last set of input holders logged, so an idle machine logs nothing.
+    private var lastLoggedHolders: [String]?
+
     private var presentation: UInt64 = 0
     private var promptDeadline: Date?
     private var wasRecording = false
@@ -264,7 +267,18 @@ public final class ReminderCoordinator: ObservableObject {
         // stalled meter there are no summaries, so a standing stop offer would never notice it had gone
         // stale.
         if settings.offersRecordingWhenMicrophoneBusy {
-            switch activityRule.observe(reader.readSnapshot(), at: now(), context: context) {
+            let snapshot = reader.readSnapshot()
+            // ⚠️ **Diagnostic, added because the feature was silent through a real 95-second Slack
+            // huddle** with the preference on and nothing excluded, and reading the rule did not
+            // explain it. Logged only when the set of input holders changes, so an idle machine is
+            // silent.
+            let holders = snapshot.processes.filter { $0.isRunningInput == true }
+                .map { $0.bundleID ?? "pid:\($0.pid)" }.sorted()
+            if holders != lastLoggedHolders {   // nil on the first tick, so it always logs once
+                lastLoggedHolders = holders
+                log.info("observed \(snapshot.processes.count, privacy: .public) processes, complete=\(snapshot.isComplete, privacy: .public), holding=[\(holders.joined(separator: ", "), privacy: .public)]")
+            }
+            switch activityRule.observe(snapshot, at: now(), context: context) {
             case .none:
                 break
             case .offer(let episode):

@@ -316,6 +316,69 @@ describes this five-minute sequence and nothing more: quitting or crashing Slack
 disappearance and unknown must stay in the owner contract rather than being designed out on the
 strength of one trace in which nobody quit anything.
 
+### Two calls back to back — and why the debounce cannot tell them from a flap
+
+Raised by the user on 2026-09-12: a three-hour huddle can end and a new one begin **in the same
+second**, and the same is true of every comparable application.
+
+⚠️ **On this signal the two are indistinguishable, and that is a property of the evidence rather than
+of any rule we might write.** A release followed by a re-acquisition looks the same whether it is a
+device handoff inside one call or the boundary between two. The measured flaps were 266 ms, 273 ms,
+279 ms, 551 ms, 824 ms and 834 ms; a genuine call boundary can be shorter than all of them. No
+debounce can separate the two cases, because there is nothing in the HAL that says "new call" — only
+"input held" and "input not held".
+
+**This already bites the shipped rule, not just the proposal.** A re-acquisition inside the re-arm
+window returns `.releasing` to `.spent` — the *same* episode — and `offerIfQualified` mints only from
+`.holding`. So today, when one call ends and another begins within the re-arm (**thirty seconds**, not
+one), **the second call raises no offer at all**. The window that exists to stop one call producing
+two prompts also stops two calls producing two prompts.
+
+The choices, none of them free:
+
+- **A short debounce** (say something above the longest observed flap) separates back-to-back calls
+  that are further apart than it, and absorbs the flaps we have seen. It does not help the user's
+  sub-second case, and it splits a call whenever an unobserved flap is longer than the threshold.
+- **A faster poll.** Production samples at 1 Hz while the trace that found the flaps ran at 250 ms — at
+  1 Hz a 550 ms flap may be missed entirely or may look like a 1-second release. Raising the rate
+  narrows the ambiguous band and costs a cheap HAL read; it cannot remove the band.
+- **Accept the merge.** Two consecutive calls become one recording. Defensible for a file-per-sitting
+  model, wrong for a file-per-meeting one, and it must be a stated choice rather than an accident.
+- **Separate the two windows.** The re-arm that suppresses a *second prompt for one call* need not be
+  the same duration as the debounce that qualifies a *release*. Today they are entangled; the proposal
+  needs them independent, and the second-call case is the argument for it.
+
+⚠️ Whatever is chosen, the sub-second case the user named is **unreachable at a 1 Hz poll** and stays a
+known limitation. Say so in the interface rather than pretending the boundary was detected.
+
+**And a third case, which settles the argument: reconnecting to the *same* call.** The user also drops
+out and rejoins the same huddle. On this signal that is identical to the other two — same application,
+same helper, same identifier — and only the length of the gap differs, unreliably.
+
+So three situations produce one indistinguishable signal:
+
+| what happened | what the design should do | which way it pulls the threshold |
+|---|---|---|
+| device handoff inside a call | keep one recording | longer |
+| two different calls back to back | two recordings | **shorter** |
+| dropping out and rejoining the same call | keep one recording | **longer** |
+
+Two of them pull in opposite directions and no threshold satisfies both. ⚠️ **The conclusion is that
+the input-holding signal cannot decide recording boundaries on its own**, and a design that pretends
+otherwise will be wrong some of the time by construction. What it can do is choose *which* error to
+make, and there the answer is not symmetric:
+
+- **Merging is recoverable.** Two calls in one file can be split afterwards; the audio is all there.
+- **Splitting is not.** Two files lose the moment of transition, and the restart itself can drop audio
+  — the measured device-loss restart took 210 ms, during which nothing was captured.
+
+So the bias should be toward **keeping one recording**: a long release qualification, a reconnection
+that cancels any countdown, and a *manual* way to start a second recording when the user knows the
+meeting changed. Getting two calls in one file is an inconvenience; getting a torn recording of one
+meeting is a loss.
+
+
+
 ### Scope ambiguity, which the key does not solve
 
 A durable key answers "remember a decision for this scope". It does not answer "is this scope's current
