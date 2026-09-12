@@ -257,6 +257,40 @@ struct ReminderCoordinatorTests {
         #expect(!started, "an acceptance survived the rule that minted its episode")
     }
 
+    /// ⚠️ **The offer's own deadline outranks the panel's timer.** The view arms a `Timer` to take a
+    /// prompt down; a timer can be late or fail to fire, and one was observed leaving a panel on screen
+    /// forty-three seconds after a twenty-second offer. A late dismissal must never be able to *admit*
+    /// a click — so the deadline is recorded when the prompt is published and checked again here, where
+    /// it does not depend on the view having done anything.
+    @Test("a click after the offer's deadline is refused however long the panel stayed up")
+    @available(macOS 15.0, *)
+    func anExpiredOfferCannotBeClicked() async {
+        let (harness, coordinator, reader, clock) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        guard let token = offered(coordinator, reader, clock) else {
+            Issue.record("no offer to accept"); return
+        }
+        // The application is still holding the input, so nothing but the deadline can refuse this.
+        #expect(coordinator.isEpisodeActionableForTesting(token),
+                "the episode went stale on its own; this fixture would prove nothing")
+
+        // Past the twenty seconds the offer is answerable for, with the panel still showing it.
+        clock.advance(25)
+        coordinator.acceptStart(episodeID: token)
+
+        let told = await awaitCondition {
+            MainActor.assumeIsolated {
+                if case .startNoLongerAvailable = coordinator.prompt { return true }
+                return false
+            }
+        }
+        #expect(told, "an expired click said nothing")
+        let started = await awaitCondition(timeoutMilliseconds: forbiddenOutcomeWindow) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        #expect(!started, "a click after the deadline started a recording")
+    }
+
     /// ⚠️ **A press must always leave something on screen.** The whole defect the user reported was
     /// that it did not: the acceptance path took the prompt down, awaited the settings barrier, found
     /// the episode stale and returned — so the button vanished, nothing recorded, and the app said

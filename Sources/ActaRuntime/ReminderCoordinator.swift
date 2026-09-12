@@ -112,6 +112,11 @@ public final class ReminderCoordinator: ObservableObject {
     /// parked — can land out of order. Every prompt this path publishes carries the attempt that
     /// produced it, and publishes only while it is still the current attempt.
     private var currentAttempt: UInt64 = 0
+
+    /// Which presentation is on screen, and when it stops being answerable. Both exist so the
+    /// admission point can refuse an expired offer without asking the view anything.
+    private var presentation: UInt64 = 0
+    private var promptDeadline: Date?
     private var wasRecording = false
     /// The capture generation the quiet rule is currently calibrated for.
     ///
@@ -263,12 +268,20 @@ public final class ReminderCoordinator: ObservableObject {
             case .none:
                 break
             case .offer(let episode):
+                // ⚠️ **Instrumentation, and it decides a design question rather than decorating one.**
+                // Whether a per-application mode can ever be remembered depends on there being a
+                // durable key: a bundle identifier survives a helper restart, a PID does not. Nothing
+                // recorded this, so every claim about it so far has been inference from an absent
+                // display name — which is nil for three different reasons, only one of them a helper.
+                // One huddle and one call now settle it.
+                log.info("episode \(episode.id, privacy: .public) minted — bundle=\(episode.bundleID ?? "<none>", privacy: .public) display=\(episode.displayName ?? "<none>", privacy: .public) process=\(episode.processName ?? "<none>", privacy: .public)")
                 present(.offerToRecord(episodeID: token(for: episode.id),
                                        application: episode.displayName,
                                        bundleID: episode.bundleID,
                                        suggestedTitle: service.state.suggestedTitle,
                                        microphone: service.microphoneStatus.captureSummary))
             case .withdraw(let episodeID):
+                log.info("episode \(episodeID, privacy: .public) withdrawn — the holder let go")
                 withdrawStartOffer(token(for: episodeID))
             }
         }
@@ -416,11 +429,50 @@ public final class ReminderCoordinator: ObservableObject {
         }
     }
 
+    /// How long each prompt stays answerable — **the authoritative lifetime**, owned here rather than
+    /// by the panel that draws it.
+    ///
+    /// ⚠️ **The view's dismissal timer is a convenience; this is the rule.** A `Timer` can be late or
+    /// can fail to fire — a panel was observed still on screen forty-three seconds after a twenty-second
+    /// offer was raised — and a late timer must never be able to *admit* a click that the offer's own
+    /// deadline has already refused. So the deadline is recorded when the prompt is published and
+    /// checked again at the admission point, where it outranks whatever the panel happens to be showing.
+    public static func lifetime(of prompt: ReminderPrompt) -> TimeInterval {
+        switch prompt {
+        case .offerToRecord: return 20
+        case .offerToStop: return 30
+        case .startingRecording: return 12
+        case .startedRecording: return 3
+        case .checkingStart: return 12
+        case .startNoLongerAvailable: return 6
+        }
+    }
+
     private func present(_ newPrompt: ReminderPrompt) {
         // ⚠️ One at a time, never a stack. A second prompt replaces the first rather than queueing
         // behind it: two offers about two different moments, both stale by the time they are read, is
         // worse than one.
+        //
+        // ⚠️ **The deadline is set once per prompt and never extended by a redraw.** Re-publishing the
+        // same offer must not buy it another twenty seconds; that is how an offer outlives the evidence
+        // behind it.
+        presentation &+= 1
+        promptDeadline = now().addingTimeInterval(Self.lifetime(of: newPrompt))
+        log.debug("prompt \(self.presentation, privacy: .public) presented, answerable for \(Self.lifetime(of: newPrompt), privacy: .public)s")
         prompt = newPrompt
+    }
+
+    /// Test-facing: whether the rule still considers this token's episode actionable. It exists so a
+    /// deadline test can assert that the deadline — and nothing else — is what refused the click.
+    public func isEpisodeActionableForTesting(_ token: UInt64) -> Bool {
+        guard let episodeID = episode(in: token) else { return false }
+        return activityRule.isEpisodeActionable(episodeID)
+    }
+
+    /// Whether the prompt on screen may still be answered.
+    private func isWithinDeadline() -> Bool {
+        guard let promptDeadline else { return false }
+        return now() < promptDeadline
     }
 
     private func withdrawStartOffer(_ token: UInt64) {
@@ -442,6 +494,17 @@ public final class ReminderCoordinator: ObservableObject {
     public func acceptStart(episodeID token: UInt64) {
         guard case .offerToRecord(let shown, _, _, let intendedTitle, _) = prompt,
               shown == token else { return }
+        // ⚠️ **The offer's own deadline, not the panel's timer.** The view arms a `Timer` to take the
+        // prompt down, and a timer can be late or can fail to fire — a panel was observed still on
+        // screen forty-three seconds after a twenty-second offer. A click that arrives after the
+        // deadline is refused here regardless of what the user was looking at, so a delayed dismissal
+        // can never *admit* anything.
+        guard isWithinDeadline() else {
+            log.info("start offer \(token, privacy: .public) was clicked after its deadline")
+            currentAttempt &+= 1
+            present(.startNoLongerAvailable(attempt: currentAttempt))
+            return
+        }
         guard let episodeID = episode(in: token) else { return }
         let acceptedEpoch = observationEpoch
         // ⚠️ **The offer is replaced, not simply removed.** It used to become `nil` here, so between
@@ -539,6 +602,14 @@ public final class ReminderCoordinator: ObservableObject {
     /// stopped, and replaced by another, must not stop the replacement.
     public func acceptStop(recordingID id: UInt64) {
         guard case .offerToStop(let shown, _, _) = prompt, shown == id else { return }
+        // ⚠️ The same authoritative deadline the start offer uses. An expired stop offer is the safe
+        // direction — it keeps recording — so this one simply takes the panel down and says nothing
+        // more: there is no action that failed, only one that was never taken.
+        guard isWithinDeadline() else {
+            log.info("stop offer \(id, privacy: .public) was clicked after its deadline")
+            prompt = nil
+            return
+        }
         prompt = nil
         quietRule.offerResolved()
         guard !isClosing else { return }
