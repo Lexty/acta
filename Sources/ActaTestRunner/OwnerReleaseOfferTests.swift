@@ -517,7 +517,7 @@ struct OwnerReleaseOfferTests {
         guard let seconds = releaseUntilOffered(fixture) else {
             Issue.record("the offer never returned"); return
         }
-        #expect(4 + seconds >= 5)
+        #expect(4 + seconds == 6, "the offer did not wait for a full release observed afresh")
         #expect(fixture.presenter.shown.last?.id != id)
         await settle(fixture.harness)
     }
@@ -534,10 +534,80 @@ struct OwnerReleaseOfferTests {
         }
         fixture.run(seconds: 15)
         fixture.coordinator.acknowledgePresentation(id)
-        fixture.run(seconds: 19)            // 34 s after publication, past the 30 s lifetime
+        fixture.run(seconds: 15)
+        // ⚠️ **The panel's own timer fires here**, 30 s after publication, with the countdown still running.
+        // The fake presenter has no timer, so the test fires it: before `expire(_:)` this was a dismissal,
+        // which took the offer down mid-countdown and recorded a decline nobody made.
+        fixture.coordinator.expire(id)
+        #expect(fixture.releaseOffer != nil, "the panel's lifetime cut a running countdown short")
+        #expect(fixture.coordinator.ownerWatch?.isDeclined == false)
+        fixture.run(seconds: 4)             // 34 s after publication, past the 30 s lifetime
         #expect(fixture.releaseOffer != nil)
         fixture.coordinator.acceptReleaseStop(recordingID: offer.recordingID)
         #expect(stopBegan(fixture.harness), "a Stop Now inside the countdown was refused by the lifetime")
+        await settle(fixture.harness)
+    }
+
+    /// ⚠️ **The lock that follows a call.** The offer is raised onto a screen that cannot show it, so it is
+    /// never acknowledged and nothing reports it lost again; the panel's timer is what ends it. Counted as a
+    /// dismissal, it declined the offer for the rest of the recording — the scenario the feature exists for,
+    /// silently never offered again after unlock.
+    @Test("a panel expiry on a countdown nobody acknowledged declines nothing, and a fresh release offers again")
+    @available(macOS 15.0, *)
+    func anUnacknowledgedExpiryIsNotADecline() async {
+        let fixture = makeFixture(acknowledging: false)
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, let id = fixture.presenter.shown.last?.id else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.run(seconds: 30)
+        fixture.coordinator.expire(id)
+        #expect(fixture.coordinator.prompt == nil)
+        #expect(fixture.coordinator.countdown?.phase == .revoked(.presentationLost))
+        #expect(fixture.coordinator.ownerWatch?.isDeclined == false, "an expiry nobody saw was recorded as a decline")
+        #expect(fixture.presenter.withdrawn.contains(id))
+
+        guard let seconds = releaseUntilOffered(fixture) else {
+            Issue.record("the offer never returned after an unacknowledged expiry"); return
+        }
+        #expect(seconds == 6, "the offer returned on the release accumulated before the expiry")
+        #expect(fixture.presenter.shown.last?.id != id)
+        #expect(!stopBegan(fixture.harness))
+        await settle(fixture.harness)
+    }
+
+    @Test("an expiry for a presentation that has been replaced takes nothing down")
+    @available(macOS 15.0, *)
+    func aStaleExpiryIsIgnored() async {
+        let fixture = makeFixture(acknowledging: false)
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, let id = fixture.presenter.shown.last?.id else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.coordinator.expire(id &- 1)
+        #expect(fixture.releaseOffer != nil, "an expiry enqueued for an earlier presentation took this one down")
+        #expect(fixture.coordinator.countdown?.phase == .awaitingAcknowledgement)
+        await settle(fixture.harness)
+    }
+
+    /// ⚠️ **A late timer never admits a click.** Every other Stop Now here is pressed inside the deadline, so
+    /// deleting the guard in `acceptReleaseStop` left the suite green.
+    @Test("Stop Now pressed after the offer's deadline stops nothing")
+    @available(macOS 15.0, *)
+    func aStopNowAfterTheDeadlineIsRefused() async {
+        let fixture = makeFixture(acknowledging: false)
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, let offer = fixture.releaseOffer else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.run(seconds: 31)
+        #expect(fixture.releaseOffer != nil)
+        fixture.coordinator.acceptReleaseStop(recordingID: offer.recordingID)
+        #expect(!stopBegan(fixture.harness), "a Stop Now past the deadline stopped the recording")
+        #expect(fixture.coordinator.prompt == nil)
         await settle(fixture.harness)
     }
 
@@ -701,7 +771,7 @@ struct OwnerReleaseOfferTests {
         guard let seconds = releaseUntilOffered(fixture) else {
             Issue.record("the offer never returned after the wake"); return
         }
-        #expect(4 + seconds >= 5)
+        #expect(4 + seconds == 6, "the offer did not wait for a full release observed afresh")
         #expect(fixture.presenter.shown.last?.id != id)
         #expect(fixture.presenter.shown.last?.secondsRemaining == 20, "the fresh offer did not carry a full countdown")
         // Past the slept-through countdown's deadline, inside the fresh one.

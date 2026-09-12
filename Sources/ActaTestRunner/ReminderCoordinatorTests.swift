@@ -914,6 +914,29 @@ struct ReminderCoordinatorTests {
         #expect(reader.readCount == 0, "the process list was read for a feature nobody enabled")
     }
 
+    /// ⚠️ **Each switch reported from its own field.** The beat above has all three off, so a release field
+    /// hard-coded to `false`, or read from the quiet switch, passed it.
+    @Test("the beat reports each reminder switch from its own setting")
+    @available(macOS 15.0, *)
+    func theBeatReportsEachSwitchFromItsOwnSetting() async {
+        let (harness, coordinator, _, _) = makeClockedCoordinator()
+        defer { harness.tearDown() }
+        coordinator.heartbeatInterval = 1       // a beat on every tick, so each case reads its own
+        for (start, quiet, release) in [(false, false, true), (true, false, false), (false, true, false)] {
+            var settings = harness.controller.settings
+            settings.offersRecordingWhenMicrophoneBusy = start
+            settings.offersStopWhenQuiet = quiet
+            settings.offersStopWhenOwnerReleases = release
+            harness.controller.settings = settings
+            harness.controller.saveSettings()
+
+            coordinator.tick()
+            #expect(coordinator.lastHeartbeat?.offersRecordingWhenMicrophoneBusy == start)
+            #expect(coordinator.lastHeartbeat?.offersStopWhenQuiet == quiet)
+            #expect(coordinator.lastHeartbeat?.offersStopWhenOwnerReleases == release)
+        }
+    }
+
     /// ⚠️ **Every other beat in these tests carries an empty, complete snapshot**, so a payload
     /// hard-coded to `processes: 0, isComplete: true, holders: 0` would satisfy them all. Codex spotted
     /// that; this is the case that refuses it.

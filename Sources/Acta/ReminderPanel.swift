@@ -48,8 +48,9 @@ final class ReminderPanelController: ReminderPresenting {
         switch prompt {
         case .offerToRecord: return 20
         case .offerToStop: return 30    // a heavier decision deserves longer
-        // ⚠️ Outlasts the twenty-second countdown by the ten seconds the panel has to reach the screen. A
-        // dismissal here is a decline — it keeps recording — so a timer that fired first errs the safe way.
+        // ⚠️ Outlasts the twenty-second countdown by the ten seconds the panel has to reach the screen. Its
+        // expiry is not a decline: the coordinator ignores it while the countdown runs, and ends a countdown
+        // that was never acknowledged as a lost presentation — see `ReminderCoordinator.expire(_:)`.
         case .offerToStopOnRelease: return 30
         // ⚠️ Long enough to outlive a slow start: capture can take a couple of seconds to confirm, and a
         // panel that vanished first would leave the click looking like it did nothing.
@@ -80,7 +81,7 @@ final class ReminderPanelController: ReminderPresenting {
 
         shownID = presentation.id
         awaitingAcknowledgement = presentation.id
-        arm(lifetime: Self.lifetime(of: prompt), for: prompt)
+        arm(lifetime: Self.lifetime(of: prompt), for: presentation.id)
         // ⚠️ **A click elsewhere is not an answer to a countdown.** It dismisses an offer that acts on
         // nothing, which is harmless; on a countdown it would be a decline, and the person the feature is for
         // — back in another app after the call — clicks somewhere within twenty seconds as a matter of
@@ -213,15 +214,16 @@ final class ReminderPanelController: ReminderPresenting {
         panel.setFrameOrigin(origin)
     }
 
-    /// ⚠️ **Scoped to the prompt it was armed for.** These callbacks hop through a `Task`, so an expiry
-    /// enqueued for prompt A can land after prompt B has replaced it; dismissing "whatever is showing"
-    /// would take B off the screen a fraction of a second after it appeared.
-    private func arm(lifetime: TimeInterval, for prompt: ReminderPrompt) {
+    /// ⚠️ **Scoped to the presentation it was armed for.** These callbacks hop through a `Task`, so an
+    /// expiry enqueued for presentation A can land after B has replaced it; dismissing "whatever is
+    /// showing" would take B off the screen a fraction of a second after it appeared. The id, not the
+    /// prompt: two release offers for one recording are equal prompts.
+    private func arm(lifetime: TimeInterval, for presentationID: UInt64) {
         dismissal?.invalidate()
         dismissal = Timer.scheduledTimer(withTimeInterval: lifetime, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                // ⚠️ Expiry dismisses. It never answers.
-                self?.coordinator?.dismiss(prompt)
+                // ⚠️ Expiry never answers. The coordinator decides what it ends, and a countdown's is not a decline.
+                self?.coordinator?.expire(presentationID)
             }
         }
     }

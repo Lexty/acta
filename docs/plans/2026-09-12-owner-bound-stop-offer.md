@@ -141,7 +141,7 @@ From `docs/backlog/per-application-autonomy-modes.md`, measured 2026-09-12 on th
    list stays scoped to start offers. With only prompt-bound starts, the CoreSpeech uniqueness problem
    does not arise at all.
 3. **Release qualification N = 5 s; countdown 20 s.** Nominal total **25 s**, not exact.
-4. **Default outcome is stop.** Cancel keeps recording; Stop now ends it; the owner returning cancels
+4. **Default outcome is stop.** Cancel (shipped as **Keep Recording**, Task 9) keeps recording; Stop now ends it; the owner returning cancels
    with no user action. *(User's decision; not open.)*
 5. ⚠️ **No acknowledged presentation, no stop** — expressed as a **presenter contract** (Task 8), not
    as `prompt != nil`.
@@ -212,7 +212,7 @@ enum Outcome: Equatable, Sendable { case none, releaseQualified, ownerReturned, 
 ⚠️ **`OwnerKey.process` and pid reuse.** A pid can be reused *within one recording*. "Not persisted
 across launches" does not solve that. **This increment leaves pid-only holders unbound** — a bare pid
 cannot promise the identity a bundle key can, and inventing an incarnation fence from evidence we have
-not measured is out of scope. Stated in the code and in the settings copy.
+not measured is out of scope. Stated in the code and in the settings copy (the copy added in review).
 
 **Qualification.** `releasedQualified` requires a *sequence* of released observations spanning `N` with
 no gap between consecutive observations larger than `maxSampleGap` (2.5 s). One false sample is not a
@@ -784,7 +784,10 @@ in four consecutive full runs of 28–29 s.
   ⚠️ **Decided here: an acknowledgement extends `promptDeadline` to the countdown's own deadline**, once.
   Task 8 left acknowledgement unbounded, so a lifetime counted from publication could not outlast every
   countdown; `a late acknowledgement … still leaves Stop Now answerable to the end` acknowledges 15 s late
-  and presses Stop Now 34 s after publication.
+  and presses Stop Now 34 s after publication. ⚠️ **Review found the panel's own 30 s timer undid this**:
+  it dismissed the prompt mid-countdown as a decline, and dismissed an offer raised onto a locked screen
+  the same way. Its expiry now goes through `ReminderCoordinator.expire(_:)`, keyed by presentation id,
+  which leaves a running countdown alone and ends an unacknowledged one as `.presentationLost`.
 - The sentence is `OwnerReleaseOfferText` in ActaKit: "Slack released the microphone" / "Acta saw Slack stop
   using the microphone input." Unnamed: "The microphone was released". A word-list test forbids "ended",
   "call", "meeting", "huddle" and similar. ⚠️ **The secondary button is "Keep Recording", not "Cancel"**:
@@ -923,8 +926,8 @@ Task 10.
   first frame and the coordinator starts counting at acknowledgement. Corrected before commit.
 
 ⚠️ **Not checked:** the dicta copy of `ui-vocabulary.md` is not updated (a separate repository); the
-settings copy does not mention that pid-only holders stay unbound, which *Technical Details* says it does
-— left as found, since that is a source change outside this task.
+settings copy did not mention that pid-only holders stay unbound, which *Technical Details* says it does
+— left as found, since that is a source change outside this task; the review added it.
 
 ## Post-Completion
 

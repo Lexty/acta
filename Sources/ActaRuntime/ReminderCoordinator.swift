@@ -1253,9 +1253,37 @@ public final class ReminderCoordinator: ObservableObject {
         dismiss()
     }
 
-    /// The prompt expired, or the user clicked away. **Never an action.**
+    /// The presenter's own lifetime for this presentation ran out. **Never an action, and never an answer.**
     ///
-    /// ⚠️ **Identity-scoped.** An expiry enqueued for prompt A must not take prompt B off the screen;
+    /// ⚠️ **Scoped by presentation, not by prompt.** Two release offers for one recording are equal prompts;
+    /// an expiry enqueued for the first must not take down the second.
+    ///
+    /// ⚠️ **A countdown is not the user's to have declined by a timer.** Still awaiting acknowledgement,
+    /// it was never on screen — a locked display, a sleeping one — so it ends as a lost presentation, and
+    /// the release must be observed afresh. Running, it owns its own end: the tick completes it or revokes
+    /// it, and an expiry that pre-empted it would cut short the interval an acknowledgement promised, and
+    /// record a decline nobody made. Every other prompt is dismissed as before.
+    public func expire(_ presentationID: UInt64) {
+        guard presentationID == presentation, prompt != nil else { return }
+        if let current = countdown, current.presentation == presentationID {
+            switch current.phase {
+            case .running:
+                return
+            case .awaitingAcknowledgement:
+                log.info("countdown for prompt \(presentationID, privacy: .public) expired unacknowledged")
+                revokeCountdown(.presentationLost)
+                prompt = nil
+                return
+            case .completed, .revoked:
+                break
+            }
+        }
+        dismiss()
+    }
+
+    /// The user clicked away. **Never an action.**
+    ///
+    /// ⚠️ **Identity-scoped.** A dismissal enqueued for prompt A must not take prompt B off the screen;
     /// the caller says which prompt it is dismissing.
     public func dismiss(_ expected: ReminderPrompt) {
         guard prompt == expected else { return }

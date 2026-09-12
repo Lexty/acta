@@ -571,8 +571,15 @@ these hold, each of which has a test and a negative control (`OwnerReleaseOfferT
 - at completion the recording is **still the one the offer named** — by the coordinator's id, the folder
   being written into, and the admitted binding — and its release still stands qualified.
 
+⚠️ **Those tests reach the coordinator's side of the presenter contract, not the panel's.** That
+`ReminderPanel.swift` acknowledges only once the window server reports the panel visible, and reports a
+lock or a display sleep as a lost presentation, is human acceptance — see "Not verified automatically".
+
 Keep Recording, a dismissal, a displacement by another prompt, the preference being switched off and quit
-all end the countdown without acting. **What stays forbidden, and is not widened by this:** automatic
+all end the countdown without acting. **The panel's own expiry is not a dismissal here**
+(`ReminderCoordinator.expire(_:)`): it leaves a running countdown to end itself, and ends one never
+acknowledged as a lost presentation, so an offer raised onto a locked screen is offered again afresh
+rather than recorded as declined. **What stays forbidden, and is not widened by this:** automatic
 start, automatic deletion, and any timer answering the quiet offer. A second prompt that wants to act on a
 timer is a new decision for the user, not an extension of this paragraph.
 
@@ -615,6 +622,11 @@ make a recording wait on analysis, the change is wrong.
 
 ## Not verified automatically (needs a human)
 - Granting TCC permissions (Screen Recording, Microphone) — only via System Settings.
+- **The reminder panel's half of the presenter contract.** `ReminderPresenterTests` and
+  `OwnerReleaseOfferTests` drive an injected presenter. That the real panel acknowledges a countdown only
+  once it is visible, reports a real lock, display sleep and full-screen Space as lost, and updates the
+  number in place without moving, needs a human with a real lock and a real call. A panel that
+  acknowledged while hidden would arm an automatic stop with every test green.
 - Real audio capture — by running the app.
 - **Microphone release on stop** — that the mic indicator and Control Center's attribution to Acta
   clear within ~5s after every stop, and after a watchdog restart. `SCKCaptureSource`'s teardown is

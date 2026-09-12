@@ -52,9 +52,16 @@ Candidate causes, none of them measured:
 
 ## What would settle it
 
-A **heartbeat**: log every N ticks regardless of change, at debug level. Then "the tick is not running"
-and "nothing is holding the microphone" stop looking the same, which is the single thing that made this
-undiagnosable. Add it before the next long-uptime session rather than after.
+A **heartbeat**: log every N ticks regardless of change. Then "the tick is not running" and "nothing is
+holding the microphone" stop looking the same, which is the single thing that made this undiagnosable.
+
+**Landed 2026-09-12** (`8086b93`, `ReminderCoordinator.emitHeartbeatIfDue`): every 60 ticks (about a
+minute at 1 Hz), from inside `tick()`, so a dead loop emits nothing. ⚠️ At `.notice`, not debug as first
+proposed: debug and info lines are normally not persisted, and this is read hours later. Read it with
+`/usr/bin/log show --predicate 'subsystem BEGINSWITH "dev.personal.acta" AND eventMessage CONTAINS "heartbeat"'`
+(the full path — zsh's `log` builtin shadows it). A tick count well below uptime can be sleep rather than
+starvation, and `holding=` counts CoreSpeech too. It makes the silence observable; it does not fix it, and
+this item stays open until a long-uptime session has been read through it.
 
 ## Why it matters more than an ordinary intermittent
 

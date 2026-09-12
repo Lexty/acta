@@ -215,7 +215,9 @@ Four decisions in that row set, each deliberate:
   recording, which is a different and unbuilt action (stop and delete). The button says what it keeps.
 - ⚠️ **No click-outside dismissal on this prompt.** On the other prompts a click elsewhere dismisses an
   offer that acts on nothing. Here a dismissal is a decline, and the person this is for clicks in another
-  app within twenty seconds as a matter of course — so the two buttons are the only answers.
+  app within twenty seconds as a matter of course — so the two buttons are the only answers. The panel's
+  30 s lifetime is not an answer either: it never cuts a running countdown short, and an offer never
+  acknowledged as on screen (a locked display) expires as not seen, to be offered afresh.
 - **The copy names an observation, not an ending.** Acta saw an application let the input go; it never
   says the call, meeting or huddle ended, and a test forbids those words. Every sentence is a projection
   in `ActaKit.OwnerReleaseOfferText`, not text in the view.

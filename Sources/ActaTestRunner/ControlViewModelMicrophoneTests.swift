@@ -1,6 +1,7 @@
 import ActaKit
 @testable import ActaRuntime
 import Foundation
+import SwiftUI
 import Testing
 
 /// The menu **adapter** — its commands, its subscriptions and the intents it must not lose.
@@ -1444,6 +1445,40 @@ struct MicrophoneClaimInvariantTests {
             if status.enumerationFailure != nil, status.recordingFrom == nil {
                 #expect(status.captureSummary.contains("could not be read"),
                         "\(label): a failed enumeration was summarised as a fact about the hardware")
+            }
+        }
+    }
+}
+
+/// The three reminder switches in Settings, each bound to its own field.
+@Suite("Menu adapter: reminder switches")
+@MainActor
+struct ControlViewModelReminderSwitchTests {
+    /// ⚠️ **One field per switch, in both directions.** A copy-pasted binding that wrote the quiet switch
+    /// from the release toggle would turn off a reminder the user did not touch.
+    @Test("each reminder switch reads and writes only its own setting")
+    @available(macOS 15.0, *)
+    func eachSwitchIsBoundToItsOwnField() {
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                          defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+        let api = ControlAPI(controller: ControllerHarness(label: "menu-reminders").controller, microphone: manager)
+        let model = ControlViewModel(api: api)
+        let switches: [(Binding<Bool>, KeyPath<RecordingSettings, Bool>)] = [
+            (model.offersRecordingBinding, \.offersRecordingWhenMicrophoneBusy),
+            (model.offersStopBinding, \.offersStopWhenQuiet),
+            (model.offersStopOnReleaseBinding, \.offersStopWhenOwnerReleases),
+        ]
+        for (index, (binding, field)) in switches.enumerated() {
+            for value in [false, true] {
+                let before = api.settings
+                binding.wrappedValue = value
+                #expect(api.settings[keyPath: field] == value)
+                #expect(binding.wrappedValue == value)
+                for (otherIndex, (_, other)) in switches.enumerated() where otherIndex != index {
+                    #expect(api.settings[keyPath: other] == before[keyPath: other],
+                            "switch \(index) wrote the setting of switch \(otherIndex)")
+                }
             }
         }
     }
