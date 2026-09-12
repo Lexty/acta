@@ -105,3 +105,34 @@ explaining.
 
 `MicrophoneIdentityProbe.isWarm` exists so deleting the warm-up fails a test rather than silently
 restoring a 60-second flaky gate.
+
+## A third reproducer, and the first usable sample, measured 2026-09-12
+
+The owner-release stop offer added a suite of eleven tests, each starting a real recording from a prompt
+and stopping it. On its own, together with the socket suites, and together with the reminder suites it
+passes. In the full gate it failed **every run it was part of** (ten completed, plus one sampled and stopped): 16–17 issues, the socket suites and
+`aRecordingBackedByAFakeSourceCrossesASegmentBoundaryAndAssembles` timing out at **62 s**, and dozens of
+unrelated tests — pure ones included — reporting ~62 s durations.
+
+What was measured, in order:
+
+- **A `sample` of the runner during the stall shows all 13 cooperative-pool threads in
+  `SegmentWriter.finish` → `DispatchGroup.wait(wallTimeout:)`**, called from `AudioRecorder.stop()` inside
+  its serialized lifecycle, while two dozen `com.apple.coremedia.mediaprocessor.audiocompression` threads
+  exist. This is the first sample with usable thread states, and it answers item 3 as far as it goes:
+  the pool is exhausted by writers synchronously waiting for their own finalisation. It does **not** show
+  what the finalisations themselves are waiting for.
+- **It is the suite's recordings, not its presence.** With the recording start turned into an early
+  return: 940 tests, green, 23.8 s.
+- **It is overlap in time, not the amount of audio.** Freezing the test clock after `.recording` (so
+  nothing more is written) and serializing the suite with the reminder coordinator's: still 17 issues. An
+  8-second sleep before each recording start: 942 tests, green, 110 s.
+- **Serializing the two meter suites that still stopped recordings in parallel** ("Activity meter in the
+  pipeline", "Activity meter gate") restored the gate: 942 tests, 28 s, three runs out of three. Their
+  unserialized state is the only change between the last failing run and the first green one.
+
+So the suite sits at an edge: roughly a pool's width of writers finishing at once. Serializing suites
+moves the gate back from it; it does not move the edge, and item 1 is still the question. A test-only
+mitigation keeps being the answer because the production app has one recording, and a synchronous wait
+on the cooperative pool is only reachable at this width in a parallel test run — which is an argument
+about today's app, not a guarantee about the code.

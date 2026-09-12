@@ -48,6 +48,9 @@ final class ReminderPanelController: ReminderPresenting {
         switch prompt {
         case .offerToRecord: return 20
         case .offerToStop: return 30    // a heavier decision deserves longer
+        // ⚠️ Outlasts the twenty-second countdown by the ten seconds the panel has to reach the screen. A
+        // dismissal here is a decline — it keeps recording — so a timer that fired first errs the safe way.
+        case .offerToStopOnRelease: return 30
         // ⚠️ Long enough to outlive a slow start: capture can take a couple of seconds to confirm, and a
         // panel that vanished first would leave the click looking like it did nothing.
         case .startingRecording: return 12
@@ -78,7 +81,16 @@ final class ReminderPanelController: ReminderPresenting {
         shownID = presentation.id
         awaitingAcknowledgement = presentation.id
         arm(lifetime: Self.lifetime(of: prompt), for: prompt)
-        watchForClicksOutside(for: prompt)
+        // ⚠️ **A click elsewhere is not an answer to a countdown.** It dismisses an offer that acts on
+        // nothing, which is harmless; on a countdown it would be a decline, and the person the feature is for
+        // — back in another app after the call — clicks somewhere within twenty seconds as a matter of
+        // course. The countdown carries its two answers as buttons and needs no third.
+        if presentation.secondsRemaining == nil {
+            watchForClicksOutside(for: prompt)
+        } else if let clickMonitor {
+            NSEvent.removeMonitor(clickMonitor)
+            self.clickMonitor = nil
+        }
         acknowledgeIfVisible()
     }
 
@@ -238,6 +250,9 @@ private struct ReminderPanelView: View {
                               title: title, microphone: mic)
             case .offerToStop(let recordingID, let title, let elapsed):
                 offerToStop(recordingID: recordingID, title: title, elapsed: elapsed)
+            case .offerToStopOnRelease(let recordingID, let title, let text):
+                offerToStopOnRelease(recordingID: recordingID, title: title, text: text,
+                                     secondsRemaining: presentation.secondsRemaining)
             case .startingRecording(let title):
                 started(title: title, confirmed: false)
             case .startedRecording(let title):
@@ -337,6 +352,48 @@ private struct ReminderPanelView: View {
             Spacer()
             Button("Remind me in 30 min") { coordinator.snooze(recordingID: recordingID) }
                 .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: Offer to stop on release
+
+    /// ⚠️ **Every sentence comes from `OwnerReleaseOfferText`.** This decides layout and colour only; what
+    /// the prompt says about the application, and about what happens at zero, is a tested projection.
+    @ViewBuilder
+    private func offerToStopOnRelease(recordingID: UInt64, title: String, text: OwnerReleaseOfferText,
+                                      secondsRemaining: Int?) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            tile(systemImage: "mic.slash", tint: .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text.headline).font(.headline)
+                Text(text.detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if let secondsRemaining {
+                Text(OwnerReleaseOfferText.countdown(seconds: secondsRemaining))
+                    .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+            }
+        }
+        .padding(.leading, 32).padding(.top, 8)
+
+        Button { coordinator.acceptReleaseStop(recordingID: recordingID) } label: {
+            Label(OwnerReleaseOfferText.stopNow, systemImage: "stop.fill").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(.red)
+        .padding(.top, 10)
+
+        HStack {
+            Button(OwnerReleaseOfferText.keepRecording) {
+                coordinator.keepRecordingAfterRelease(recordingID: recordingID)
+            }
+            .buttonStyle(.plain).font(.caption)
+            Spacer()
         }
         .padding(.top, 8)
     }

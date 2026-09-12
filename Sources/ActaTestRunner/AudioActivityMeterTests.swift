@@ -91,7 +91,13 @@ struct ActivityAccumulatorTests {
 }
 
 /// The meter inside a **real** recording, which is the only place its gate can be proved.
-@Suite("Activity meter in the pipeline")
+///
+/// ⚠️ **Serialized, with the gate suite below, for the reason in
+/// `docs/backlog/segment-finalisation-waits-under-parallel-tests.md`.** Both stop real recordings, and until
+/// 2026-09-12 their tests stopped them in parallel. That was below the edge until the owner-release suite
+/// added its recordings; then every cooperative thread sat in `SegmentWriter.finish`'s 30-second wait and the
+/// socket suites timed out at 62 s. Serializing these two restored the gate (942 tests, 28 s).
+@Suite("Activity meter in the pipeline", .serialized)
 struct AudioActivityMeterPipelineTests {
     private func withTemporaryDirectoryAsync(_ body: (URL) async throws -> Void) async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -204,7 +210,7 @@ struct AudioActivityMeterPipelineTests {
 }
 
 /// The gate itself, asserted by counting the calls the recorder makes.
-@Suite("Activity meter gate")
+@Suite("Activity meter gate", .serialized)
 struct AudioActivityMeterGateTests {
     private func withTemporaryDirectoryAsync(_ body: (URL) async throws -> Void) async throws {
         let directory = FileManager.default.temporaryDirectory

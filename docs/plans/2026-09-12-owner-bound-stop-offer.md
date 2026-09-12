@@ -756,24 +756,89 @@ cancellation UI exists or before `AGENTS.md` says a timer may act.
 **Files:** Modify `Sources/ActaRuntime/ReminderCoordinator.swift`, `Sources/Acta/ReminderPanel.swift`,
 `AGENTS.md`, `docs/ui-vocabulary.md`, `Sources/ActaTestRunner/ReminderCoordinatorTests.swift`
 
-- [ ] add `ReminderPrompt.offerToStopOnRelease(...)`, and its case to **both** exhaustive
+- [x] add `ReminderPrompt.offerToStopOnRelease(...)`, and its case to **both** exhaustive
       `lifetime(of:)` switches; ⚠️ its `promptDeadline` must outlast the countdown, or `isWithinDeadline`
       refuses the Cancel click before the countdown completes
-- [ ] resolve the sentence as a **projection**, not in the view — ⚠️ naming the application is a fact,
+- [x] resolve the sentence as a **projection**, not in the view — ⚠️ naming the application is a fact,
       and `AGENTS.md` says a user-facing string that states a fact is a projection
-- [ ] copy must not claim the call ended: Acta saw an application release the input
-- [ ] Cancel keeps recording and suppresses further release offers **until the owner returns to `held`**
-- [ ] Stop now stops; countdown completion stops; `ownerReturned` cancels silently
-- [ ] arbitrate against the quiet prompt: neither inherits the other's authority, and the quiet
+- [x] copy must not claim the call ended: Acta saw an application release the input
+- [x] Cancel keeps recording and suppresses further release offers **until the owner returns to `held`**
+- [x] Stop now stops; countdown completion stops; `ownerReturned` cancels silently
+- [x] arbitrate against the quiet prompt: neither inherits the other's authority, and the quiet
       prompt's non-acting expiry stays intact
-- [ ] decide and state whether the release offer defers to `isMenuOpen` as the quiet one does
-- [ ] rewrite the `AGENTS.md` rule as a narrow exception: the release countdown may act, **only** after
+- [x] decide and state whether the release offer defers to `isMenuOpen` as the quiet one does
+      → **it defers raising, and spends nothing**; a countdown already running is not revoked by opening
+      the menu (a menu that hides the panel is a lost presentation, which is)
+- [x] rewrite the `AGENTS.md` rule as a narrow exception: the release countdown may act, **only** after
       an acknowledged prompt ran its full duration; automatic start, automatic deletion and any timer
       answering the quiet prompt stay forbidden
-- [ ] write tests for all four outcomes, plus displacement by another prompt, plus a countdown whose
+- [x] write tests for all four outcomes, plus displacement by another prompt, plus a countdown whose
       recording identity changed under it
-- [ ] **negative control**: remove the displacement revocation → the displacement test fails
-- [ ] run `bash Scripts/test.sh`
+- [x] **negative control**: remove the displacement revocation → the displacement test fails
+- [x] run `bash Scripts/test.sh`
+
+**Done.** 942 tests pass (924 before; 18 new — 11 through the coordinator over real recordings, 7 pure),
+in four consecutive full runs of 28–29 s.
+
+- `ReminderPrompt.offerToStopOnRelease(recordingID:title:text:)`, 30 s in **both** `lifetime(of:)` switches.
+  ⚠️ **Decided here: an acknowledgement extends `promptDeadline` to the countdown's own deadline**, once.
+  Task 8 left acknowledgement unbounded, so a lifetime counted from publication could not outlast every
+  countdown; `a late acknowledgement … still leaves Stop Now answerable to the end` acknowledges 15 s late
+  and presses Stop Now 34 s after publication.
+- The sentence is `OwnerReleaseOfferText` in ActaKit: "Slack released the microphone" / "Acta saw Slack stop
+  using the microphone input." Unnamed: "The microphone was released". A word-list test forbids "ended",
+  "call", "meeting", "huddle" and similar. ⚠️ **The secondary button is "Keep Recording", not "Cancel"**:
+  on a stop prompt "Cancel" reads as cancelling the recording, which is the unbuilt cancel-and-delete.
+  The name comes from the start offer (already attribution-filtered), remembered against the binding.
+- `ReminderCoordinator.ownerWatch` holds a `MicrophoneOwnershipRule` per admitted binding, rebuilt when the
+  recorder's admission changes and discarded when there is none. It is fed `releaseEvidence` every tick,
+  after the quiet evaluation and before the countdown. `ownerReturned` and `evidenceLost` withdraw the offer
+  whether the countdown is running or awaiting acknowledgement.
+- Outcomes: Keep Recording (and any dismissal) declines until the rule is next `held`; Stop Now stops;
+  completion stops only if the recording id, the folder and the binding still match and the release is still
+  qualified; the owner returning withdraws silently.
+- ⚠️ **Arbitration, decided here:** the release offer is raised **only onto an empty panel**; a quiet offer
+  **may** displace a running countdown, which is revoked — displacement only moves toward the prompt that
+  keeps recording. A displaced offer returns on the next empty panel with a **new** presentation and a full
+  countdown. A lost presentation or a lapse calls `MicrophoneOwnershipRule.discardAccumulatedRelease()`
+  (new), so the next offer needs a freshly observed interval — the lock-without-sleep case the rule's own gap
+  check cannot see.
+- ⚠️ **Decided here: the panel installs no click-outside monitor for a countdown prompt.** A click elsewhere
+  is a decline, and the user this is for clicks in another app within twenty seconds as a matter of course.
+- `AGENTS.md` "The reminders" now states the exception and its four conditions, and what stays forbidden.
+- ⚠️ **`docs/ui-vocabulary.md` was listed in this task's files and is not touched here**: Task 11 has the
+  checkbox for it, and the file has no reminder-panel section to amend yet.
+- Tests are `Sources/ActaTestRunner/OwnerReleaseOfferTests.swift`, the coordinator suite **nested inside
+  `ReminderCoordinatorTests`**; the fixture is Slack + CoreSpeech, plus `com.apple.replayd` once recording.
+
+**Negative controls, run** (each reverted; the plan's and the whole-body one re-run on the final tests):
+- Removing the displacement revocation (the plan's control) failed **only** the named displacement test, at
+  "the release was not offered again". ⚠️ It bites through bookkeeping, not through the stop: `present`
+  overwrites the countdown anyway, so nothing stops. What the revocation carries is the watch learning the
+  offer ended; without it the offer is never re-raised — the direction that keeps recording.
+- Deleting the body of `observeOwnerRelease` failed 10 of 11 coordinator tests; the eleventh asserts that an
+  unbound recording is never offered, which an absent feature satisfies.
+- Completion not stopping: the completion and displacement tests. Dismissal not declining, or `held` not
+  clearing the decline: the Keep Recording test. No deadline extension: the late-acknowledgement test. No
+  discard on a lost presentation: its test. No withdrawal on `ownerReturned` / `evidenceLost`: their tests.
+  No menu deferral: the menu test. Letting the offer displace any prompt: the displacement test.
+- ⚠️ **Three guards stayed green alone**, each redundant with another: the folder check and the binding check
+  in `stopForOwnerRelease` (a menu-started successor differs in both), and the qualification re-check at
+  completion (the owner returning already withdrew the offer). **Removed in pairs**, folder + binding failed
+  the replaced-recording test at both Stop Now and the countdown; qualification + the `ownerReturned`
+  withdrawal failed the owner-return test, including the recording stopping.
+
+⚠️ **The suite broke the full gate, and the fix is outside this task's files.** Alone it passed; in the full
+run it failed every time with 16–17 issues, socket suites timing out at 62 s. `sample` showed all 13
+cooperative threads blocked in `SegmentWriter.finish`'s 30-second wait. Controls: no recordings → green;
+freezing the clock and nesting the suite → still red; an 8-second delay before each start → green. What
+restored it was marking **"Activity meter in the pipeline" and "Activity meter gate" `.serialized`** — the
+last two suites stopping recordings in parallel. Written up as a third reproducer in
+`docs/backlog/segment-finalisation-waits-under-parallel-tests.md`; the production wait is untouched.
+
+⚠️ **Not checked:** the panel — the countdown's layout, the missing click-outside dismissal, the button
+labels on screen — is human acceptance. `bash Scripts/lint.sh` did not run: `swiftlint` is not installed.
+No added line exceeds 140 columns.
 
 ### Task 10: Verify acceptance criteria
 

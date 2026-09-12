@@ -54,6 +54,10 @@ public struct AcknowledgedCountdown: Equatable, Sendable {
         case presentationLost
         /// The countdown was not watched continuously — a sleep, a stall, a rebaseline.
         case observationLapsed
+        /// The application whose release the countdown was about was observed holding the input again.
+        case ownerReturned
+        /// The evidence behind the release was lost — an unreadable observation, or a gap in observing.
+        case evidenceLost
         /// The prompt was taken down for any other reason.
         case withdrawn
     }

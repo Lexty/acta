@@ -10,8 +10,9 @@ import Testing
 /// the panel where it was, is human acceptance. What is decided here is everything the coordinator does
 /// with what a presenter tells it — and what it does when a presenter tells it nothing.
 ///
-/// ⚠️ **No prompt carries a countdown in production yet.** The release stop offer lands with its
-/// cancellation UI; until then these tests attach one to `.startedRecording`, which is only a carrier.
+/// ⚠️ **The carrier is not the production prompt.** These tests attach a countdown to `.startedRecording`
+/// to exercise the contract on its own; the release stop offer that carries one in production, and what its
+/// completion does, is tested in `OwnerReleaseOfferTests`.
 @Suite("Reminder presenter contract", .serialized)
 @MainActor
 struct ReminderPresenterTests {

@@ -549,14 +549,32 @@ reached the log while the other three reached the user.
 
 ## The reminders
 
-Two prompts, added 2026-09-12: one offers to record when another application takes the microphone, one
-offers to stop when a recording has gone quiet. Both are off-limits to the socket and both are
-**offers**.
+Three prompts, added 2026-09-12: one offers to record when another application takes the microphone, one
+offers to stop when a recording has gone quiet, and one offers to stop when the application a
+prompt-started recording belongs to has let the microphone go. All three are off-limits to the socket.
 
-**Nothing in this feature acts on its own.** A timer may withdraw a prompt; no timer may answer one. An
-expired offer to record records nothing; an expired offer to stop keeps recording. If you are changing
-this code and a path appears where a timeout starts or stops a recording, that is the bug, not a
-feature.
+**Nothing in this feature acts on its own — with one narrow exception, decided by the user.** A timer may
+withdraw a prompt; no timer may answer one. An expired offer to record records nothing; an expired quiet
+offer keeps recording. If you are changing this code and a path appears where a timeout starts a
+recording, deletes one, or answers the quiet offer, that is the bug, not a feature.
+
+⚠️ **The exception: the owner-release stop offer's countdown may stop a recording** — and only when all of
+these hold, each of which has a test and a negative control (`OwnerReleaseOfferTests`, `ReminderPresenterTests`):
+- the recording was **started from a start offer** and admitted bound to that offer's application
+  (`OwnerBinding`); a menu or socket start is never bound and never offered this;
+- that application was **observed released** for the full qualification interval, with no gap and no
+  unreadable observation (`MicrophoneOwnershipRule`); the owner returning, or the evidence lapsing,
+  withdraws the offer whether its countdown is running or still awaiting acknowledgement;
+- the presenter **acknowledged the prompt as on screen** and the countdown then ran its **full duration**,
+  watched without a gap (`AcknowledgedCountdown`). A publication is not a presentation, and a lock, a
+  display sleep or a wake withdraws the countdown rather than letting it catch up;
+- at completion the recording is **still the one the offer named** — by the coordinator's id, the folder
+  being written into, and the admitted binding — and its release still stands qualified.
+
+Keep Recording, a dismissal, a displacement by another prompt, the preference being switched off and quit
+all end the countdown without acting. **What stays forbidden, and is not widened by this:** automatic
+start, automatic deletion, and any timer answering the quiet offer. A second prompt that wants to act on a
+timer is a new decision for the user, not an extension of this paragraph.
 
 **Say what was measured, not what it implies.** `kAudioProcessPropertyIsRunningInput` means the process
 runs IO with an active input stream — not that a meeting started. A muted participant usually keeps the

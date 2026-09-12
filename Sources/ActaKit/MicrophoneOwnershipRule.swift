@@ -109,6 +109,23 @@ public struct MicrophoneOwnershipRule: Sendable {
         self.lastObservedAt = owner.observedAt
     }
 
+    /// Forget whatever release has accumulated, so the next qualification needs a full interval of fresh
+    /// observations.
+    ///
+    /// ⚠️ **For an offer whose user never had its promised interval** — a lock, a display sleep, a lapse
+    /// in watching. The rule's own gap check covers a sleep that stopped the observations; a screen that
+    /// locked while the Mac stayed awake stops nothing, and without this the rule would still stand
+    /// qualified on evidence gathered before the offer was lost. A held owner is left alone: there is
+    /// nothing to forget.
+    public mutating func discardAccumulatedRelease() {
+        switch phase {
+        case .releaseCandidate, .releasedQualified:
+            phase = .unknown(since: lastObservedAt)
+        case .held, .unknown:
+            break
+        }
+    }
+
     /// Feed one folded observation. `now` is its timestamp; the rule has no clock of its own.
     public mutating func observe(_ evidence: AudioProcessReadings.Evidence, at now: Date) -> Outcome {
         let interval = now.timeIntervalSince(lastObservedAt)

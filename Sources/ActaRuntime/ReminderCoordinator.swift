@@ -17,6 +17,13 @@ public enum ReminderPrompt: Equatable, Sendable {
     /// recording count is a different number. A prompt that answers "will I lose what is recorded" with
     /// the wrong figure is worse than one that does not answer it.
     case offerToStop(recordingID: UInt64, title: String, elapsedSeconds: Int)
+    /// The application a prompt-started recording belongs to let the microphone go, and stayed released.
+    ///
+    /// ⚠️ **The one prompt that acts if nobody answers**: it carries a countdown, and a countdown that ran
+    /// its full acknowledged duration stops the recording. See the narrow exception in `AGENTS.md`.
+    /// ⚠️ **`text` is resolved before it gets here** (`OwnerReleaseOfferText`), because naming the
+    /// application is a fact and the view is the one layer nothing checks.
+    case offerToStopOnRelease(recordingID: UInt64, title: String, text: OwnerReleaseOfferText)
     /// A click has been taken and the answer is not known yet.
     ///
     /// ⚠️ **It exists because the click used to produce nothing at all.** The acceptance path takes the
@@ -146,10 +153,13 @@ public struct ObservedProcessEvidence: Equatable, Sendable {
     public let epoch: UInt64
 }
 
-/// Joins the two reminder rules to the recorder.
+/// Joins the reminder rules — start offer, quiet stop, owner-release stop — to the recorder.
 ///
-/// ⚠️ **Nothing here acts on its own.** Every path that starts or stops a recording begins with a click.
-/// A timer may *withdraw* a prompt; no timer may ever answer one.
+/// ⚠️ **Nothing here acts on its own — with one narrow exception.** Every path that starts a recording
+/// begins with a click, and a timer may *withdraw* the start offer or the quiet stop offer but never answer
+/// either. The exception is the owner-release stop offer: its countdown may stop a recording, and only
+/// after that prompt was acknowledged on screen and ran its full duration with nobody keeping the
+/// recording. Automatic start, automatic deletion and any timer answering the quiet offer stay forbidden.
 ///
 /// ⚠️ **Identity is re-checked at the admission point, not only when the prompt was raised.** The panel
 /// hands back the id it was given, and the check happens in the same main-actor turn as the command —
@@ -185,10 +195,38 @@ public final class ReminderCoordinator: ObservableObject {
     private var lastRenderedSeconds: Int?
     /// The presentation whose countdown last ran its full acknowledged duration.
     ///
-    /// ⚠️ **Authorisation, and nothing acts on it yet.** The stop offer that consumes it lands together
-    /// with its cancellation UI and the `AGENTS.md` exception that allows a timer to act; until then a
-    /// completed countdown takes its prompt down and records that it would have been allowed to.
+    /// ⚠️ **Authorisation, recorded for every countdown; only the release offer acts on it.** A completed
+    /// countdown on any other prompt takes that prompt down and does nothing else.
     private(set) var authorisedCountdown: UInt64?
+
+    /// The release side of the recording in progress, when that recording is bound to an owner.
+    ///
+    /// ⚠️ **Rebuilt whenever the admitted binding changes**, and discarded when there is none: a watch
+    /// never outlives the recording whose binding it was built from, so a release observed for one
+    /// recording can never offer to stop another.
+    private(set) var ownerWatch: OwnerWatch?
+
+    /// What the release side knows about one bound recording.
+    struct OwnerWatch {
+        var rule: MicrophoneOwnershipRule
+        /// The name the start offer showed for this owner, or `nil` when it showed none.
+        let application: String?
+        /// The user kept recording, or let the offer be dismissed. Nothing more is offered until the owner
+        /// is observed holding the input again.
+        var isDeclined = false
+        /// The presentation of the release offer standing for this watch, until its countdown ends.
+        ///
+        /// ⚠️ **Cleared only by the countdown reporting its end**, so a route that took the offer down
+        /// without revoking its countdown leaves this set — and no second offer is raised. That is the
+        /// direction that keeps recording.
+        var offer: UInt64?
+    }
+
+    /// The name a prompt start was admitted with, tied to the binding it named, for the offer's sentence.
+    ///
+    /// ⚠️ **Tied to the binding, not to the bundle.** Two recordings of one application are two bindings;
+    /// a name remembered by bundle would outlive the recording it was shown for.
+    private var admittedApplication: (binding: OwnerBinding, name: String?)?
 
     private let service: ControlAPI
     private let reader: any AudioProcessReading
@@ -495,6 +533,9 @@ public final class ReminderCoordinator: ObservableObject {
         }
 
         evaluateQuiet()
+        // ⚠️ **After the quiet evaluation**, so a quiet offer raised on this tick is already on the panel
+        // and the release offer, which only ever takes an empty one, waits behind it.
+        observeOwnerRelease(settings)
         // ⚠️ **Last, after everything this tick observed.** Evidence that should cancel a countdown has to
         // reach it before the countdown is asked whether it has run out.
         evaluateCountdown()
@@ -523,6 +564,70 @@ public final class ReminderCoordinator: ObservableObject {
             log.info("episode \(episodeID, privacy: .public) withdrawn — the holder let go")
             withdrawStartOffer(token(for: episodeID))
         }
+    }
+
+    /// Feed the recording's owner the release evidence this tick gathered, and offer to stop when it has
+    /// let the microphone go for long enough.
+    ///
+    /// ⚠️ **Only a bound recording is watched**, and the binding is read from the recorder on every tick
+    /// rather than remembered: a recording that stopped and one that started between two ticks carry
+    /// different admissions, and the watch is rebuilt the moment they differ.
+    ///
+    /// ⚠️ **The offer is raised only onto an empty panel.** A prompt already on screen may be what the user
+    /// is reading, and a countdown that took its place would start acting on a panel nobody had looked at
+    /// yet. The reverse is allowed: a quiet offer raised while the countdown runs replaces it — displacement
+    /// only ever moves toward the prompt that keeps recording — and the countdown is revoked, never handed on.
+    ///
+    /// ⚠️ **Deferred while the menu is open**, as the quiet offer is: the menu already shows the recording
+    /// and its Stop button, and a panel raised over it would duplicate the one control the user is looking
+    /// at. Unlike the quiet offer this spends nothing — the release stays qualified and is offered once the
+    /// menu closes. A countdown already running is **not** revoked by opening the menu; if the menu hides
+    /// the panel, the presenter reports the presentation lost, which does revoke it.
+    private func observeOwnerRelease(_ settings: RecordingSettings) {
+        guard settings.offersStopWhenOwnerReleases, wasRecording,
+              let binding = service.state.ownerAdmission?.binding else {
+            if ownerWatch != nil {
+                ownerWatch = nil
+                if case .offerToStopOnRelease = prompt { prompt = nil }
+            }
+            return
+        }
+        if ownerWatch?.rule.owner != binding {
+            if case .offerToStopOnRelease = prompt { prompt = nil }
+            let name = admittedApplication?.binding == binding ? admittedApplication?.name : nil
+            ownerWatch = OwnerWatch(rule: MicrophoneOwnershipRule(owner: binding), application: name)
+        }
+        guard var watch = ownerWatch, let observed = releaseEvidence else { return }
+        let outcome = watch.rule.observe(observed.evidence, at: observed.observedAt)
+        if case .held = watch.rule.phase { watch.isDeclined = false }
+        // ⚠️ Stored before anything below can revoke a countdown, because revocation writes to the watch.
+        ownerWatch = watch
+        switch outcome {
+        case .ownerReturned:
+            log.info("owner \(binding.bundleID, privacy: .public) is holding the input again")
+            withdrawReleaseOffer(.ownerReturned)
+        case .evidenceLost:
+            log.info("owner \(binding.bundleID, privacy: .public) release lost its evidence")
+            withdrawReleaseOffer(.evidenceLost)
+        case .releaseQualified:
+            log.notice("owner \(binding.bundleID, privacy: .public) released the input for the full interval")
+        case .none:
+            break
+        }
+
+        guard let current = ownerWatch, case .releasedQualified = current.rule.phase, !current.isDeclined,
+              current.offer == nil, prompt == nil, !isMenuOpen,
+              case .recording = service.state.operation, recordingDirectory != nil else { return }
+        presentCountdown(.offerToStopOnRelease(recordingID: recordingID, title: service.title,
+                                               text: OwnerReleaseOfferText(application: current.application)))
+        ownerWatch?.offer = presentation
+    }
+
+    /// Take a standing release offer down, and its countdown with it, whether acknowledged or not.
+    private func withdrawReleaseOffer(_ reason: AcknowledgedCountdown.Revocation) {
+        guard case .offerToStopOnRelease = prompt else { return }
+        revokeCountdown(reason)
+        prompt = nil
     }
 
     /// Emit a beat if this tick is due one.
@@ -676,6 +781,7 @@ public final class ReminderCoordinator: ObservableObject {
             adoptReservedEpoch()
             quietRule.beginRecording(recordingID, generation: currentGeneration)
             if case .offerToStop = prompt { prompt = nil }
+            if case .offerToStopOnRelease = prompt { prompt = nil }
         }
         // ⚠️ Promotion happens on `.recording`, never on `.starting`: capture writing segments is what
         // the confirmation claims, and `.starting` is precisely the state in which that is not yet known.
@@ -694,6 +800,7 @@ public final class ReminderCoordinator: ObservableObject {
             adoptReservedEpoch()
             quietRule.invalidate()
             if case .offerToStop = prompt { prompt = nil }
+            if case .offerToStopOnRelease = prompt { prompt = nil }
         }
         wasRecording = isRecording
     }
@@ -728,6 +835,10 @@ public final class ReminderCoordinator: ObservableObject {
         switch prompt {
         case .offerToRecord: return 20
         case .offerToStop: return 30
+        // ⚠️ **Must outlast the countdown**, or `isWithinDeadline` refuses a Stop Now pressed in its last
+        // seconds: twenty for the countdown and ten for the panel to reach the screen. An acknowledgement
+        // later than that extends the deadline to the countdown's own — see `acknowledgePresentation`.
+        case .offerToStopOnRelease: return 30
         case .startingRecording: return 12
         case .startedRecording: return 3
         case .checkingStart: return 12
@@ -742,8 +853,8 @@ public final class ReminderCoordinator: ObservableObject {
     /// Publish a prompt that carries a countdown. The countdown does not run until the presenter
     /// acknowledges this presentation as on screen.
     ///
-    /// ⚠️ **Internal, and nothing in production calls it yet.** The release stop offer is its consumer,
-    /// and it lands together with its cancellation UI rather than several commits ahead of it.
+    /// ⚠️ **Internal.** Production's one caller is the release stop offer; the presenter tests call it with
+    /// a carrier prompt to exercise the contract on its own.
     func presentCountdown(_ newPrompt: ReminderPrompt,
                           configuration: AcknowledgedCountdown.Configuration = .default) {
         present(newPrompt, countdown: configuration)
@@ -782,6 +893,13 @@ public final class ReminderCoordinator: ObservableObject {
         guard !isClosing, var current = countdown else { return }
         guard current.acknowledge(presentation: id, at: now()) else { return }
         countdown = current
+        // ⚠️ **The prompt stays answerable for as long as its countdown runs.** The lifetime is counted from
+        // publication, and a late acknowledgement starts a full countdown that could otherwise outlive it —
+        // leaving a Stop Now pressed in the last seconds refused while the countdown itself went on to
+        // stop. Extended once, here, to the countdown's own deadline, which nothing can move afterwards.
+        if case .running(let deadline) = current.phase {
+            promptDeadline = max(promptDeadline ?? deadline, deadline)
+        }
         log.info("countdown for prompt \(id, privacy: .public) acknowledged on screen")
     }
 
@@ -803,7 +921,28 @@ public final class ReminderCoordinator: ObservableObject {
         guard var current = countdown, current.revoke(reason) else { return false }
         countdown = current
         log.info("countdown for prompt \(current.presentation, privacy: .public) revoked: \(String(describing: reason), privacy: .public)")
+        releaseOfferEnded(current.presentation, revokedBy: reason)
         return true
+    }
+
+    /// The countdown of `presentation` has ended, by revocation or — `nil` — by completing.
+    ///
+    /// ⚠️ **What an ended release offer leaves behind depends on why it ended.** Kept or dismissed: the user
+    /// was asked, and is not asked again until the owner returns. Lost from the screen or not watched: the
+    /// user never had the promised interval, so the release must be observed afresh before a new offer.
+    /// Replaced, withdrawn, switched off: nothing about the release changed, and the next empty panel may
+    /// carry a new offer with a full countdown — never the old one's remainder.
+    private func releaseOfferEnded(_ presentation: UInt64, revokedBy reason: AcknowledgedCountdown.Revocation?) {
+        guard ownerWatch?.offer == presentation else { return }
+        ownerWatch?.offer = nil
+        switch reason {
+        case .dismissed:
+            ownerWatch?.isDeclined = true
+        case .presentationLost, .observationLapsed:
+            ownerWatch?.rule.discardAccumulatedRelease()
+        case .replaced, .preferenceOff, .closing, .withdrawn, .ownerReturned, .evidenceLost, nil:
+            break
+        }
     }
 
     /// Ask the countdown where it stands, and pass the answer on.
@@ -822,10 +961,20 @@ public final class ReminderCoordinator: ObservableObject {
         case .completed:
             log.notice("countdown for prompt \(current.presentation, privacy: .public) ran its full acknowledged duration")
             authorisedCountdown = current.presentation
+            let wasReleaseOffer = ownerWatch?.offer == current.presentation
+            let shown = prompt
+            releaseOfferEnded(current.presentation, revokedBy: nil)
             prompt = nil
+            // ⚠️ **The narrow exception, and the only place a timer stops a recording.** Reached only by a
+            // countdown that was acknowledged on screen and evaluated without a gap to its deadline; the
+            // stop re-checks everything a click would, plus that the release is still qualified.
+            if wasReleaseOffer, case .offerToStopOnRelease(let id, _, _)? = shown {
+                stopForOwnerRelease(recordingID: id, requiringQualifiedRelease: true)
+            }
         case .revoked(let reason):
             let id = current.presentation
             log.info("countdown for prompt \(id, privacy: .public) revoked: \(String(describing: reason), privacy: .public)")
+            releaseOfferEnded(id, revokedBy: reason)
             prompt = nil
         }
     }
@@ -860,7 +1009,7 @@ public final class ReminderCoordinator: ObservableObject {
     /// says nothing about whether a call is still in progress. `isEpisodeActionable` is the question
     /// that does.
     public func acceptStart(episodeID token: UInt64) {
-        guard case .offerToRecord(let shown, _, let bundleID, let intendedTitle, _) = prompt,
+        guard case .offerToRecord(let shown, let application, let bundleID, let intendedTitle, _) = prompt,
               shown == token else { return }
         // ⚠️ **The offer's own deadline, not the panel's timer.** The view arms a `Timer` to take the
         // prompt down, and a timer can be late or can fail to fire — a panel was observed still on
@@ -929,7 +1078,8 @@ public final class ReminderCoordinator: ObservableObject {
             // episode captured before it.** Resolving at the click would bind evidence the barrier has
             // since outdated; resolving from whatever holds the input now would bind a newer candidate.
             self.service.start(title: intendedTitle) {
-                self.resolveOwner(episodeID: episodeID, bundleID: bundleID, acceptedEpoch: acceptedEpoch)
+                self.resolveOwner(episodeID: episodeID, bundleID: bundleID, application: application,
+                                  acceptedEpoch: acceptedEpoch)
             }
             // Honest until the recorder says otherwise; `trackRecordingIdentity` promotes or withdraws it.
             self.awaitingConfirmation = intendedTitle
@@ -948,7 +1098,8 @@ public final class ReminderCoordinator: ObservableObject {
     ///
     /// ⚠️ **Every answer starts a recording.** A withheld binding is logged with its reason and the start
     /// proceeds unbound.
-    private func resolveOwner(episodeID: UInt64, bundleID: String?, acceptedEpoch: UInt64) -> OwnerAdmission {
+    private func resolveOwner(episodeID: UInt64, bundleID: String?, application: String?,
+                              acceptedEpoch: UInt64) -> OwnerAdmission {
         let admission: OwnerAdmission
         if let observed = releaseEvidence {
             if observed.epoch != acceptedEpoch {
@@ -965,6 +1116,7 @@ public final class ReminderCoordinator: ObservableObject {
         }
         switch admission {
         case .bound(let binding):
+            admittedApplication = (binding, application)
             log.notice("recording admitted bound to \(binding.bundleID, privacy: .public)")
         case .unbound(let reason):
             log.notice("recording admitted unbound: \(String(describing: reason), privacy: .public)")
@@ -1037,6 +1189,60 @@ public final class ReminderCoordinator: ObservableObject {
     public func keepRecording() {
         quietRule.offerResolved()
         dismiss()
+    }
+
+    /// Stop Now, from the release offer.
+    ///
+    /// ⚠️ **A click, so it does not ask whether the release is still qualified** — the user decided about
+    /// their recording, and an owner that returned would already have taken the offer down. Everything
+    /// else a stop is bound to is re-checked, in this turn.
+    public func acceptReleaseStop(recordingID id: UInt64) {
+        guard case .offerToStopOnRelease(let shown, _, _) = prompt, shown == id else { return }
+        guard isWithinDeadline() else {
+            log.info("release stop offer \(id, privacy: .public) was clicked after its deadline")
+            dismiss()
+            return
+        }
+        dismiss()
+        stopForOwnerRelease(recordingID: id, requiringQualifiedRelease: false)
+    }
+
+    /// Keep Recording, from the release offer: nothing more is offered until the owner holds the input again.
+    ///
+    /// ⚠️ **Never deadline-gated.** Keeping the recording is the safe direction, and a refused Keep would
+    /// leave the countdown running to a stop the user just declined.
+    public func keepRecordingAfterRelease(recordingID id: UInt64) {
+        guard case .offerToStopOnRelease(let shown, _, _) = prompt, shown == id else { return }
+        dismiss()
+    }
+
+    /// Stop the recording a release offer was raised for — if it is still that recording.
+    ///
+    /// ⚠️ **The identity checks of the quiet offer, plus the owner.** The recording must be the one the offer
+    /// named, by the coordinator's id and by the folder the recorder is writing into, and it must still be
+    /// admitted with the binding the watch was built from. A countdown additionally requires the release to
+    /// still stand qualified: evidence gathered in this tick reached the rule before the countdown was asked.
+    private func stopForOwnerRelease(recordingID id: UInt64, requiringQualifiedRelease: Bool) {
+        guard !isClosing, service.settings.offersStopWhenOwnerReleases else { return }
+        guard id == recordingID else {
+            log.info("release stop offer \(id, privacy: .public) belongs to a finished recording")
+            return
+        }
+        guard case .recording = service.state.operation else { return }
+        guard let directory = recordingDirectory, service.activeRecordingDirectory == directory else {
+            log.info("release stop offer \(id, privacy: .public) names a recording that has been replaced")
+            return
+        }
+        guard let watch = ownerWatch, service.state.ownerAdmission?.binding == watch.rule.owner else {
+            log.info("release stop offer \(id, privacy: .public) names an owner the recording no longer has")
+            return
+        }
+        if requiringQualifiedRelease {
+            guard case .releasedQualified = watch.rule.phase else { return }
+        }
+        let cause = requiringQualifiedRelease ? "the release countdown completed" : "Stop Now"
+        log.notice("stopping recording \(id, privacy: .public): \(cause, privacy: .public)")
+        service.stop()
     }
 
     /// "Remind me in thirty minutes", bound to this recording.
