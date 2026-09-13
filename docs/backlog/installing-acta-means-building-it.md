@@ -1,61 +1,102 @@
 ---
 worth: yes
-where: Scripts/setup-signing.sh:44
+where: Scripts/bundle.sh:129
 added: 2026-09-13
 ---
-# the only way to install Acta is to build it, and that is an identity problem, not a packaging one
+# the only way to install Acta is to build it
 
 To run Acta today you clone the repository, run `Scripts/bundle.sh`, and let `setup-signing.sh` mint a
-self-signed certificate in a dedicated keychain. That certificate is what makes the TCC grants stick:
-it gives the bundle a designated requirement that survives a rebuild. It works because **the machine
-that signs is the machine that runs**.
+self-signed certificate in a dedicated keychain. There is no route for someone who does not want a
+compiler.
 
-That is exactly why it does not travel. A downloaded `.app` carrying someone else's self-signed
-certificate is, to Gatekeeper, unsigned: it arrives quarantined, and on recent macOS opening it at all
-means a trip through System Settings → Privacy & Security. So the obvious answers relocate the problem
-rather than solve it — a Homebrew cask, a `.dmg` on a page, a release asset all deliver the same
-unopenable bundle.
+## Four mechanisms, and the first draft of this item ran them together
 
-The chain that actually ends in "download it and it runs" is:
+Getting this wrong sends the work in the wrong direction, so they are separated here deliberately.
 
-1. a **Developer ID Application** certificate, which requires paid Apple Developer Program membership;
-2. **notarization** of the built artefact, and **stapling** the ticket to it;
-3. only then a distribution channel, which at that point is the easy part.
+- **Signature.** A self-signed bundle *is* signed, and its signature verifies on any Mac. It is not
+  tied to the machine that produced it.
+- **Designated requirement.** What the local certificate buys is a requirement (identifier + leaf) that
+  survives a rebuild, which is why a local build keeps its permissions. Apple documents self-created
+  identities and requirements in TN2206.
+- **Quarantine and Gatekeeper.** A downloaded artefact is quarantined *because it was downloaded*, not
+  because of who signed it. What an ordinary download needs to open without a security exception is
+  Apple-recognised distribution trust: Developer ID plus notarization.
+- **TCC.** Neither a certificate nor notarization grants Microphone or Screen Recording. The user
+  grants those, every time, whatever the signature says.
 
-⚠️ **The cost decision is the whole item.** Steps 2 and 3 are mechanical and cheap; step 1 is an
-annual fee and an account. Nothing downstream can be evaluated before that is decided, which is why
-this item names it first instead of comparing packaging formats.
+⚠️ **So "a prebuilt install is impossible without paid membership" is too strong**, and the first
+version of this item said it. macOS has a documented Open Anyway path for an unidentified developer.
+The defensible product requirement is the narrower one: *a normal install, with no security exception
+asked of the user, needs Developer ID and notarization.* We should not ship instructions that teach
+people to strip quarantine or click past Gatekeeper.
 
-## What is specific to this app, and would be missed by generic packaging advice
+## What the release path actually involves
 
-- **The TCC grant moves with the identity.** Screen Recording and Microphone are bound to the
-  designated requirement, so switching to a Developer ID identity changes it once, for everyone, and
-  anyone who had built locally re-grants both. `AGENTS.md` already documents this trap for the
-  ad-hoc→certificate switch; distribution is the same event at a larger scale, and it wants a sentence
-  in the release notes rather than a support thread.
-- **Screen Recording is an alarming thing to ask a stranger for.** Someone who built from source has
-  read why; someone who downloaded an app has not. Whatever fronts the download has to say that system
-  audio on macOS is captured through ScreenCaptureKit and that this is what the permission is for,
-  before the prompt appears rather than after.
-- **macOS 14 builds it, macOS 15 records.** `SCStreamConfiguration.captureMicrophone` is 15+, and on 14
-  the app launches and explains that recording is unavailable. That is a reasonable outcome for someone
-  who compiled it and a bad one for someone who clicked Download, so the requirement belongs next to
-  the button.
-- **`ffmpeg` is needed to assemble, not to record.** Without it a recording runs to the end and then
-  fails at assembly. ⚠️ **Nothing is lost** — the recovery marker stays `recording`, the segments are
-  intact, and installing `ffmpeg` and relaunching assembles the meeting
-  (`RecordingController.swift:433`). But the user meets an error screen immediately after their first
-  real call, which is the worst possible moment to discover a dependency. A cask can declare
-  `ffmpeg`; a bare disk image cannot. That is the strongest argument for Homebrew over a download link,
-  and it is an argument about first-run trust rather than about data loss.
+Not "swap the certificate". Hardened runtime, a secure timestamp, signing nested executable
+components, notarization, and stapling the ticket — Apple's notarization troubleshooting page is the
+list. Against that, the current build script:
 
-## Not established
+- signs with no `--options runtime` and no `--timestamp`;
+- ends with `codesign --verify --verbose=2 "$APP_DIR" || true`, so **verification cannot fail the
+  build**. A release path needs that gate to be fatal, and the local dev path can keep its leniency.
 
-- What the **official** `homebrew-cask` tap requires of software that is not notarized, and what its
-  notability rules are. A **personal tap** (`brew tap Lexty/acta`) is believed to have no acceptance
-  criteria and to be trivially served from this repository, which would make it the cheap first step —
-  but that belief has not been checked against Homebrew's own documentation.
-- Whether an unsigned cask can be installed without the user passing `--no-quarantine`, and whether
-  that flag is acceptable to ask of anyone.
+Keep a separate dev identity and keep the production bundle identifier and requirement stable across
+releases, or every release re-prompts for both permissions.
 
-Settle those two before choosing a channel; neither changes the conclusion that step 1 gates everything.
+⚠️ **Do not promise from reasoning that every existing local-build user must re-grant.** Moving to a
+Developer ID identity changes the requirement, and `AGENTS.md` documents that trap for the
+ad-hoc→certificate switch — but which users on which OS versions actually re-prompt is a thing to
+observe during a real upgrade, not to assert here.
+
+## Homebrew is a delivery channel, not the trust mechanism
+
+- Official `homebrew/cask` policy requires an artefact to pass its Gatekeeper checks without disabling
+  or bypassing protections, and has shared acceptance criteria a new project cannot count on.
+- Homebrew applies quarantine to cask downloads, so a cask does not route around the OS.
+- A **personal tap** avoids the central tap's editorial acceptance, and can be the first channel — but
+  "no criteria at all" is wrong: it still means the cask DSL, maintenance, and the same OS trust
+  behaviour. Acceptance into the official tap need not block a first release.
+
+What a cask genuinely buys here is `depends_on formula: "ffmpeg"`.
+
+## `ffmpeg`, stated at its real size
+
+`ffmpeg` is needed to assemble, not to record. Without it a recording runs to the end and fails at
+assembly — and ⚠️ **nothing is lost**: the recovery marker stays `recording`, the segments are intact,
+and installing `ffmpeg` and relaunching assembles the meeting (`RecordingController.swift:433`). The
+first version of this item called it losing the meeting; it is not. What it is, is a stranger meeting
+an error screen straight after their first real call, which is the worst moment to learn about a
+dependency. That is an argument about first-run trust, and it favours a cask over a bare disk image.
+
+⚠️ `SegmentAssembler.locateFFmpeg` tries `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, then
+`PATH`. An app launched from Finder does not inherit the shell's environment, so the three fixed paths
+carry more of the decision there than they do in a terminal — but the resolver still consults `PATH`,
+and what it contains depends on the launch environment. That is a reason to test an **actual Finder
+launch with the supported installation route**, not a reason to assert what a Finder `PATH` holds.
+
+Bundling a licensed `ffmpeg` build is the alternative to declaring it; it adds third-party licensing,
+signing and resolution work, so a cask is the smaller first scope.
+
+## Also wrong in the metadata today
+
+`Resources/Info.plist` declares `LSMinimumSystemVersion = 14.0`, while recording needs macOS 15
+(`SCStreamConfiguration.captureMicrophone`) and everything under `MenuContent` is gated on 15. Building
+and *usefully running* have different minimums, and a public artefact should advertise the recording
+one in its own metadata as well as on any page or cask. Choose and test the CPU architectures
+explicitly rather than inferring them from an OS minimum.
+
+## Done means
+
+A clean machine — no developer keychain, no Xcode, no `ffmpeg` — downloads the artefact through a real
+quarantined path, opens it without a security exception, finds the menu-bar icon (there is no Dock
+presence), grants both permissions, records a call and saves it. Denial and revocation tested
+separately, and an upgrade from a previous signed artefact tested. A successful launch on the
+developer's own Mac with grants already in place is weak evidence of any of this.
+
+Signing and notary credentials stay outside the repository, and released artefacts follow the
+accepted-`main`/tag rule.
+
+## The open decision
+
+Whether to fund Developer ID membership. Everything above is downstream of it, which is why this item
+names it rather than comparing packaging formats.
