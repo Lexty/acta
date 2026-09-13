@@ -109,11 +109,18 @@ struct ReminderPresenterTests {
         var updates: [ReminderPresentation] = []
         var withdrawn: [UInt64] = []
         var acknowledgesOnShow = false
+        /// One-shot: the next `show` reports the presentation lost before it returns — a panel ordered
+        /// onto a screen that is already locked, or occluded the instant it appears.
+        var losesNextPresentationOnShow = false
         weak var coordinator: ReminderCoordinator?
 
         func show(_ presentation: ReminderPresentation) {
             shown.append(presentation)
             if acknowledgesOnShow { coordinator?.acknowledgePresentation(presentation.id) }
+            if losesNextPresentationOnShow {
+                losesNextPresentationOnShow = false
+                coordinator?.presentationLost(presentation.id)
+            }
         }
         func updateCountdown(_ presentation: ReminderPresentation) { updates.append(presentation) }
         func withdraw(_ presentationID: UInt64) { withdrawn.append(presentationID) }

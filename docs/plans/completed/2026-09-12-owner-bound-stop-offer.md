@@ -958,3 +958,40 @@ settings copy did not mention that pid-only holders stay unbound, which *Technic
   the answer; the next increment does.
 - Still unmeasured and out of scope: Microsoft Teams entirely; two enrolled applications at once;
   whether `.saving` blocking is a real problem at three hours.
+
+## After archiving: a review of the finished increment
+
+The plan was archived at `5213c3f`; the user then asked for a check of the whole increment, and Codex
+reviewed it read-only. Two findings, both verified in the code before acting on them, both fixed here.
+
+- **The release offer was associated with its watch *after* `presenter.show` returned.** `show` may call
+  back synchronously — the acknowledgement already does — so a presenter reporting the presentation lost
+  from inside it reached `releaseOfferEnded` while `ownerWatch.offer` was still `nil`. The guard returned:
+  the accumulated release was never discarded, and the assignment after `show` then installed a
+  presentation that was already dead. `offer == nil` is a precondition of every later offer, so that one
+  orphan silenced the feature for the rest of the recording. Fixed by making the association part of
+  `present`, before any external call. ⚠️ **Not reached by the shipped panel**: `ReminderPanel.show` calls
+  `acknowledgeIfVisible`, never `presentationLost`. This is a contract defect, found by reading, not an
+  observed screen failure.
+- **`aReplacedRecordingIsNotStopped` claimed a route it never ran.** `acceptReleaseStop` calls `dismiss()`
+  before it checks identity, so the countdown is revoked and the ticks that follow cannot reach the
+  completion path its comment described. Split: the old test keeps the click half under a title that says
+  so, and `aReplacementWithdrawsTheCountdownBeforeItCanComplete` covers the case nobody clicks.
+
+Two tests added, one `FakePresenter` flag (`losesNextPresentationOnShow`). **956 tests pass.**
+
+**Negative controls** (five, each restored, each verified against `git diff` afterwards):
+
+- association made after `show` again → fails **only** `a presentation lost from inside show leaves no
+  orphan`. The fix is load-bearing and uniquely pinned.
+- a lost presentation discards nothing → fails four, the new test among them.
+- ⚠️ **`trackRecordingIdentity`'s release-offer clear, deleted alone: nothing fails. `observeOwnerRelease`'s
+  watch teardown, deleted alone: nothing fails. Both deleted: the new replacement test fails.** Two
+  independent fences take the offer down when a recording ends, so the new test names neither on its own.
+  Recorded in the test itself, because a green run there is not evidence that either line is load-bearing.
+
+⚠️ **A control of mine corrupted the tree and I did not notice for two runs.** The harness saved its
+"original" per edit rather than per file, so a control with two edits to one file restored the file to its
+half-mutated state. Three later controls ran against that, and their results were meaningless; the full
+suite then failed six tests and the first thing I suspected was the design. The controls above are the
+re-run on a clean tree, and the harness now proves each restore with `git diff`.

@@ -642,7 +642,11 @@ struct OwnerReleaseOfferTests {
 
     // MARK: - Identity
 
-    @Test("a countdown whose recording was replaced under it stops neither recording")
+    /// ⚠️ **This is the *click* half only.** Codex found the test claiming more than it ran: `acceptReleaseStop`
+    /// calls `dismiss()` before it checks identity, so the countdown is already revoked by the time the
+    /// ticks below run and cannot reach the completion path. What the replacement does to a countdown
+    /// nobody clicked is `aReplacementWithdrawsTheCountdownBeforeItCanComplete`.
+    @Test("Stop Now on an offer whose recording was replaced under it stops neither recording")
     @available(macOS 15.0, *)
     func aReplacedRecordingIsNotStopped() async {
         let fixture = makeFixture()
@@ -674,11 +678,123 @@ struct OwnerReleaseOfferTests {
         fixture.coordinator.acceptReleaseStop(recordingID: offer.recordingID)
         #expect(!stopBegan(harness), "Stop Now on A's offer stopped B")
 
-        // And the countdown's own deadline, which the next tick reaches.
+        // ⚠️ Past the countdown's nominal deadline. The countdown is gone — `dismiss` revoked it — so this
+        // shows no *other* late path stops B, not that the completion gate refused.
+        #expect(fixture.coordinator.countdown?.isLive != true, "the click left a countdown still live")
         fixture.run(seconds: 25)
         #expect(fixture.coordinator.ownerWatch == nil)
-        #expect(!stopBegan(harness), "A's countdown stopped B")
+        #expect(!stopBegan(harness), "something stopped B after A's offer was clicked")
         await settle(harness)
+    }
+
+    /// The half the test above cannot reach: **nobody clicks**, and A's countdown is live and acknowledged
+    /// when the recording under it is replaced.
+    ///
+    /// ⚠️ **What this pins is withdrawal at observation time, not the final stop gate.** Ending the
+    /// recording takes the prompt down, and `prompt`'s own `didSet` revokes the countdown attached to it —
+    /// so the countdown never reaches `evaluate` again and the completion path is never entered. The guards
+    /// inside `stopForOwnerRelease` stand behind that and are reached by nothing here.
+    /// ⚠️ **And *two* fences take the prompt down, so this test names neither on its own.** Measured:
+    /// deleting `trackRecordingIdentity`'s release-offer clear leaves it passing, and so does deleting
+    /// `observeOwnerRelease`'s teardown of a watch whose recording is gone; only removing both fails it.
+    /// That is production redundancy worth having, not two tested rules — do not read a green run here as
+    /// evidence that either line is load-bearing.
+    @Test("a recording replaced under a live countdown withdraws it before it can complete")
+    @available(macOS 15.0, *)
+    func aReplacementWithdrawsTheCountdownBeforeItCanComplete() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        let harness = fixture.harness
+        guard await startBound(fixture, freezing: false) else { return }
+        guard releaseUntilOffered(fixture) != nil, fixture.releaseOffer != nil else {
+            Issue.record("no release offer was raised"); return
+        }
+        fixture.run(seconds: 19)
+        guard case .running? = fixture.coordinator.countdown?.phase else {
+            Issue.record("the countdown was not running with a second to go: \(String(describing: fixture.coordinator.countdown?.phase))")
+            return
+        }
+
+        harness.controller.stop()
+        let idle = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .idle
+        }
+        #expect(idle, "the first recording never finished, so there was no successor to protect")
+        // ⚠️ The tick is where the coordinator learns the recording ended: `trackRecordingIdentity` runs
+        // from `tick`, above `evaluateCountdown`, so this is the one tick in which the countdown could
+        // otherwise have completed against a recording that no longer exists.
+        fixture.run(seconds: 1)
+        #expect(fixture.coordinator.countdown?.phase == .revoked(.withdrawn),
+                "A ending left its countdown live over B")
+        #expect(fixture.coordinator.prompt == nil, "A's offer outlived A")
+
+        harness.clock.onSleep { _ in harness.source.emitBatch() }
+        harness.controller.start()
+        let startedB = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .recording
+        }
+        harness.clock.freeze()
+        #expect(startedB, "the successor never started")
+        #expect(harness.controller.ownerAdmission == .unbound(.notStartedFromPrompt))
+
+        // Past the deadline A's countdown would have reached, with Slack still idle throughout.
+        fixture.run(seconds: 25)
+        #expect(!stopBegan(harness), "A's countdown stopped B")
+        #expect(fixture.coordinator.ownerWatch == nil, "an unbound recording was given an owner watch")
+        await settle(harness)
+    }
+
+    /// ⚠️ **A presenter may call back from inside `show`.** Found by Codex reading the contract rather than
+    /// on screen: the offer used to be associated with its watch *after* `show` returned, so a loss
+    /// reported from inside it found no offer to end — the accumulated release was never discarded, and the
+    /// watch was then handed a presentation that was already dead. `offer == nil` is a precondition of
+    /// every later offer, so that one orphan silenced the feature for the rest of the recording.
+    @Test("a presentation lost from inside show leaves no orphan, and the next offer needs a fresh release")
+    @available(macOS 15.0, *)
+    func aLossFromInsideShowLeavesNoOrphan() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        guard await startBound(fixture) else { return }
+
+        fixture.reader.set(Self.afterCall)
+        fixture.presenter.losesNextPresentationOnShow = true
+        guard tickUntilReleaseOfferShown(fixture, count: 1) != nil else {
+            Issue.record("no release offer ever reached the presenter"); return
+        }
+        // Asserted on the tick the loss happened, before any further observation can move the rule.
+        #expect(fixture.coordinator.prompt == nil, "the offer survived a presenter that lost it inside show")
+        #expect(fixture.coordinator.ownerWatch?.offer == nil,
+                "the watch kept a presentation that was already dead, and can never offer again")
+        guard case .unknown? = fixture.coordinator.ownerWatch?.rule.phase else {
+            Issue.record("the lost offer left its release accumulated: \(String(describing: fixture.coordinator.ownerWatch?.rule.phase))")
+            return
+        }
+
+        // The presenter works again. The release must be observed afresh — the interval behind the lost
+        // offer was never the user's — and only then does the offer return.
+        guard let seconds = tickUntilReleaseOfferShown(fixture, count: 2) else {
+            Issue.record("no release offer was ever raised again"); return
+        }
+        #expect(seconds >= Int(MicrophoneOwnershipRule.Configuration.default.releaseQualification),
+                "the second offer was raised \(seconds)s in, on evidence gathered before the first was lost")
+        #expect(fixture.releaseOffer != nil)
+        await settle(fixture.harness)
+    }
+
+    /// Tick until the presenter has been shown `count` release offers; returns how many seconds that took.
+    ///
+    /// ⚠️ **Counts what reached the presenter, not what is on the panel.** An offer lost from inside `show`
+    /// is never on the panel at all, and `releaseUntilOffered` would tick straight past it.
+    @available(macOS 15.0, *)
+    private func tickUntilReleaseOfferShown(_ fixture: Fixture, count: Int, limit: Int = 12) -> Int? {
+        for second in 1...limit {
+            fixture.run(seconds: 1)
+            let shown = fixture.presenter.shown.filter {
+                if case .offerToStopOnRelease = $0.prompt { return true } else { return false }
+            }
+            if shown.count >= count { return second }
+        }
+        return nil
     }
 
     @Test("a recording started from the menu is never offered a release stop, whoever lets the input go")

@@ -619,8 +619,8 @@ public final class ReminderCoordinator: ObservableObject {
               current.offer == nil, prompt == nil, !isMenuOpen,
               case .recording = service.state.operation, recordingDirectory != nil else { return }
         presentCountdown(.offerToStopOnRelease(recordingID: recordingID, title: service.title,
-                                               text: OwnerReleaseOfferText(application: current.application)))
-        ownerWatch?.offer = presentation
+                                               text: OwnerReleaseOfferText(application: current.application)),
+                         claimedByOwnerWatch: true)
     }
 
     /// Take a standing release offer down, and its countdown with it, whether acknowledged or not.
@@ -855,13 +855,20 @@ public final class ReminderCoordinator: ObservableObject {
     ///
     /// ⚠️ **Internal.** Production's one caller is the release stop offer; the presenter tests call it with
     /// a carrier prompt to exercise the contract on its own.
+    ///
+    /// ⚠️ **`claimedByOwnerWatch` associates the presentation with the watch before the presenter sees
+    /// it.** The association cannot be made by the caller after this returns: `show` may call back
+    /// synchronously, and a revocation arriving then would find the offer unassociated — leaving the
+    /// release undiscarded and the watch holding a dead presentation that blocks every later offer.
     func presentCountdown(_ newPrompt: ReminderPrompt,
-                          configuration: AcknowledgedCountdown.Configuration = .default) {
-        present(newPrompt, countdown: configuration)
+                          configuration: AcknowledgedCountdown.Configuration = .default,
+                          claimedByOwnerWatch: Bool = false) {
+        present(newPrompt, countdown: configuration, claimedByOwnerWatch: claimedByOwnerWatch)
     }
 
     private func present(_ newPrompt: ReminderPrompt,
-                         countdown configuration: AcknowledgedCountdown.Configuration?) {
+                         countdown configuration: AcknowledgedCountdown.Configuration?,
+                         claimedByOwnerWatch: Bool = false) {
         // ⚠️ One at a time, never a stack. A second prompt replaces the first rather than queueing
         // behind it: two offers about two different moments, both stale by the time they are read, is
         // worse than one. A countdown on the prompt being replaced is revoked, never inherited.
@@ -876,8 +883,10 @@ public final class ReminderCoordinator: ObservableObject {
         countdown = attached
         lastRenderedSeconds = attached?.fullSeconds
         prompt = newPrompt
-        // ⚠️ **After the state is in place.** A presenter may acknowledge from inside `show`, and that
-        // acknowledgement must find the countdown it names.
+        // ⚠️ **Every association is made before the presenter is called**, not after it returns. A
+        // presenter may call back from inside `show` — acknowledging, or reporting the presentation
+        // already lost — and each callback must find the state it names.
+        if claimedByOwnerWatch { ownerWatch?.offer = presentation }
         presenter?.show(ReminderPresentation(id: presentation, prompt: newPrompt,
                                              secondsRemaining: attached?.fullSeconds))
     }
