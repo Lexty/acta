@@ -32,8 +32,13 @@ public enum WindowCollectionPolicy {
     public static let fullScreenPrimary: UInt = 1 << 7
     /// `NSWindowCollectionBehaviorFullScreenAuxiliary` — may be shown alongside a full-screen window.
     public static let fullScreenAuxiliary: UInt = 1 << 8
-    /// `NSWindowCollectionBehaviorFullScreenNone` — may not be full-screen, and is not shown alongside
-    /// one. This is the bit SwiftUI's Settings window carries, and the one the union collided with.
+    /// `NSWindowCollectionBehaviorFullScreenNone` — the window cannot be *made* full-screen. This is the
+    /// bit SwiftUI's Settings window carries, and the one the union collided with.
+    ///
+    /// ⚠️ **That is all the header says**, and an earlier version of this line added "and is not shown
+    /// alongside one", which Apple does not claim and this project's own measurement contradicts: the
+    /// window was observed being raised over a full-screen application while carrying exactly this bit.
+    /// What makes it matter here is the mutual-exclusion rule, not a visibility effect.
     public static let fullScreenNone: UInt = 1 << 9
 
     /// The full-screen group: at most one of these may be set.

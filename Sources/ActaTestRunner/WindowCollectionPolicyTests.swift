@@ -84,30 +84,39 @@ struct WindowCollectionPolicyTests {
     /// ⚠️ **Every starting mask, not the one that was observed.** The window is handed over by SwiftUI
     /// and nothing promises the bits it carries will stay the same across a macOS release; a policy that
     /// only normalises the mask we happened to see is a policy that breaks silently on the next one.
+    ///
+    /// ⚠️ **The full power set of the five decided bits, because the first version of this was not.** It
+    /// enumerated *pairs* of full-screen bits and one Space bit at a time, so the all-three mask and both
+    /// Space bits together — the two most illegal inputs there are — were exactly what it left out, under
+    /// a comment claiming every combination. Codex caught the gap by enumerating all 32 himself. The
+    /// function handled both cases; the fixture did not say so.
     @Test("no mask at all can survive the policy still conflicted")
     func noStartingMaskSurvivesConflicted() {
-        let group = [0 as UInt,
-                     WindowCollectionPolicy.fullScreenPrimary,
-                     WindowCollectionPolicy.fullScreenAuxiliary,
-                     WindowCollectionPolicy.fullScreenNone]
-        let spaces = [0 as UInt,
-                      WindowCollectionPolicy.canJoinAllSpaces,
-                      WindowCollectionPolicy.moveToActiveSpace]
-        // Every combination of the two groups this policy decides, including the illegal ones a window
-        // should never arrive with — the policy must not depend on having been handed a legal mask.
-        for full in group {
-            for otherFull in group {
-                for space in spaces {
-                    let start = full | otherFull | space
-                    let result = WindowCollectionPolicy.settingsWindow(from: start)
-                    #expect(!WindowCollectionPolicy.hasConflictingFullScreenBits(result),
-                            Comment(rawValue: "starting from \(start) produced \(result)"))
-                    #expect(result & WindowCollectionPolicy.spacesGroup
-                            == WindowCollectionPolicy.moveToActiveSpace,
-                            Comment(rawValue: "starting from \(start) produced \(result)"))
-                }
-            }
+        let decided = [WindowCollectionPolicy.canJoinAllSpaces,
+                       WindowCollectionPolicy.moveToActiveSpace,
+                       WindowCollectionPolicy.fullScreenPrimary,
+                       WindowCollectionPolicy.fullScreenAuxiliary,
+                       WindowCollectionPolicy.fullScreenNone]
+        // Every subset of the five, including the ones a window may never legally arrive with: the
+        // policy must not depend on having been handed a legal mask.
+        var seen = 0
+        for subset in 0..<(1 << decided.count) {
+            let start = decided.enumerated()
+                .filter { subset & (1 << $0.offset) != 0 }
+                .reduce(0 as UInt) { $0 | $1.element }
+            let result = WindowCollectionPolicy.settingsWindow(from: start)
+            #expect(!WindowCollectionPolicy.hasConflictingFullScreenBits(result),
+                    Comment(rawValue: "starting from \(start) produced \(result)"))
+            #expect(result & WindowCollectionPolicy.spacesGroup
+                    == WindowCollectionPolicy.moveToActiveSpace,
+                    Comment(rawValue: "starting from \(start) produced \(result)"))
+            #expect(result & WindowCollectionPolicy.fullScreenGroup
+                    == WindowCollectionPolicy.fullScreenAuxiliary,
+                    Comment(rawValue: "starting from \(start) produced \(result)"))
+            seen += 1
         }
+        // The count is asserted so a broken generator cannot pass by testing nothing.
+        #expect(seen == 32, "the power set stopped being a power set")
     }
 
     /// ⚠️ **The bits this policy has no opinion about must come through untouched.** `auxiliary` is the

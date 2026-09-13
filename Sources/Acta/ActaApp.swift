@@ -7,6 +7,25 @@ import os
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
 /// version on; on older systems we show a clear placeholder instead of a "mute" menu.
+/// The application menu's Settings item, replacing SwiftUI's own.
+///
+/// ⚠️ **A view, because `openSettings` is an environment value** and a command builder has no environment
+/// of its own to read it from. The button does the two things every Settings request must do: ask SwiftUI
+/// for the scene, and tell the presenter that a request happened — the second being what an already-open
+/// window needs and what the built-in command cannot provide.
+@available(macOS 15.0, *)
+private struct SettingsCommand: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Settings…") {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+}
+
 @main
 struct ActaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -31,6 +50,22 @@ struct ActaApp: App {
                 ActaSettingsView()
             } else {
                 Text("Acta's settings need macOS 15.").padding()
+            }
+        }
+        // ⚠️ **⌘, is routed through the same request path as the menu row**, and this is the only way to
+        // do that: SwiftUI's built-in Settings command asks for the scene and tells the app nothing, so
+        // for a window that is already open and behind something it does exactly what the menu row used
+        // to do — nothing. `replacing:` substitutes the canonical command rather than adding a second
+        // one, so there is still one Settings item and one ⌘,.
+        //
+        // ⚠️ Correcting my own earlier claim that ⌘, could not be intercepted at all: it can, and Codex
+        // was right to push back. It has **not** been exercised on a machine, and it is on the
+        // acceptance list — a replaced command that failed to appear would take ⌘, away entirely.
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                if #available(macOS 15.0, *) {
+                    SettingsCommand()
+                }
             }
         }
     }
@@ -887,12 +922,10 @@ struct MenuContent: View {
     /// three Settings clicks produced two appearances, and the one for an already-open window produced
     /// none. So the row asks for the scene *and* tells the presenter a request happened.
     ///
-    /// ⚠️ ⌘, still goes through SwiftUI's own menu item and cannot be intercepted here. It is covered for
-    /// a closed window, by the appearance; an already-open window on another Space is the case this does
-    /// not reach, and it needs a person to check. **No `.keyboardShortcut` is attached here** — binding
-    /// ⌘, to this row as well was tried and dropped: it is not needed for any of the defects, and an
-    /// unverified second binding for the same key in a menu-bar app is the kind of thing that silently
-    /// takes the working one away.
+    /// ⚠️ **No `.keyboardShortcut` is attached here**, and ⌘, is not unreachable either — I claimed it was
+    /// and Codex was right to push back. It is routed by replacing the canonical Settings command; see
+    /// `SettingsCommand` and `ActaApp.body`. Binding the key a second time on this row would duplicate
+    /// what that command already owns.
     ///
     /// ⚠️ **The menu's dismissal is no longer `SettingsLink`'s.** Activating the app and making the
     /// settings window key is what should close the menu panel, since it dismisses on resigning key.

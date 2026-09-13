@@ -87,10 +87,15 @@ struct ActaSettingsView: View {
 ///   `fullScreenAuxiliary` and never regained it. So it is written on **every** raise, not once.
 /// - **`formUnion` produced a mask `NSWindow.h` forbids.** The group is replaced rather than joined; the
 ///   arithmetic and its tests are in `WindowCollectionPolicy`.
+/// - **Every raise is deferred, including adoption's.** A second review caught `adopt` still raising
+///   inline: on the late-attachment path it is the only raise that happens, so it would have written the
+///   mask at exactly the moment that is too early.
+/// - **Only the host that owns the attachment may end it.** See `attachedVia`.
 ///
-/// ⚠️ **Still not covered, and it needs a person.** Whether ⌘, reaches an already-open window that is on
-/// another Space: the key equivalent goes through SwiftUI's own menu item, which this cannot intercept
-/// without replacing it, and the menu row is the path the reported incident used.
+/// ⚠️ **What still needs a person.** Whether the menu panel dismisses itself now that the row is a
+/// `Button`, and whether the window lands on the right Space over a full-screen application. ⌘, is
+/// covered — see `ActaApp.body`'s `CommandGroup(replacing: .appSettings)` — but that replacement has not
+/// been exercised on a machine either.
 @available(macOS 15.0, *)
 @MainActor
 final class SettingsWindowPresenter {
@@ -100,20 +105,38 @@ final class SettingsWindowPresenter {
     static let shared = SettingsWindowPresenter()
 
     private weak var window: NSWindow?
+    /// Which hosting view the window currently in hand was reported by.
+    ///
+    /// ⚠️ **Detachment has to be identity-scoped, and window identity is not enough.** SwiftUI may attach
+    /// a replacement host before the old one detaches; the old one's `nil` would then erase a window that
+    /// is perfectly current, and the new host has already sent its only attachment callback — so every
+    /// later request would silently do nothing. Two host incarnations can also report the same
+    /// `NSWindow`, which is why this is the host and not the window. Found by Codex reading the contract;
+    /// not observed in the three-tab view as it stands.
+    private weak var attachedVia: AnyObject?
 
     private init() {}
 
-    /// The hosting view says it is now in `window`, or — `nil` — that it has been detached.
+    /// The hosting view `host` says it is now in `window`, or — `nil` — that it has been detached.
     ///
     /// ⚠️ **Attachment is reported, never assumed.** The first version dispatched once to the next turn
     /// of the run loop and read `view.window` there; if the view was not attached yet that was the only
-    /// attempt, and the window would have kept its default behaviour with nothing to say so. Detachment
-    /// is carried too, so a stale window is never raised.
-    fileprivate func adopt(_ window: NSWindow?) {
+    /// attempt, and the window would have kept its default behaviour with nothing to say so.
+    fileprivate func adopt(_ window: NSWindow?, from host: AnyObject) {
+        guard let window else {
+            // Only the host that owns the current attachment may end it.
+            guard attachedVia === host else { return }
+            attachedVia = nil
+            self.window = nil
+            return
+        }
+        attachedVia = host
         guard window !== self.window else { return }
         self.window = window
-        guard window != nil else { return }
-        raise()
+        // ⚠️ **Deferred like every other raise**, and not raised inline here. A request that was drained
+        // while there was no window yet leaves this as the only raise that will happen, and a raise
+        // inside the attachment callback is exactly the too-early write SwiftUI overwrites.
+        settingsRequested()
     }
 
     /// Someone asked for Settings — the menu row, or the view appearing.
@@ -159,7 +182,7 @@ private struct SettingsWindowHost: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            MainActor.assumeIsolated { presenter?.adopt(window) }
+            MainActor.assumeIsolated { presenter?.adopt(window, from: self) }
         }
     }
 
