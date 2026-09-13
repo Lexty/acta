@@ -5,7 +5,9 @@ microphone as two separate tracks and writes them to disk as it goes. That is al
 transcription and summarisation are a separate, local step, shipped in this repository as a
 companion Claude Code plugin (see below).
 
-Recordings never leave the machine.
+Recordings never leave the machine. ⚠️ The companion plugin's *summary* step is the exception and
+it is a real one — it sends what it reads to Claude, and that is more than the transcript. See
+[Privacy](#privacy) before running it on anything sensitive.
 
 ## Why two tracks
 
@@ -119,7 +121,8 @@ Recordings are local files and are never uploaded by this app. It is not sandbox
 and its entitlements are minimal.
 
 ⚠️ **This paragraph is about the recorder only.** The companion plugin's summary step sends what it
-reads to Claude, and that is more than the transcript — see *What the plugin does* above.
+reads to Claude, and that is more than the transcript — see
+[Companion plugin](#companion-plugin-turning-a-recording-into-notes) above for exactly what.
 
 ## Licence
 
