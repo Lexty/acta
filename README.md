@@ -111,3 +111,17 @@ anyone — human or agent — changing this code.
 
 Recordings are local files and are never uploaded by this app. It is not sandboxed (personal use)
 and its entitlements are minimal.
+
+## Licence
+
+The code in this repository is MIT — see [`LICENSE`](LICENSE).
+
+⚠️ **That covers this repository and nothing else.** The companion plugin drives software and models
+it does not ship, and their terms are their own:
+
+- `fluidaudiocli` / FluidAudio is Apache-2.0.
+- The converted Parakeet model card **contradicts itself** — CC BY in its front matter, Apache in its
+  footer. It is not resolved here, and this licence does not reach it. If you intend to use the
+  transcription path for anything beyond personal use, settle that with the model's publisher first.
+- The plugin also describes calls to an authenticated Slack CLI that this repository does not
+  contain.
