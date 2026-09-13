@@ -1,5 +1,6 @@
 import ActaKit
 import ActaRuntime
+import AppKit
 import SwiftUI
 
 /// Acta's Settings window.
@@ -17,6 +18,7 @@ import SwiftUI
 @available(macOS 15.0, *)
 struct ActaSettingsView: View {
     @StateObject private var model = ControlViewModel()
+    @StateObject private var presenter = SettingsWindowPresenter()
 
     var body: some View {
         TabView {
@@ -28,9 +30,86 @@ struct ActaSettingsView: View {
                 .tabItem { Label("Reminders", systemImage: "bell") }
         }
         .frame(width: 470)
+        // ⚠️ **The window has to be fetched from the view it hosts**, not looked up by name in
+        // `NSApp.windows`: the Settings scene's window identifier is SwiftUI's own and not something
+        // this app may rely on. `view.window` is the same window whichever way it was opened, which is
+        // what keeps ⌘, and the menu row fixed by one piece of code.
+        .background(SettingsWindowHost(presenter: presenter))
         .task { await model.subscribe() }
-        .onAppear { model.refresh(); model.refreshMicrophone() }
+        .onAppear {
+            model.refresh()
+            model.refreshMicrophone()
+            // Reopening reuses the hosting view, so adoption alone would raise the window exactly once
+            // in the life of the app. This is the second half of that, and it is safe to repeat.
+            presenter.bringForward()
+        }
     }
+}
+
+/// Where the Settings window opens for an app that has **no Dock icon**.
+///
+/// ⚠️ **The defect: settings opened behind a full-screen app.** Acta is `LSUIElement`, so clicking a row
+/// in the menu bar never makes it the active application — and a window of an inactive accessory app is
+/// ordered into the Space it was born in, which is the desktop. With a full-screen terminal in front,
+/// the window was placed *behind* it: the only way to reach settings was to unstack every window and go
+/// looking. ⌘, hid the same defect, because a key equivalent can only arrive at an app that is already
+/// frontmost.
+///
+/// ⚠️ **Two behaviours, and the window needs both.** `activate()` makes Acta frontmost so the window is
+/// ordered in front of anything; `.moveToActiveSpace` decides *where* — without it, activating switches
+/// the user out of their full-screen Space to wherever the window happens to live, which answers the
+/// complaint by doing something worse. `.fullScreenAuxiliary` is what lets it be shown over another
+/// app's full-screen Space at all.
+///
+/// ⚠️ **Deliberately not the reminder panel's treatment.** That is a `.statusBar`-level non-activating
+/// panel on `.canJoinAllSpaces`, because it must appear over a meeting without stealing the keystroke
+/// the user is typing into it. Settings is the opposite: it is asked for, it takes focus, and it belongs
+/// to one Space at a time — a settings window that followed the user onto every Space would be a
+/// window they cannot get rid of.
+@available(macOS 15.0, *)
+@MainActor
+final class SettingsWindowPresenter: ObservableObject {
+    private weak var window: NSWindow?
+
+    /// Take ownership of the window this view is hosted in, and show it.
+    fileprivate func adopt(_ window: NSWindow) {
+        guard window !== self.window else { return }
+        self.window = window
+        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
+        bringForward()
+    }
+
+    /// Put the window in front of the user, wherever the user currently is.
+    ///
+    /// ⚠️ **Only from an act of asking for it** — an appearance or the window being adopted — and never
+    /// from a view update. `ControlViewModel` publishes while a recording runs, so raising the window on
+    /// every update would drag the user out of whatever they were doing, once a second, for as long as
+    /// the window stayed open.
+    func bringForward() {
+        guard let window else { return }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// The one job of this view is to hand its `NSWindow` to the presenter.
+@available(macOS 15.0, *)
+private struct SettingsWindowHost: NSViewRepresentable {
+    let presenter: SettingsWindowPresenter
+
+    func makeNSView(context: Context) -> NSView {
+        let probe = NSView(frame: .zero)
+        // ⚠️ Deferred: a view is not in a window yet at the moment it is made, so `probe.window` is nil
+        // here and only nil. The next turn of the run loop is the first at which there is anything to
+        // adopt.
+        DispatchQueue.main.async { [presenter] in
+            guard let window = probe.window else { return }
+            presenter.adopt(window)
+        }
+        return probe
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 // MARK: - General
