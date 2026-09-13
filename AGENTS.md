@@ -11,7 +11,9 @@ plan — **`docs/plans/acta.md`**.
 
 ## Language convention (applies to everything)
 
-**English only** across the whole project — no exceptions:
+**English only** across the project. One directory is exempt, and only one: `tools/`, which ships
+Claude Code companion plugins whose output and trigger phrases are Russian **by design** — see
+"Companion plugins" in `CLAUDE.md`. That exemption licenses Russian nowhere else. Everything else:
 
 - **UI strings** shown to the user (menu bar, buttons, statuses, errors, notifications) — including
   `NSMicrophoneUsageDescription` in `Resources/Info.plist`, which macOS renders verbatim in the TCC
@@ -21,8 +23,11 @@ plan — **`docs/plans/acta.md`**.
   repository's `CLAUDE.md`).
 - **Docs**: `SPEC.md`, `docs/plans/*.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/skills/**`, shell scripts, configs
   (`Resources/Info.plist`, `Resources/Acta.entitlements`, `.swiftlint.yml`, `.claude/hooks/**`).
-  Check with `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build .` — a grep
-  scoped to `Sources/` alone once let a Russian TCC prompt ship.
+  Check with
+  `grep -rP '[\x{0400}-\x{04FF}]' --exclude-dir=.git --exclude-dir=.build --exclude-dir=tools .`
+  — a grep scoped to `Sources/` alone once let a Russian TCC prompt ship, so keep it repo-wide;
+  `tools/` is excluded **by name**, not by narrowing the scope, so adding a second exempt directory
+  is a deliberate edit here rather than a side effect.
 - **Git**: commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
   `type(scope): subject` — `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `perf`.
   Subject in imperative mood, lowercase, no trailing period. Body explains *why*, not just *what*.

@@ -1,0 +1,17 @@
+{
+  "name": "acta",
+  "owner": {
+    "name": "Lexty"
+  },
+  "metadata": {
+    "description": "Acta and its companion skills: record a meeting, then process the recording locally",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "acta-notes",
+      "source": "./tools/acta-notes/plugin",
+      "description": "End-to-end processing of an Acta meeting recording in ~/Acta: local Parakeet transcription and offline VBx diarization via fluidaudiocli, utterance-level merge into a verbatim transcript.raw.md, anchor-based speaker naming that never guesses a name, quality gates with a provenance block, then a summary.md enriched from screenshots, calendar, Jira, Slack and local project docs. An official Teams VTT short-circuits the whole ASR path. Audio never leaves the machine (skills-only plugin, bundled Python stdlib scripts)"
+    }
+  ]
+}

@@ -45,3 +45,44 @@ The user reads Russian in conversation and the repository must stay English — 
 and is the first rule in `AGENTS.md`. When reporting a result, give the measurement rather than the
 impression: how many tests, which control was run, what was not checked. A green suite after a merge
 of two long-lived branches means the interaction is untested, not that it works.
+
+## Companion plugins (`tools/`)
+
+⚠️ **Here rather than in `AGENTS.md`, and the distinction is the file's own rule.** What ships under
+`tools/` is Claude Code plugins — skills, a marketplace manifest, an install command — so it is
+specific to Claude Code in the way this file is for. The half that is *not* — that Russian is allowed
+there and nowhere else — stays in the language convention in `AGENTS.md`, where every contributor
+reads it.
+
+The app only records. What happens to a recording afterwards ships beside it, as a Claude Code
+plugin, so that handing someone this repository hands them the whole product rather than half of it.
+`.claude-plugin/marketplace.json` at the root makes the repo a marketplace; a recipient runs
+`/plugin marketplace add Lexty/acta` and then `/plugin install acta-notes@acta`.
+
+- `tools/acta-notes/` — the post-processing pipeline: local transcription, diarization, speaker
+  naming, quality gates, summary. `plugin/` is what gets installed, `tests/` is its suite,
+  `PLAN.md` and `FINDINGS-*.md` are its design record.
+
+**Two audiences, two directories, never mixed.** `.claude/skills/` holds skills for *developing*
+Acta (`screencapturekit-audio`, `crash-safe-recording`, …); they load automatically when working in
+this repo and are useless to someone who just wants to process a recording. `tools/*/plugin/` holds
+skills for *using* Acta, installed deliberately. A dev skill must never move under `tools/`, and a
+companion skill must never be dropped into `.claude/skills/` — that would install
+`swiftpm-macos-app-bundle` onto the machine of someone who only wanted meeting notes.
+
+Rules for anything under `tools/`:
+
+- **Russian is allowed here, and only here.** These skills emit Russian by design — the `summary.md`
+  format is Russian, and the trigger phrases a user types are Russian. That is why the language
+  convention in `AGENTS.md` excludes `tools/` **by name**, and excludes nothing else. It does not
+  license Russian anywhere else.
+- **Python, stdlib only** — no pip, no virtualenv, nothing to install. External binaries (`ffmpeg`,
+  `fluidaudiocli`) are located at runtime and reported by the plugin's own `doctor.py`.
+- Tests run with `make test-skills` from the repo root. They are plain `unittest`, discovered under
+  each plugin's `tests/`. **One test module per script**, and every test module's first import is
+  `_ctx` — `tests/_ctx.py` is the single place that bridges the suite to the scripts under
+  `plugin/skills/*/scripts/`, loading them by file path so stems like `gate`, `merge` and `verify`
+  cannot collide with installed modules.
+- A plugin's suite asserts things about *this* repo — that `marketplace.json` registers it, that the
+  `SKILL_PLUGINS` list in the `Makefile` names it, that this file documents these conventions. Those
+  tests are the reason the section you are reading exists; do not delete it to make them pass.

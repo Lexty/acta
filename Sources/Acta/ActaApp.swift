@@ -6,6 +6,25 @@ import os
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
 /// version on; on older systems we show a clear placeholder instead of a "mute" menu.
+/// The application menu's Settings item, replacing SwiftUI's own.
+///
+/// ⚠️ **A view, because `openSettings` is an environment value** and a command builder has no environment
+/// of its own to read it from. The button does the two things every Settings request must do: ask SwiftUI
+/// for the scene, and tell the presenter that a request happened — the second being what an already-open
+/// window needs and what the built-in command cannot provide.
+@available(macOS 15.0, *)
+private struct SettingsCommand: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Settings…") {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+}
+
 @main
 struct ActaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -30,6 +49,22 @@ struct ActaApp: App {
                 ActaSettingsView()
             } else {
                 Text("Acta's settings need macOS 15.").padding()
+            }
+        }
+        // ⚠️ **⌘, is routed through the same request path as the menu row**, and this is the only way to
+        // do that: SwiftUI's built-in Settings command asks for the scene and tells the app nothing, so
+        // for a window that is already open and behind something it does exactly what the menu row used
+        // to do — nothing. `replacing:` substitutes the canonical command rather than adding a second
+        // one, so there is still one Settings item and one ⌘,.
+        //
+        // ⚠️ Correcting my own earlier claim that ⌘, could not be intercepted at all: it can, and Codex
+        // was right to push back. It has **not** been exercised on a machine, and it is on the
+        // acceptance list — a replaced command that failed to appear would take ⌘, away entirely.
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                if #available(macOS 15.0, *) {
+                    SettingsCommand()
+                }
             }
         }
     }
@@ -250,6 +285,9 @@ struct MenuContent: View {
     /// controls, and shown unconditionally it pushed the menu off the bottom of the screen —
     /// on a laptop, with only six devices attached. What a user needs at a glance is which
     /// microphone will be used, not the whole apparatus for deciding it.
+    /// SwiftUI's own "show the Settings scene" action. See `settingsRow` for why the row does not use
+    /// `SettingsLink`.
+    @Environment(\.openSettings) private var openSettings
     @State private var microphoneExpanded = false
     /// The chooser's last measured content height — **zero meaning "not measured"**, which is what a
     /// collapsed disclosure reports. `BoundedSectionLayout.height` is what turns that into a usable
@@ -869,8 +907,27 @@ struct MenuContent: View {
 
     /// ⚠️ **The row that replaced the disclosure.** `SettingsLink` opens the same window ⌘, does, which
     /// is the point: two ways in, one window, and no second copy of the controls to drift.
+    /// ⚠️ **A `Button` over `openSettings`, not a `SettingsLink`, and the difference is the defect.**
+    /// `SettingsLink` asks SwiftUI to show the Settings scene and tells this app nothing. When the window
+    /// is already open but behind something — which for a menu-bar app is most of the time — SwiftUI
+    /// raises no `onAppear`, publishes nothing, and the window stays where it is: the click does nothing
+    /// at all, which was the original complaint reached by a second route. Measured in the shipped build:
+    /// three Settings clicks produced two appearances, and the one for an already-open window produced
+    /// none. So the row asks for the scene *and* tells the presenter a request happened.
+    ///
+    /// ⚠️ **No `.keyboardShortcut` is attached here**, and ⌘, is not unreachable either — I claimed it was
+    /// and Codex was right to push back. It is routed by replacing the canonical Settings command; see
+    /// `SettingsCommand` and `ActaApp.body`. Binding the key a second time on this row would duplicate
+    /// what that command already owns.
+    ///
+    /// ⚠️ **The menu's dismissal is no longer `SettingsLink`'s.** Activating the app and making the
+    /// settings window key is what should close the menu panel, since it dismisses on resigning key.
+    /// That is a claim about AppKit's behaviour, not a measurement — it is on the acceptance list.
     private var settingsRow: some View {
-        SettingsLink {
+        Button {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
+        } label: {
             HStack(spacing: 6) {
                 Image(systemName: "gearshape").font(.caption).foregroundStyle(.secondary)
                 Text("Settings…").font(.caption)
