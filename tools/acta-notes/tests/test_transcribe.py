@@ -478,7 +478,7 @@ class CustomVocabTests(unittest.TestCase):
         stub = StubCLI()
         with meeting(("system",)) as root:
             vocab = root / "terms.txt"
-            vocab.write_text("a client\nWebSDK\n", encoding="utf-8")
+            vocab.write_text("Contoso\nWebSDK\n", encoding="utf-8")
             report = transcribe.run(
                 root,
                 tracks=("system",),

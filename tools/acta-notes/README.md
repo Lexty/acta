@@ -77,5 +77,5 @@ make test-skills            # from the repository root
 every module's first import, stdlib only — are documented in the repository's
 [`CLAUDE.md`](../../CLAUDE.md), and the suite asserts that they stay documented.
 
-`PLAN.md` is the original design document; `FINDINGS.md` records what
-processing 44 real meetings turned up.
+`PLAN.md` is the original design document; [`FINDINGS.md`](FINDINGS.md) records what processing a
+batch of 44 recorded meetings turned up.

@@ -22,8 +22,8 @@ Two anchor types, both measured in the spike audio:
 
 ``vocative``
     Someone addresses another participant by name, usually in Russian
-    short form at the start of a sentence (``Дим, посмотри второй пункт…``,
-    ``Люб, добавь это в протокол?`` — both present in the spike audio). The name
+    short form at the start of a sentence (``Дим, посмотри второй пункт``,
+    ``Люб, добавь это в протокол`` — both ordinary Russian address). The name
     attaches to the *next different speaker who answers*, within a short
     look-ahead window. Weaker than a self-introduction, and scored so.
 
@@ -185,8 +185,8 @@ NAME_STOPWORDS = ADDRESS_STOPWORDS | {"тут", "здесь", "сейчас", "�
 #: auto-named in anchor-only mode. It stays in `evidence` as `uncorroborated`,
 #: the speaker keeps `SPK_NN`, and the skill asks — exactly what D8 prescribes.
 #: With `--attendees` the list is bypassed: the attendee names are authoritative
-#: and already do this job (verified: the same meeting yielded Дима / Антон /
-#: Илья and none of the garbage once attendees were supplied).
+#: and already do this job (verified on a recorded meeting: supplying attendees
+#: named every speaker the lexicon gate had left unnamed, and none of the garbage).
 GIVEN_NAME_LEXICON = frozenset(
     """
     александр алексей анатолий андрей антон аркадий арсений артём артур борис
@@ -255,8 +255,8 @@ _SELF_INTRO_PATTERNS = [
     (re.compile(rf"на\s+связи\s+(?P<name>[А-ЯЁA-Z][а-яёa-z\-]+)"), False),
 ]
 
-#: A vocative at the start of a sentence (``Дим, посмотри второй пункт…``) or tacked onto its
-#: end (``…ты фиксируешь, Люб?``). Both shapes are ordinary Russian address.
+#: A vocative at the start of a sentence (``Дим, посмотри второй пункт``) or tacked onto
+#: its end (``…добавь это в протокол, Люб?``). Both shapes are ordinary Russian address.
 #:
 #: The trailing form additionally requires a **capitalized** token: mid-sentence
 #: every ordinary word is lowercase, so ``Коллеги, начинаем.`` must not enrol a
@@ -639,8 +639,8 @@ def resolve_speaker(anchors, attendees) -> dict:
         ):
             # Filtered out of the *candidate set*, not just at the final gate.
             # Otherwise the noise still competes: on the measured meeting
-            # SPK_01's real anchor «Дим» tied with «Клиенты», «Принципе» and
-            # «Сказать» and the tie-break refused to name anybody — a true
+            # A genuine anchor «Дим» can tie with noise surfaces such as «Клиенты»
+            # or «Принципе», and the tie-break then refuses to name anybody — a true
             # positive lost to three comma-taking nouns. The anchor stays in
             # `evidence` either way, so nothing is hidden from review.
             withheld[name] = withheld.get(name, 0) + 1

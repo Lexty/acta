@@ -62,7 +62,7 @@ has exactly two possible producers and they are **alternatives** — see the for
 - "last meeting" → newest folder in `~/Acta` by name/mtime.
 - "the call about `<topic>`" → search the calendar, then match the event window to a folder
   (folder local start ≈ event UTC + 1 h, within a few minutes). **Calendar subjects contain typos** —
-  a real case: the a client review was titled "*a client* review", so an exact search missed it. Search by
+  a real case: a client review was titled with the client name misspelled, so an exact search missed it. Search by
   a short root, by attendees and by time window. Details in `references/air-skill-lessons.md` §2.
 
   Read the calendar with the **`mac-pim`** CLI (`/mac-pim` skill), not a cloud connector — it reads
@@ -380,7 +380,7 @@ and check its `coverage` field before saying an email does not exist. Then Jira 
 local project docs under `~/dev/<project>/<client-or-topic>/` mapped to concrete requirement IDs, Slack only
 when relevant. Record the metadata in `context.md` and fold the substance into `summary.md`.
 
-**⚠ Secrets hygiene:** if a source doc contains a credential (a real `an auth token` once sat in a
+**⚠ Secrets hygiene:** if a source doc contains a credential (a real auth token once sat in a
 `notes.md`), never copy it into a summary — flag it to the user. Full discipline in
 `references/air-skill-lessons.md` §§3–4.
 
