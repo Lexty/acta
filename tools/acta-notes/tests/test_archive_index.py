@@ -71,7 +71,7 @@ class TestSummaryReading(unittest.TestCase):
     def test_topic_strips_trailing_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "summary.md"
-            p.write_text("# Утечка памяти в парсере — 2026-07-23\n\ntext\n", encoding="utf-8")
+            p.write_text("# Утечка памяти в парсере — 2026-01-15\n\ntext\n", encoding="utf-8")
             self.assertEqual(index.summary_topic(p), "Утечка памяти в парсере")
 
     def test_topic_absent_when_no_heading(self):

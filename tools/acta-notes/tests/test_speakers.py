@@ -230,13 +230,14 @@ class VocativeTests(unittest.TestCase):
 class GivenNameShapeTests(unittest.TestCase):
     """The allowlist that replaced the blacklist.
 
-    Measured regression (a 57-minute recording): `ADDRESS_STOPWORDS`
-    plus the corroboration count let «Соответственно» and «Единственное» be
-    written out as speaker names, and 123 transcript lines were relabelled with
-    them. Repetition was no defence — «Соответственно» recurred three times.
+    Measured regression on a 57-minute recording: `ADDRESS_STOPWORDS` plus the
+    corroboration count let «Соответственно» and «Единственное» be written out as
+    speaker names, and 123 transcript lines were relabelled with them. Repetition
+    was no defence — «Соответственно» recurred three times.
     """
 
-    #: Surfaces a run harvested as a "vocative" that are not names.
+    #: Surfaces a run harvested as a "vocative" that are not names. Kept as language
+    #: coverage: these are ordinary Russian words, and the matcher must reject them.
     OBSERVED_NON_NAMES = (
         "Соответственно", "Единственное", "Допустим", "Стенциально", "Информацию",
         "принципе", "клиенты", "решения", "вопросы", "конфигов", "Пустышками",
@@ -245,8 +246,9 @@ class GivenNameShapeTests(unittest.TestCase):
         "Определяем", "Видите", "Скорее", "URL", "Origin", "фронта", "наоборот",
     )
 
-    #: Address forms that must keep working (language coverage, not a roster), including the
-    #: irregular hypocorisms `is_short_form_of` cannot derive from a full name.
+    #: Address forms that must keep working, including the irregular hypocorisms
+    #: `is_short_form_of` cannot derive from a full name. Language coverage, not a
+    #: roster: nothing here says who was in any recording.
     OBSERVED_NAMES = (
         "Дим", "Саш", "Саша", "Люб", "Люба", "Илья", "Ваня", "Антон",
         "Айрат", "Алмаз",

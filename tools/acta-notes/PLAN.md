@@ -88,8 +88,8 @@ speaker-count detection on this audio is not trustworthy. Full meeting with `--n
 
 **Quality is usable but NOT authoritative.** Reading the merged transcript, two failure patterns
 are consistent:
-- a **"sink" speaker** that absorbs the tail of other people's sentences ("…ну либо просто
-  перевести" / *new speaker* "продолжение фразы…" — one continuous sentence, split);
+- a **"sink" speaker** that absorbs the tail of other people's sentences (one continuous sentence split across two labels, the second finishing the
+  first one's clause);
 - **question and answer merged into one speaker** inside a long turn.
 
 This is a hard constraint on what the summary may claim — see D8.

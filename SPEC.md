@@ -71,7 +71,7 @@ everything builds without full Xcode.
 - Apple M3, 16 GB, **macOS 26.2** (target `arm64-apple-macosx26`).
 - **Swift 6.3.3**, **Command Line Tools only**, no full Xcode → build via SwiftPM.
 - Installed: `ffmpeg` (concat), `swiftlint` (via the `Scripts/lint.sh` wrapper).
-- Project home: `/Users/<user>/dev/personal/acta`.
+- Project home: the working copy of this repository.
 
 ## 3. Fixed decisions
 

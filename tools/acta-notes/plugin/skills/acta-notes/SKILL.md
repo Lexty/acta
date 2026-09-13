@@ -69,7 +69,7 @@ has exactly two possible producers and they are **alternatives** — see the for
   this Mac's own store, which is the copy that is actually current for an Exchange/M365 account:
 
   ```bash
-  mac-pim cal events --from -14d --to now --query "a-client" --no-notes
+  mac-pim cal events --from -14d --to now --query "review" --no-notes
   mac-pim cal events --from "2026-07-29 00:00" --to "2026-07-30 00:00" --no-notes   # by window
   ```
 
@@ -96,7 +96,9 @@ has exactly two possible producers and they are **alternatives** — see the for
 
   Filter on the presence of `room.participants`, **not** on `subtype` — a 1:1 huddle arrives as
   `huddle_thread` but a group huddle as `thread_broadcast`. The channel is one of the candidates from
-  `slack-cli channel list`. The roster feeds `--num-speakers` (its size minus your own mic track) and
+  `slack-cli channel list`. ⚠️ `slack-cli` stands for whatever authenticated Slack
+  CLI you have; this repository ships none, and these commands describe the shape of the calls
+  rather than a tool you can install from here. The roster feeds `--num-speakers` (its size minus your own mic track) and
   `--attendees` — take the Cyrillic names from the Slack profiles, do not transliterate the calendar's
   Latin ones (the mapping is not guessable, and a wrong form makes an anchor silently miss;
   see `references/air-skill-lessons.md` and the memory on Cyrillic attendees).
