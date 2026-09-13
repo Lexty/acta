@@ -257,6 +257,9 @@ struct MenuContent: View {
     /// controls, and shown unconditionally it pushed the menu off the bottom of the screen —
     /// on a laptop, with only six devices attached. What a user needs at a glance is which
     /// microphone will be used, not the whole apparatus for deciding it.
+    /// SwiftUI's own "show the Settings scene" action. See `settingsRow` for why the row does not use
+    /// `SettingsLink`.
+    @Environment(\.openSettings) private var openSettings
     @State private var microphoneExpanded = false
     /// The chooser's last measured content height — **zero meaning "not measured"**, which is what a
     /// collapsed disclosure reports. `BoundedSectionLayout.height` is what turns that into a usable
@@ -876,8 +879,29 @@ struct MenuContent: View {
 
     /// ⚠️ **The row that replaced the disclosure.** `SettingsLink` opens the same window ⌘, does, which
     /// is the point: two ways in, one window, and no second copy of the controls to drift.
+    /// ⚠️ **A `Button` over `openSettings`, not a `SettingsLink`, and the difference is the defect.**
+    /// `SettingsLink` asks SwiftUI to show the Settings scene and tells this app nothing. When the window
+    /// is already open but behind something — which for a menu-bar app is most of the time — SwiftUI
+    /// raises no `onAppear`, publishes nothing, and the window stays where it is: the click does nothing
+    /// at all, which was the original complaint reached by a second route. Measured in the shipped build:
+    /// three Settings clicks produced two appearances, and the one for an already-open window produced
+    /// none. So the row asks for the scene *and* tells the presenter a request happened.
+    ///
+    /// ⚠️ ⌘, still goes through SwiftUI's own menu item and cannot be intercepted here. It is covered for
+    /// a closed window, by the appearance; an already-open window on another Space is the case this does
+    /// not reach, and it needs a person to check. **No `.keyboardShortcut` is attached here** — binding
+    /// ⌘, to this row as well was tried and dropped: it is not needed for any of the defects, and an
+    /// unverified second binding for the same key in a menu-bar app is the kind of thing that silently
+    /// takes the working one away.
+    ///
+    /// ⚠️ **The menu's dismissal is no longer `SettingsLink`'s.** Activating the app and making the
+    /// settings window key is what should close the menu panel, since it dismisses on resigning key.
+    /// That is a claim about AppKit's behaviour, not a measurement — it is on the acceptance list.
     private var settingsRow: some View {
-        SettingsLink {
+        Button {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
+        } label: {
             HStack(spacing: 6) {
                 Image(systemName: "gearshape").font(.caption).foregroundStyle(.secondary)
                 Text("Settings…").font(.caption)

@@ -18,7 +18,11 @@ import SwiftUI
 @available(macOS 15.0, *)
 struct ActaSettingsView: View {
     @StateObject private var model = ControlViewModel()
-    @StateObject private var presenter = SettingsWindowPresenter()
+    /// ⚠️ **Shared, not owned by this view, and not observed.** The menu's Settings row has to reach the
+    /// same presenter: asking for Settings when the window is already open raises no `onAppear` at all,
+    /// so a presenter scoped to the view could never be told about that request. It publishes nothing —
+    /// it is a way to reach one window, not view state — so it is referenced, not wrapped.
+    private var presenter: SettingsWindowPresenter { .shared }
 
     var body: some View {
         TabView {
@@ -39,9 +43,10 @@ struct ActaSettingsView: View {
         .onAppear {
             model.refresh()
             model.refreshMicrophone()
-            // Reopening reuses the hosting view, so adoption alone would raise the window exactly once
-            // in the life of the app. This is the second half of that, and it is safe to repeat.
-            presenter.bringForward()
+            // ⚠️ **An appearance is one kind of request, and not the only kind.** It covers ⌘, and the
+            // first open; a request for a window that is already up raises no appearance, which is why
+            // the menu row calls `settingsRequested()` itself.
+            presenter.settingsRequested()
         }
     }
 }
@@ -56,60 +61,117 @@ struct ActaSettingsView: View {
 /// frontmost.
 ///
 /// ⚠️ **Two behaviours, and the window needs both.** `activate()` makes Acta frontmost so the window is
-/// ordered in front of anything; `.moveToActiveSpace` decides *where* — without it, activating switches
-/// the user out of their full-screen Space to wherever the window happens to live, which answers the
-/// complaint by doing something worse. `.fullScreenAuxiliary` is what lets it be shown over another
-/// app's full-screen Space at all.
+/// ordered in front of the applications it is layered against; `.moveToActiveSpace` decides *where* —
+/// without it, activating switches the user out of their full-screen Space to wherever the window happens
+/// to live, which answers the complaint by doing something worse. `.fullScreenAuxiliary` is what lets a
+/// window be shown alongside a full-screen one at all. ⚠️ **Which of them is doing the work has not been
+/// established**: the window was measured raising correctly both with that bit and, after macOS dropped
+/// it, without. Separating them needs a controlled comparison, so this prose claims no more than the
+/// header does about each flag.
 ///
 /// ⚠️ **Deliberately not the reminder panel's treatment.** That is a `.statusBar`-level non-activating
 /// panel on `.canJoinAllSpaces`, because it must appear over a meeting without stealing the keystroke
 /// the user is typing into it. Settings is the opposite: it is asked for, it takes focus, and it belongs
 /// to one Space at a time — a settings window that followed the user onto every Space would be a
 /// window they cannot get rid of.
+///
+/// ## Three things that were wrong in the first version of this, each found by measurement
+///
+/// - **A request for Settings is not an appearance of the view.** Asking for a window that is already
+///   open raises no `onAppear`, so nothing ran and the window stayed where it was — the user's original
+///   complaint, reached by a different route. Raising is therefore driven from `settingsRequested()`,
+///   which the menu row calls on every click, and from the appearance, which covers ⌘, and the first
+///   open.
+/// - **The configuration does not survive a close.** Measured in the app: the mask set at adoption held
+///   for at least half a second and was gone within two, and the reopened window came back without
+///   `fullScreenAuxiliary` and never regained it. So it is written on **every** raise, not once.
+/// - **`formUnion` produced a mask `NSWindow.h` forbids.** The group is replaced rather than joined; the
+///   arithmetic and its tests are in `WindowCollectionPolicy`.
+///
+/// ⚠️ **Still not covered, and it needs a person.** Whether ⌘, reaches an already-open window that is on
+/// another Space: the key equivalent goes through SwiftUI's own menu item, which this cannot intercept
+/// without replacing it, and the menu row is the path the reported incident used.
 @available(macOS 15.0, *)
 @MainActor
-final class SettingsWindowPresenter: ObservableObject {
+final class SettingsWindowPresenter {
+    /// ⚠️ **One presenter for the whole application**, because the two things that ask for Settings live
+    /// in different view trees — the menu row and the settings view itself — and both must reach the
+    /// same window.
+    static let shared = SettingsWindowPresenter()
+
     private weak var window: NSWindow?
 
-    /// Take ownership of the window this view is hosted in, and show it.
-    fileprivate func adopt(_ window: NSWindow) {
+    private init() {}
+
+    /// The hosting view says it is now in `window`, or — `nil` — that it has been detached.
+    ///
+    /// ⚠️ **Attachment is reported, never assumed.** The first version dispatched once to the next turn
+    /// of the run loop and read `view.window` there; if the view was not attached yet that was the only
+    /// attempt, and the window would have kept its default behaviour with nothing to say so. Detachment
+    /// is carried too, so a stale window is never raised.
+    fileprivate func adopt(_ window: NSWindow?) {
         guard window !== self.window else { return }
         self.window = window
-        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
-        bringForward()
+        guard window != nil else { return }
+        raise()
     }
 
-    /// Put the window in front of the user, wherever the user currently is.
+    /// Someone asked for Settings — the menu row, or the view appearing.
     ///
-    /// ⚠️ **Only from an act of asking for it** — an appearance or the window being adopted — and never
-    /// from a view update. `ControlViewModel` publishes while a recording runs, so raising the window on
-    /// every update would drag the user out of whatever they were doing, once a second, for as long as
-    /// the window stayed open.
-    func bringForward() {
+    /// ⚠️ **Deferred by one turn of the run loop, and that is not tidiness.** SwiftUI finishes presenting
+    /// the window *after* the synchronous callback returns, and what it writes then removes
+    /// `.fullScreenAuxiliary`; a mask written before that is overwritten. Measured both here and
+    /// independently on a separate probe. ⚠️ This is one arrangement that was observed to hold, not a
+    /// guarantee about run-loop ordering — if the window is ever seen coming up unconfigured again, this
+    /// is the line to suspect.
+    func settingsRequested() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.raise() }
+        }
+    }
+
+    /// Put the window in front of the user, wherever the user currently is, and configure it to be
+    /// allowed there.
+    ///
+    /// ⚠️ **Only from an act of asking for it**, and never from a view update. `ControlViewModel`
+    /// publishes while a recording runs, so raising the window on every update would drag the user out of
+    /// whatever they were doing, once a second, for as long as the window stayed open.
+    private func raise() {
         guard let window else { return }
+        // ⚠️ Written every time. See the class comment: a close throws this away.
+        window.collectionBehavior = NSWindow.CollectionBehavior(
+            rawValue: WindowCollectionPolicy.settingsWindow(from: window.collectionBehavior.rawValue))
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
 }
 
-/// The one job of this view is to hand its `NSWindow` to the presenter.
+/// The one job of this view is to tell the presenter which `NSWindow` it is in.
 @available(macOS 15.0, *)
 private struct SettingsWindowHost: NSViewRepresentable {
     let presenter: SettingsWindowPresenter
 
-    func makeNSView(context: Context) -> NSView {
-        let probe = NSView(frame: .zero)
-        // ⚠️ Deferred: a view is not in a window yet at the moment it is made, so `probe.window` is nil
-        // here and only nil. The next turn of the run loop is the first at which there is anything to
-        // adopt.
-        DispatchQueue.main.async { [presenter] in
-            guard let window = probe.window else { return }
-            presenter.adopt(window)
+    /// ⚠️ **`viewDidMoveToWindow` rather than a deferred read of `view.window`.** AppKit calls this when
+    /// the view is actually attached — and again when it is detached, and again on re-attachment — so
+    /// there is no turn of the run loop to guess at and no single attempt to miss.
+    final class Probe: NSView {
+        weak var presenter: SettingsWindowPresenter?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            MainActor.assumeIsolated { presenter?.adopt(window) }
         }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let probe = Probe(frame: .zero)
+        probe.presenter = presenter
         return probe
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    // ⚠️ **Empty on purpose.** A view update is not a request for the window, and raising from here would
+    // reclaim focus once a second for as long as a recording runs.
+    func updateNSView(_ nsView: Probe, context: Context) {}
 }
 
 // MARK: - General
