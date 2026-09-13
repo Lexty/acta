@@ -978,17 +978,27 @@ reviewed it read-only. Two findings, both verified in the code before acting on 
   completion path its comment described. Split: the old test keeps the click half under a title that says
   so, and `aReplacementWithdrawsTheCountdownBeforeItCanComplete` covers the case nobody clicks.
 
-Two tests added, one `FakePresenter` flag (`losesNextPresentationOnShow`). **956 tests pass.**
+Three tests added, one `FakePresenter` flag (`losesNextPresentationOnShow`). **957 tests pass.**
 
-**Negative controls** (five, each restored, each verified against `git diff` afterwards):
+**Negative controls** (eleven, each restored, each verified against `git diff` afterwards):
 
 - association made after `show` again → fails **only** `a presentation lost from inside show leaves no
   orphan`. The fix is load-bearing and uniquely pinned.
 - a lost presentation discards nothing → fails four, the new test among them.
-- ⚠️ **`trackRecordingIdentity`'s release-offer clear, deleted alone: nothing fails. `observeOwnerRelease`'s
-  watch teardown, deleted alone: nothing fails. Both deleted: the new replacement test fails.** Two
-  independent fences take the offer down when a recording ends, so the new test names neither on its own.
-  Recorded in the test itself, because a green run there is not evidence that either line is load-bearing.
+- ⚠️ **The replacement test as first written never put B under the live countdown.** Codex caught it on a
+  second read: the tick sat between A's stop and B's start, so it arranged A ending and *then* B beginning.
+  Rearranged — B recording before the first tick, A's countdown asserted still running immediately before
+  it — the test now reaches `trackRecordingIdentity` by the changed recording directory, which is a
+  different branch from the one the first draft reached.
+- ⚠️ **Every fence here is one of a redundant pair, and no single one has a test.** Measured, after the
+  rearrangement: deleting `trackRecordingIdentity`'s clear on the *new-recording* branch fails nothing;
+  deleting `observeOwnerRelease`'s teardown of a watch whose recording is gone fails nothing; deleting both
+  fails the replacement test. The same holds for the *recording-ended* branch and the same teardown, against
+  the new `aRecordingEndingTakesItsOfferDown`. Written into both tests, because a green run there is not
+  evidence that any one line is load-bearing.
+- ⚠️ **`trackRecordingIdentity`'s release-offer clear on the recording-ended branch had no test at all** —
+  deleting it failed nothing in any of the 956 tests. That is what `aRecordingEndingTakesItsOfferDown` was
+  added for: a recording that simply ends under a standing offer, with no successor. 957 tests now.
 
 ⚠️ **A control of mine corrupted the tree and I did not notice for two runs.** The harness saved its
 "original" per edit rather than per file, so a control with two edits to one file restored the file to its

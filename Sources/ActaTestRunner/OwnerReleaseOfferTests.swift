@@ -694,11 +694,11 @@ struct OwnerReleaseOfferTests {
     /// recording takes the prompt down, and `prompt`'s own `didSet` revokes the countdown attached to it —
     /// so the countdown never reaches `evaluate` again and the completion path is never entered. The guards
     /// inside `stopForOwnerRelease` stand behind that and are reached by nothing here.
-    /// ⚠️ **And *two* fences take the prompt down, so this test names neither on its own.** Measured:
-    /// deleting `trackRecordingIdentity`'s release-offer clear leaves it passing, and so does deleting
-    /// `observeOwnerRelease`'s teardown of a watch whose recording is gone; only removing both fails it.
-    /// That is production redundancy worth having, not two tested rules — do not read a green run here as
-    /// evidence that either line is load-bearing.
+    /// ⚠️ **B must already be recording before the first tick.** Codex caught the first draft ticking
+    /// between A's stop and B's start: that arranged A ending, *then* B beginning, and B was never under
+    /// the live countdown at all — which is the whole claim. With no tick in between, the coordinator
+    /// still holds A's offer when it first sees B, and `trackRecordingIdentity` reaches it by the changed
+    /// recording directory rather than by the recording having ended.
     @Test("a recording replaced under a live countdown withdraws it before it can complete")
     @available(macOS 15.0, *)
     func aReplacementWithdrawsTheCountdownBeforeItCanComplete() async {
@@ -715,19 +715,13 @@ struct OwnerReleaseOfferTests {
             return
         }
 
+        // A ends and B begins from the menu, with no tick in between: the coordinator has not noticed
+        // either, so A's acknowledged countdown is still running over what is now B's recording.
         harness.controller.stop()
         let idle = await awaitCondition(timeoutMilliseconds: 6000) {
             MainActor.assumeIsolated { harness.controller.phase } == .idle
         }
         #expect(idle, "the first recording never finished, so there was no successor to protect")
-        // ⚠️ The tick is where the coordinator learns the recording ended: `trackRecordingIdentity` runs
-        // from `tick`, above `evaluateCountdown`, so this is the one tick in which the countdown could
-        // otherwise have completed against a recording that no longer exists.
-        fixture.run(seconds: 1)
-        #expect(fixture.coordinator.countdown?.phase == .revoked(.withdrawn),
-                "A ending left its countdown live over B")
-        #expect(fixture.coordinator.prompt == nil, "A's offer outlived A")
-
         harness.clock.onSleep { _ in harness.source.emitBatch() }
         harness.controller.start()
         let startedB = await awaitCondition(timeoutMilliseconds: 6000) {
@@ -737,10 +731,63 @@ struct OwnerReleaseOfferTests {
         #expect(startedB, "the successor never started")
         #expect(harness.controller.ownerAdmission == .unbound(.notStartedFromPrompt))
 
+        // The state this test exists for, asserted before the tick that resolves it.
+        guard case .running? = fixture.coordinator.countdown?.phase else {
+            Issue.record("A's countdown ended before B started, so B was never under it: \(String(describing: fixture.coordinator.countdown?.phase))")
+            return
+        }
+        #expect(fixture.releaseOffer != nil, "A's offer was gone before B started")
+
+        // ⚠️ The first tick that sees B. `trackRecordingIdentity` runs from `tick`, above
+        // `evaluateCountdown`, so this is the one tick in which the countdown could otherwise have
+        // completed against a recording it was never raised for.
+        fixture.run(seconds: 1)
+        #expect(fixture.coordinator.countdown?.phase == .revoked(.withdrawn),
+                "A's countdown was still live over B")
+        #expect(fixture.coordinator.prompt == nil, "A's offer outlived A")
+        #expect(!stopBegan(harness), "the first tick after the replacement stopped B")
+
         // Past the deadline A's countdown would have reached, with Slack still idle throughout.
         fixture.run(seconds: 25)
         #expect(!stopBegan(harness), "A's countdown stopped B")
         #expect(fixture.coordinator.ownerWatch == nil, "an unbound recording was given an owner watch")
+        await settle(harness)
+    }
+
+    /// A recording that simply ends, with a release offer standing over it and no successor.
+    ///
+    /// ⚠️ **This case had no test anywhere until now.** Measured against the whole suite: deleting
+    /// `trackRecordingIdentity`'s release-offer clear on the recording-ended branch failed nothing, in any
+    /// of the 956 tests. Its sibling in `observeOwnerRelease` — a watch whose recording is gone — covers
+    /// the same situation, so this is another redundant pair: deleting either alone still passes here, and
+    /// only both together fail.
+    @Test("a recording that ends under a standing release offer takes the offer down with it")
+    @available(macOS 15.0, *)
+    func aRecordingEndingTakesItsOfferDown() async {
+        let fixture = makeFixture()
+        defer { fixture.harness.tearDown() }
+        let harness = fixture.harness
+        guard await startBound(fixture) else { return }
+        guard releaseUntilOffered(fixture) != nil, fixture.releaseOffer != nil else {
+            Issue.record("no release offer was raised"); return
+        }
+
+        harness.controller.stop()
+        let idle = await awaitCondition(timeoutMilliseconds: 6000) {
+            MainActor.assumeIsolated { harness.controller.phase } == .idle
+        }
+        #expect(idle, "the recording never finished")
+        // Nothing has ticked, so the offer is still standing over a recording that is already over.
+        #expect(fixture.releaseOffer != nil, "the offer was gone before the coordinator ticked")
+
+        fixture.run(seconds: 1)
+        #expect(fixture.coordinator.prompt == nil, "the offer outlived the recording it was raised for")
+        #expect(fixture.coordinator.countdown?.phase == .revoked(.withdrawn))
+        #expect(fixture.coordinator.ownerWatch == nil, "the watch outlived its recording")
+
+        // Slack stays idle. Nothing is offered over an application that is not recording.
+        fixture.run(seconds: 10)
+        #expect(fixture.coordinator.prompt == nil, "an offer was raised with no recording under it")
         await settle(harness)
     }
 
