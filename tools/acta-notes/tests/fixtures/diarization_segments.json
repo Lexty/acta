@@ -1,0 +1,63 @@
+{
+  "audioFile": "/Users/x/Acta/2026-07-29 Weekly/.acta-notes/system.16k.wav",
+  "config": null,
+  "durationSeconds": 482.5,
+  "metrics": null,
+  "processingTimeSeconds": 12.25,
+  "realTimeFactor": 39.38,
+  "segments": [
+    {
+      "embedding": [0.0121, -0.0433, 0.2011, 0.0876],
+      "endTimeSeconds": 12.4,
+      "qualityScore": 0.88,
+      "speakerId": "Speaker 1",
+      "startTimeSeconds": 0.52
+    },
+    {
+      "embedding": [-0.1004, 0.0512, 0.0099, -0.2213],
+      "endTimeSeconds": 20.1,
+      "qualityScore": 0.81,
+      "speakerId": "Speaker 2",
+      "startTimeSeconds": 12.9
+    },
+    {
+      "embedding": [0.0133, -0.0451, 0.1987, 0.0902],
+      "endTimeSeconds": 35.2,
+      "qualityScore": 0.9,
+      "speakerId": "Speaker 1",
+      "startTimeSeconds": 20.6
+    },
+    {
+      "embedding": [0.2201, 0.1174, -0.0332, 0.0451],
+      "endTimeSeconds": 38.05,
+      "qualityScore": 0.55,
+      "speakerId": "Speaker 3",
+      "startTimeSeconds": 36.0
+    },
+    {
+      "embedding": [-0.0988, 0.0533, 0.0104, -0.2198],
+      "endTimeSeconds": 61.35,
+      "qualityScore": 0.86,
+      "speakerId": "Speaker 2",
+      "startTimeSeconds": 38.6
+    },
+    {
+      "embedding": [0.0117, -0.0428, 0.2034, 0.0861],
+      "endTimeSeconds": 75.5,
+      "qualityScore": 0.79,
+      "speakerId": "Speaker 1",
+      "startTimeSeconds": 62.0
+    }
+  ],
+  "speakerCount": 3,
+  "timestamp": "2026-07-29T09:12:33Z",
+  "timings": {
+    "audioLoadingSeconds": 0.31,
+    "embeddingExtractionSeconds": 6.12,
+    "modelCompilationSeconds": 1.02,
+    "postProcessingSeconds": 0.08,
+    "segmentationSeconds": 3.44,
+    "speakerClusteringSeconds": 1.28,
+    "totalProcessingSeconds": 12.25
+  }
+}

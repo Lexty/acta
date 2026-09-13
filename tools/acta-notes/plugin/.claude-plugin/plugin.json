@@ -1,0 +1,8 @@
+{
+  "name": "acta-notes",
+  "description": "End-to-end processing of an Acta meeting recording in ~/Acta: local transcription (Parakeet TDT via fluidaudiocli), offline VBx diarization, utterance-level merge, anchor-based speaker naming, quality gates with a provenance block, then a Russian summary.md with bullets and action points enriched from screenshots, calendar, Jira, Slack and local project docs. An official Teams VTT short-circuits the whole ASR path. Audio never leaves the machine. Use whenever the task is to transcribe a meeting, summarize a recording, find WHEN a call about a topic happened, or enrich a meeting with outside sources. Trigger on: \"транскрибируй встречу\", \"транскрибируй последнюю встречу\", \"сделай саммари по встрече\", \"сделай сводку по встрече\", \"булеты по встрече\", \"суммаризируй запись\", \"подтяни скриншоты к встрече\", \"подтяни календарь к встрече\", \"подтяни jira к встрече\", \"найди когда был созвон по <теме>\", \"обработай запись из ~/Acta\", \"transcribe the meeting\", \"summarize this recording\", \"как обычно\" (in the context of meeting notes). Skills-only plugin (bundled Python stdlib scripts, no MCP binary).",
+  "version": "1.5.0",
+  "author": {
+    "name": "Lexty"
+  }
+}
