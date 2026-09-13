@@ -78,7 +78,7 @@ everything builds without full Xcode.
 | Aspect | Decision | Why |
 |---|---|---|
 | App type | SwiftUI `MenuBarExtra`, `LSUIElement=true` | minimal, no Dock icon |
-| Build | **SwiftPM** + bundling script + ad-hoc `codesign` | no full Xcode available |
+| Build | **SwiftPM** + bundling script + `codesign` with a local certificate | no full Xcode available |
 | Dependencies | **none external** (no WhisperKit — no transcription) | simpler, more reliable |
 | Audio capture | **a single `SCStream`**: system audio + microphone | works for any source app |
 | Disk writes | **streaming, ~10–15 s segments** (each a valid file) | a crash loses ≤ one segment |
@@ -219,8 +219,10 @@ Follow the tasks in `docs/plans/acta.md`; each has a verifiable criterion. The k
 
 ## 10. Risks and notes
 - **Audio-only ScreenCaptureKit** still needs a display content filter → minimal video config, ignore `.screen`.
-- **TCC + ad-hoc signing:** keep `CFBundleIdentifier`/`--identifier` stable, otherwise Screen Recording
-  must be granted again after every rebuild.
+- **TCC + signing:** the grant follows the *designated requirement*, so a stable
+  `CFBundleIdentifier`/`--identifier` is necessary but not sufficient — an ad-hoc signature puts the
+  cdhash in the requirement and every rebuild revokes the grant. Sign with the local certificate
+  `Scripts/setup-signing.sh` creates.
 - **Segment format:** pick a container that yields a valid file per segment (WAV/CAF); if in doubt,
   write raw PCM per segment and build the WAV on finalisation/recovery.
 - **Privacy/ethics:** recording calls with other people may require their consent — the user's responsibility.
