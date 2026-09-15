@@ -178,8 +178,20 @@ func unrecognisedMessageIsAFailureOfUnknownCategory() {
 @Test(arguments: ControllerMessage.allMessages) @available(macOS 15.0, *)
 func everyProductionMessageIsClassified(_ message: ControllerMessage) {
     let state = ControlState(from: ControllerSnapshot(phase: .error, errorMessage: message.text))
-    if case .archiveOpenFailed = message {
-        #expect(state.notice?.category == .archiveOpenFailed)
+    // ⚠️ The notice-routed messages are the ones where **nothing about the recording has failed**:
+    // the archive would not open, or the microphone changed under a recording that is still capturing.
+    // Routing any of them to `lifecycleFailure` would park `phase` in `.error` and no-op `stop()`.
+    let noticeCategories: [Notice.Category?] = {
+        switch message {
+        case .archiveOpenFailed: return [.archiveOpenFailed]
+        case .microphoneSwitched: return [.microphoneSwitched]
+        case .microphoneSwitchFailed: return [.microphoneSwitchFailed]
+        case .microphoneObservationDegraded: return [.microphoneObservationDegraded]
+        default: return []
+        }
+    }()
+    if let expected = noticeCategories.first {
+        #expect(state.notice?.category == expected)
         #expect(state.lifecycleFailure == nil)
     } else {
         #expect(state.lifecycleFailure?.category != .unknown,

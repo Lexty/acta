@@ -5,7 +5,9 @@ microphone as two separate tracks and writes them to disk as it goes. That is al
 transcription and summarisation are a separate, local step, shipped in this repository as a
 companion Claude Code plugin (see below).
 
-Recordings never leave the machine.
+Recordings never leave the machine. ⚠️ The companion plugin's *summary* step is the exception and
+it is a real one — it sends what it reads to Claude, and that is more than the transcript. See
+[Privacy](#privacy) before running it on anything sensitive.
 
 ## Why two tracks
 
@@ -85,9 +87,15 @@ locally through `fluidaudiocli`. It also maintains the archive: an index of ever
 retention pass that compresses the audio of meetings that are already written up (48 kHz stereo PCM
 is ~1.7 GB per hour; Opus at 32 kbps per mono track is ~29 MB).
 
-Audio and speech recognition stay on the machine. Summarisation is done by Claude, so the
-transcript *text* does leave — see `tools/acta-notes/plugin/skills/acta-notes/SKILL.md`, which
-states this plainly, and `tools/acta-notes/README.md` for setup.
+Audio and speech recognition stay on the machine — nothing sends a recording anywhere. **The
+summary step is different, and the distinction matters more than it first looks.** Summarisation is
+done by Claude, so what it reads leaves the machine, and by the time it writes a summary it has been
+asked to read more than the transcript: the transcript text, the screenshots sitting on your Desktop
+inside the meeting's time window, the calendar event with its organizer and attendees, matching mail
+when a thread is cited, Jira issues on the topic, and local project documents. That is the design —
+a summary is worth little without them — but it means the private material that leaves is not only
+what was said in the call. `SKILL.md` §S8 is where those steps live; read it before running the
+summary step on a meeting you would not want a model to see the surroundings of.
 
 The plugin needs `ffmpeg`, and builds `fluidaudiocli` on first use via its own `bootstrap.sh`.
 Run its `doctor.py` if anything looks wrong; it reports every dependency and model it expects.
@@ -111,6 +119,10 @@ anyone — human or agent — changing this code.
 
 Recordings are local files and are never uploaded by this app. It is not sandboxed (personal use)
 and its entitlements are minimal.
+
+⚠️ **This paragraph is about the recorder only.** The companion plugin's summary step sends what it
+reads to Claude, and that is more than the transcript — see
+[Companion plugin](#companion-plugin-turning-a-recording-into-notes) above for exactly what.
 
 ## Licence
 

@@ -26,8 +26,22 @@ import Foundation
 /// request-direction enum** and has no producer today; do not read its presence as a claim that
 /// tolerant decoding exists.
 public enum ProtocolVersion {
-    public static let current = 1
-    public static let supported = [1]
+    /// ⚠️ **v2, and with no compatibility machinery, deliberately.** `WireSettings` gained three
+    /// required fields, and **no v1 client has ever existed** — not "none ships in this binary", which
+    /// is the weaker thing an earlier draft of this comment said. `actactl` has not been written
+    /// (`Package.swift` declares no CLI target, and the name appears nowhere under `Sources/`), so every
+    /// peer that has ever spoken this schema was in-process, compiled against it, and replaced with it.
+    /// The four-case compatibility matrix gets written the day a client ships independently of the app.
+    ///
+    /// ⚠️ **The socket does not weaken that, but it does change why it holds.** Since the control socket
+    /// landed, the endpoint is reachable by any same-UID process, so "in the same binary" no longer
+    /// describes who *can* connect — only who ever has. The version rejection below is what makes that
+    /// safe either way: a v1 frame is answered with `unsupported_version`, never decoded.
+    ///
+    /// ⚠️ Unrelated to `RecordingID`'s `"v1:"` prefix, which is an independent frozen encoding version:
+    /// renaming it would invalidate every stored id for nothing.
+    public static let current = 2
+    public static let supported = [2]
 
     /// Decode a `version` field and refuse anything but `current`, throwing before the rest of the
     /// envelope is read. Used by the response and event decoders so the exact-version rule holds on the

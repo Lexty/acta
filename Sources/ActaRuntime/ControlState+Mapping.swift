@@ -22,7 +22,9 @@ extension ControlState {
                   title: snapshot.title,
                   suggestedTitle: snapshot.suggestedTitle,
                   settings: snapshot.settings,
-                  recordings: snapshot.recordings)
+                  recordings: snapshot.recordings,
+                  activeRecordingDirectory: snapshot.activeRecordingDirectory,
+                  ownerAdmission: snapshot.ownerAdmission)
     }
 
     /// The operation, with explicit precedence — the order below **is** the contract.
@@ -61,6 +63,15 @@ extension ControlState {
         guard !errorMessage.isEmpty else { return (nil, nil) }
         if errorMessage.hasPrefix(ControllerMessage.Prefix.archiveOpenFailed) {
             return (nil, Notice(category: .archiveOpenFailed, displayMessage: errorMessage))
+        }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneSwitched) {
+            return (nil, Notice(category: .microphoneSwitched, displayMessage: errorMessage))
+        }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneObservationDegraded) {
+            return (nil, Notice(category: .microphoneObservationDegraded, displayMessage: errorMessage))
+        }
+        if errorMessage.hasPrefix(ControllerMessage.Prefix.microphoneSwitchFailed) {
+            return (nil, Notice(category: .microphoneSwitchFailed, displayMessage: errorMessage))
         }
         return (ControlFailure(category: category(of: errorMessage), displayMessage: errorMessage), nil)
     }

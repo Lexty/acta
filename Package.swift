@@ -110,10 +110,19 @@ let package = Package(
         // Depends on ActaControlProtocol, never the other way round: the projection
         // (ControlState → WireControlState) and the dispatcher need both sides visible, while the wire
         // target must stay unable to see the runtime at all.
+        // ⚠️ `-enable-testing` in RELEASE too, and it is not decoration: `ActaTestRunner` is an
+        // ordinary executable target, so `swift build -c release` — which is what `Scripts/bundle.sh`
+        // runs — compiles it as well, and three of its files carry `@testable import ActaRuntime`
+        // (the CoreAudio directory's lifecycle seam and the reconciler's quiescence drain, neither of
+        // which belongs in this library's public API). SwiftPM enables testability for debug only, so
+        // without this line the app itself stops building the moment a test reaches for an internal
+        // symbol. That is exactly what happened, and it went unnoticed because `Scripts/test.sh`
+        // builds debug.
         .target(
             name: "ActaRuntime",
             dependencies: ["ActaKit", "ActaControlProtocol"],
-            path: "Sources/ActaRuntime"
+            path: "Sources/ActaRuntime",
+            swiftSettings: [.unsafeFlags(["-enable-testing"], .when(configuration: .release))]
         ),
         .executableTarget(
             name: "Acta",

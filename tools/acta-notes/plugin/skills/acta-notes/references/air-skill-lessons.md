@@ -34,9 +34,9 @@ Finding *which* recording the user means is Step 0, and it fails in a specific w
 - "the call about X last week" → search the calendar, then map the event to a folder by time
   window (§1).
 - **Calendar subjects contain typos, and an exact-word search silently misses the meeting.** The
-  case that taught this: a review of a client called *a client* was titled "**a client** review", so
-  searching for "a client" returned nothing and the meeting looked like it had never happened.
-  Search by a **short root** ("Serp"), by **attendees**, and by **time window** — three angles, not
+  case that taught this: a review for a client whose name was misspelled in the subject, so an
+  exact search returned nothing and the meeting looked like it had never happened.
+  Search by a **short root** (the first few letters), by **attendees**, and by **time window** — three angles, not
   one exact string. Ordering results oldest-first helps when the window is wide.
 - Confirm the folder before doing any work: open `info.md` for source and duration, and once a
   transcript exists check that the opening lines are about the topic you expected. A wrong folder
@@ -93,7 +93,7 @@ Findings go into `context.md` (calendar and meta) and are folded into `summary.m
   `read()[a:b]`; reading such a file line by line burns the context window for nothing.
 
 **⚠ Secrets hygiene — a hard rule, from a real incident.** A live Tailscale auth key
-(`an auth token`) was once sitting in a project `notes.md` that got pulled in as meeting context.
+was once sitting in a project `notes.md` that got pulled in as meeting context.
 If a gathered source contains a credential, **it never goes into a summary, a transcript, or any
 artifact** — flag it to the user instead. The gathering step reads widely by design, which is
 exactly why it needs this rule.

@@ -4,6 +4,16 @@ import CoreMedia
 import Foundation
 import Testing
 
+
+// ⚠️ **What this contract does not reach, since Task 5 added a parameter to `start`.**
+// `microphoneDeviceID` is checked here only for being *passed through*: `FakeCaptureSource` accepts
+// any string, records it, and can be scripted to refuse one. Whether `SCKCaptureSource` accepts a
+// given uid — and whether the resulting stream records from **that** microphone rather than the system
+// default — is unverified in-process, for the same reason its teardown is: it needs a live `SCStream`,
+// a TCC-authorised build, an audio device and a human listening to the result. A uid ScreenCaptureKit
+// rejects is as broken as one it misroutes, and neither shows up here. Both are in the plan's manual
+// section.
+
 // The `CaptureSource` contract, as tests.
 //
 // This is what makes the fake worth anything. A fake that quietly delivers on the test thread, or
@@ -50,7 +60,7 @@ func assertFailedStartContract(_ source: CaptureSource, label: String) async {
     let delivered = Delivered()
     source.setBufferHandler { _, _ in delivered.record() }
     await #expect(throws: StartupFailure.streamNotStarted, "\(label): a failed start did not map to .streamNotStarted") {
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
     }
     #expect(source.isStreaming == false, "\(label): isStreaming stayed true after a failed start()")
     // Give a straggler from a partially-started stream every chance to appear; none may.
@@ -95,7 +105,7 @@ struct FakeCaptureSourceContractTests {
             recorded.append(track, CMSampleBufferGetPresentationTimeStamp(buffer))
         }
 
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         source.emitBatch()
         source.emitBatch()
         await source.stop()
@@ -117,7 +127,7 @@ struct FakeCaptureSourceContractTests {
             recorded.append(track, CMSampleBufferGetPresentationTimeStamp(buffer))
         }
 
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         source.emitBatch()
         await source.stop()
         let atStop = recorded.count
@@ -138,7 +148,7 @@ struct FakeCaptureSourceContractTests {
             recorded.append(track, CMSampleBufferGetPresentationTimeStamp(buffer))
         }
 
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         // Enqueued and deliberately not waited for: this is the callback that is mid-flight when the
         // caller decides to stop. `stop()` owes two things here — it must let the in-flight callback
         // finish (the drain) and it must swallow the rest (the gate). Draining alone would leave the
@@ -160,7 +170,7 @@ struct FakeCaptureSourceContractTests {
     func isStreamingReflectsAnAsynchronousFailureNotMerelyWhetherStartReturned() async throws {
         let source = FakeCaptureSource()
 
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         #expect(source.isStreaming, "a successful start() left isStreaming false")
 
         // The stream dies on its own, long after start() returned. If `isStreaming` kept saying
@@ -177,11 +187,11 @@ struct FakeCaptureSourceContractTests {
     func aDelayedFailureFromAnOldStreamDoesNotClearItsReplacement() async throws {
         let source = FakeCaptureSource()
 
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         let old = source.currentStreamToken
         // What a restart does: the old stream goes away and a new one takes its place.
         await source.stop()
-        try await source.start()
+        try await source.start(microphoneDeviceID: "BuiltInMicrophoneDevice")
         let replacement = source.currentStreamToken
         #expect(replacement != old, "the restart reused the old stream's identity")
 

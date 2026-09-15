@@ -6,6 +6,25 @@ import os
 /// Entry point. A menu-bar app (`LSUIElement=true`, no Dock icon).
 /// Capture (`SCStream` + microphone) requires macOS 15, so the working UI is available from that
 /// version on; on older systems we show a clear placeholder instead of a "mute" menu.
+/// The application menu's Settings item, replacing SwiftUI's own.
+///
+/// ⚠️ **A view, because `openSettings` is an environment value** and a command builder has no environment
+/// of its own to read it from. The button does the two things every Settings request must do: ask SwiftUI
+/// for the scene, and tell the presenter that a request happened — the second being what an already-open
+/// window needs and what the built-in command cannot provide.
+@available(macOS 15.0, *)
+private struct SettingsCommand: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Settings…") {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+}
+
 @main
 struct ActaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -21,6 +40,33 @@ struct ActaApp: App {
             menuBarLabel
         }
         .menuBarExtraStyle(.window)
+
+        // ⚠️ **A real window, reached by ⌘, and by the menu's Settings row.** Persistent configuration
+        // outgrew a disclosure inside a 300 pt popover the moment the reminders needed a list of
+        // applications; what stays in the menu is what is needed at the moment of acting.
+        Settings {
+            if #available(macOS 15.0, *) {
+                ActaSettingsView()
+            } else {
+                Text("Acta's settings need macOS 15.").padding()
+            }
+        }
+        // ⚠️ **⌘, is routed through the same request path as the menu row**, and this is the only way to
+        // do that: SwiftUI's built-in Settings command asks for the scene and tells the app nothing, so
+        // for a window that is already open and behind something it does exactly what the menu row used
+        // to do — nothing. `replacing:` substitutes the canonical command rather than adding a second
+        // one, so there is still one Settings item and one ⌘,.
+        //
+        // ⚠️ Correcting my own earlier claim that ⌘, could not be intercepted at all: it can, and Codex
+        // was right to push back. It has **not** been exercised on a machine, and it is on the
+        // acceptance list — a replaced command that failed to appear would take ⌘, away entirely.
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                if #available(macOS 15.0, *) {
+                    SettingsCommand()
+                }
+            }
+        }
     }
 
     /// What shows in the menu bar. The dev build adds a visible "DEV" tag next to the waveform so two
@@ -44,19 +90,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// macOS 15+ and this delegate is not gated. Nil on macOS 14, or if the bind was refused.
     private var socketHost: AnyObject?
 
+    /// The deferred hosting of the socket — see `applicationDidFinishLaunching`.
+    private var hostingTask: Task<Void, Never>?
+
+    /// The reminder machinery: the rules, the poll, and the floating panel they drive.
+    ///
+    /// ⚠️ **App-lifetime, like the microphone manager and for the same reason.** `MenuBarExtra(.window)`
+    /// builds its content on the first click, so anything that waits for the menu has already missed
+    /// every call that started since launch — and this feature's whole promise is that it notices one
+    /// without being asked.
+    /// Reachable from the menu, which is the only thing that knows whether it is open.
+    var reminders: AnyObject?
+    /// Type-erased for the same reason `socketHost` is: the panel is macOS 15+ and this delegate is not
+    /// gated.
+    private var reminderPanelBox: AnyObject?
+
+    /// Whether quit has begun. ⚠️ **The reason hosting is deferred is the reason this exists**: a bind
+    /// that completes after `applicationShouldTerminate` has already torn the socket down would leave a
+    /// live endpoint for the whole finalisation window — the exact window the quit-time teardown exists
+    /// to close. Both this flag and the hosting task live on the main actor, so a check after the
+    /// suspension sees a `terminate` that has already run.
+    private var isTerminating = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if #available(macOS 15.0, *) {
             // Recovery of interrupted recordings must run first (SPEC §7).
             ControlAPI.shared.recover()
-            // Then host the control socket. A bind refusal (another instance already owns the path) is
-            // logged and swallowed — the app runs fine without a socket; only `actactl` cannot reach it.
-            let host = ControlSocketHost.live()
-            do {
-                try host.start()
-                socketHost = host
-            } catch {
-                Logger(subsystem: BuildFlavor.logSubsystem, category: "AppDelegate")
-                    .error("control socket not hosted: \(String(describing: error), privacy: .public)")
+            // ⚠️ **Here, and not from a view.** `MenuBarExtra(.window)` builds its content on the first
+            // click, so anything that waits for the menu has already missed every device change since
+            // launch — and feature (B)'s promise is that the default input stays on your list while
+            // Acta is *running*, not while its menu happens to be open.
+            ControlAPI.shared.microphone.start()
+            // The persisted list and the enable flag, applied once at launch. Without this the settings
+            // are stored and inert until someone happens to open the menu and save.
+            ControlAPI.shared.microphone.applySettings(ControlAPI.shared.settings)
+            // Then host the control socket, **last and awaited**: it is the surface through which another
+            // process can ask for a recording, and it must not open before the policy deciding which
+            // microphone such a recording would use has actually been applied.
+            //
+            // ⚠️ **Ordering the calls is not enough, which is why this is a task.** `applySettings` chains
+            // the work and returns; the capture policy is published several suspension points later. A
+            // client connecting in that window would get a recording resolved against the initial empty
+            // priority list — "follow my list" silently meaning "whatever the Mac prefers", which is the
+            // one failure this feature exists to prevent.
+            // The reminders start after the microphone policy is applied and before the socket is
+            // hosted: they read settings and state, and never write either without a click.
+            let coordinator = ReminderCoordinator.live()
+            reminders = coordinator
+            // ⚠️ **The panel is the coordinator's presenter, not a subscriber to its prompt.** A countdown
+            // may only run from an acknowledged presentation, and a sink on `$prompt` has no way back.
+            // The coordinator holds it weakly; this box is what keeps it alive.
+            let panel = ReminderPanelController(coordinator: coordinator)
+            reminderPanelBox = panel
+            coordinator.presenter = panel
+            coordinator.start()
+
+            hostingTask = Task { @MainActor [weak self] in
+                await ControlAPI.shared.microphone.settlePendingApplication()
+                guard let self, !self.isTerminating else { return }
+                let host = ControlSocketHost.live()
+                do {
+                    try host.start()
+                    self.socketHost = host
+                } catch {
+                    Logger(subsystem: BuildFlavor.logSubsystem, category: "AppDelegate")
+                        .error("control socket not hosted: \(String(describing: error), privacy: .public)")
+                }
             }
         }
     }
@@ -67,6 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// route that somehow reached termination without passing through that hook. It cannot cover
     /// `SIGKILL`/crash; stale-socket recovery handles those.
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        hostingTask?.cancel()
+        if #available(macOS 15.0, *) {
+            (reminders as? ReminderCoordinator)?.stop()
+            (reminderPanelBox as? ReminderPanelController)?.dismiss()
+        }
         if #available(macOS 15.0, *) {
             (socketHost as? ControlSocketHost)?.teardown()
         }
@@ -77,7 +182,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stays `recording`, and up to `segmentSeconds` of audio is lost. Recovery does handle that,
     /// but it exists for crashes, not for a deliberate user action — here the recording must be
     /// honestly finished and assembled.
+    /// ⚠️ **Always `.terminateLater` now, and the ordering inside is the whole point.** Quitting has
+    /// four things to finish and they are not interchangeable:
+    ///
+    /// 0. **Close the control socket before anything else**, synchronously, so no client can start work
+    ///    during the finalisation below. See the comment at the call.
+    /// 1. **Stop writing the system default first.** It is the only part of shutdown that changes state
+    ///    other applications depend on, and it must not still be correcting the default while the user
+    ///    is quitting.
+    /// 2. **Then let a recording finish honestly** — the original reason this method exists. Read-only
+    ///    monitoring stays up across this step: `stopAndWait()` waits for capture and self-check work,
+    ///    not merely for the assembler, and a recording's own device observation is independent of the
+    ///    manager's.
+    /// 3. **Then release the manager's consumers**, awaited, so nothing reads or writes through the
+    ///    directory afterwards.
+    ///
+    /// The idle branch used to return `.terminateNow` immediately, which meant the microphone shutdown
+    /// it had just started never ran at all.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // ⚠️ **Synchronously, at quit *initiation*, for the same reason the socket is torn down here.**
+        // A reminder still on screen could otherwise admit a start into the `.terminateLater`
+        // finalisation — the very window the socket teardown exists to close.
+        if #available(macOS 15.0, *) {
+            (reminders as? ReminderCoordinator)?.beginClosing()
+            (reminderPanelBox as? ReminderPanelController)?.dismiss()
+        }
         guard #available(macOS 15.0, *) else { return .terminateNow }
         // AppKit calls this method on the main thread, which is where the façade lives.
         return MainActor.assumeIsolated {
@@ -86,15 +215,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `applicationWillTerminate` (which only tears down, it does not finalise) would then let the
             // process exit on without honouring it, defeating the whole point of this hook. `teardown()`
             // is idempotent, so the `applicationWillTerminate` backstop stays a harmless no-op.
+            isTerminating = true
+            hostingTask?.cancel()
             (socketHost as? ControlSocketHost)?.teardown()
             socketHost = nil
-            guard ControlAPI.shared.state.hasWorkInFlight else { return .terminateNow }
+            // ⚠️ **No `hasWorkInFlight` early return here, deliberately.** This method used to answer
+            // `.terminateNow` when nothing was recording; microphone shutdown then never ran at all. The
+            // idle case still has work to do — releasing the default-input enforcement — so every quit
+            // goes through `.terminateLater` and the task below.
             Task {
-                await ControlAPI.shared.stopAndWait()
+                await ControlAPI.shared.microphone.stopEnforcement()
+                if ControlAPI.shared.state.hasWorkInFlight {
+                    await ControlAPI.shared.stopAndWait()
+                }
+                await ControlAPI.shared.microphone.shutdown()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
         }
+    }
+}
+
+private extension View {
+    /// Make a `DisclosureGroup`'s label behave like the row it looks like: the whole strip toggles the
+    /// section, not just the chevron.
+    ///
+    /// ⚠️ **Three parts, and each one is load-bearing.** `maxWidth: .infinity` makes the label occupy
+    /// the row rather than hugging its text — without it the click target is the words, and the gap to
+    /// the right of a short title stays dead. `contentShape` makes that frame hit-testable at all: a
+    /// `VStack` of `Text` is transparent to a tap everywhere its glyphs are not, so a click between two
+    /// lines of the label fell through. The gesture goes on the label, never on the `DisclosureGroup`,
+    /// because the chevron is the group's own control and wrapping the whole group would take the click
+    /// the chevron is already handling — toggling twice and leaving the section exactly as it was.
+    ///
+    /// ⚠️ Only for labels with **nothing interactive in them**. A tap gesture here swallows clicks on
+    /// any button placed inside the label, and the two callers are text.
+    func disclosureRow(toggle: @escaping () -> Void) -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: toggle)
     }
 }
 
@@ -122,45 +281,88 @@ struct MenuContent: View {
     // renders the `ControlState` it delivers. No view here touches the recording controller or the
     // pipeline — every read is on `state`, every action is a `ControlAPI` command.
     @StateObject private var model = ControlViewModel()
-    @State private var settingsExpanded = false
+    /// ⚠️ Collapsed by default. The chooser is six rows plus a picker plus the management
+    /// controls, and shown unconditionally it pushed the menu off the bottom of the screen —
+    /// on a laptop, with only six devices attached. What a user needs at a glance is which
+    /// microphone will be used, not the whole apparatus for deciding it.
+    /// SwiftUI's own "show the Settings scene" action. See `settingsRow` for why the row does not use
+    /// `SettingsLink`.
+    @Environment(\.openSettings) private var openSettings
+    @State private var microphoneExpanded = false
+    /// The chooser's last measured content height — **zero meaning "not measured"**, which is what a
+    /// collapsed disclosure reports. `BoundedSectionLayout.height` is what turns that into a usable
+    /// frame; seeding it here was not enough, because the collapsed state overwrites the seed.
+    @State private var chooserHeight: CGFloat = 0
+    /// How tall the chooser may get before it scrolls.
+    ///
+    /// ⚠️ A judgement, not a measurement, and scoped to what it can actually promise: it bounds **this
+    /// section's** growth with the device count. It is not proof that the whole menu fits — the other
+    /// sections, an expanded Settings above all, take height of their own, and nothing here has
+    /// measured a rendered popover.
+    static let chooserMaxHeight: CGFloat = 320
 
     /// The current typed state — the single thing every view below reads.
     private var state: ControlState { model.state }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            Divider()
+    /// The app-lifetime coordinator, reached through the delegate that owns it.
+    @available(macOS 15.0, *)
+    private static var reminderCoordinator: ReminderCoordinator? {
+        (NSApp.delegate as? AppDelegate)?.reminders as? ReminderCoordinator
+    }
 
+    /// ⚠️ **The structure is the design, and it is held by spacing rather than by rules.** The panel
+    /// used to be six slabs between five `Divider()`s at an identical 10 pt step, which is the same as
+    /// having no grouping at all: the title field and the Start button below it were no more related
+    /// to each other than "Settings" was to the footer. Apple's own menu extras — Wi-Fi, Sound, Now
+    /// Playing — carry no rules; they group by distance. Here that is 6 pt inside a group and 16 pt
+    /// between, and the one surviving rule sits above the utility line because what follows it is not
+    /// another group but a different kind of thing.
+    ///
+    /// ⚠️ **The cost, named where someone will read it:** a wrong `spacing:` silently destroys the
+    /// grouping and no test can see it. That is the trade this layout accepts.
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+
+            // Banners keep their own space: a recovery notice or a failure is the most important thing
+            // in the panel whenever it exists, and it must not look like part of the action group.
             if let recovery = state.recoveryNotice {
                 banner(recovery.message, systemImage: "arrow.clockwise.circle.fill",
                        tint: .orange) { model.dismissRecoveryNotice() }
+                    .padding(.top, 12)
             }
             if let errorText = errorBannerText {
                 banner(errorText, systemImage: "exclamationmark.triangle.fill",
                        tint: .red, dismiss: nil)
+                    .padding(.top, 12)
             }
 
-            titleField
-            controls
-
-            Divider()
-            recordingsList
-
-            Divider()
-            settingsSection
-
-            Divider()
-            HStack {
-                Button("Open Archive") { model.openArchive() }
-                Spacer()
-                Button("Quit") { NSApplication.shared.terminate(nil) }
+            // ⚠️ **One group: what will be recorded, the button, and what it will be recorded with.**
+            // The microphone line sits directly under the button because the panel has to answer
+            // "with which microphone?" *before* the click, not in a section below the archive.
+            VStack(alignment: .leading, spacing: 6) {
+                titleField
+                controls
+                microphoneSection
             }
-            .font(.caption)
+            .padding(.top, 16)
+
+            recentSection.padding(.top, 16)
+            settingsRow.padding(.top, 16)
+
+            Divider().padding(.top, 12)
+            utilityLine.padding(.top, 8)
         }
         .padding(12)
         .frame(width: 300)
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            model.refreshMicrophone()
+            // ⚠️ The menu is the only thing that knows it is open, and a prompt must not duplicate what
+            // is already on screen.
+            Self.reminderCoordinator?.isMenuOpen = true
+        }
+        .onDisappear { Self.reminderCoordinator?.isMenuOpen = false }
         // Auto-cancelled when the menu closes, so repeated opens do not accumulate subscriptions.
         .task { await model.subscribe() }
     }
@@ -176,36 +378,66 @@ struct MenuContent: View {
     /// Whether editing the title and settings is blocked — today's `isBusy`, restated over `operation`.
     private var isBusy: Bool { state.operation != .idle }
 
+    /// One line: what this is, and — while recording — how long it has been going.
+    ///
+    /// ⚠️ **The status line is gone, and that was a decision, not an omission.** "Ready to record" sat
+    /// directly above a button reading "Start Recording": the same sentence twice, in the place the eye
+    /// lands first. What replaces it is not nothing — the tile changes symbol and colour, and the timer
+    /// appears — so the state is carried by form and position as well as by the words on the control
+    /// itself. **Every state still has words**: the button says "Starting…", "Recording", "Saving…",
+    /// and the tile carries an accessibility label for a reader that cannot see either.
+    ///
+    /// ⚠️ **The revision moved to the bottom, not away.** It is needed to accept a build, so it is
+    /// still on screen; it is not competing with the app's own name to be read first.
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: statusIcon)
+                .font(.system(size: 13))
                 .foregroundStyle(statusColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(BuildFlavor.current.appDisplayName).font(.headline)
-                Text(statusText).font(.caption).foregroundStyle(.secondary)
-                if BuildFlavor.current == .dev {
-                    // Which build is this? With two apps installed it is worth knowing at a glance.
-                    Text(BuildFlavor.revision).font(.caption2).foregroundStyle(.tertiary)
-                }
+                .frame(width: 22, height: 22)
+                .background(statusColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel(statusText)
+            Text(AppInfo.name).font(.headline)
+            if BuildFlavor.current == .dev {
+                // The flavour as a capsule rather than as part of the name: two installed apps are
+                // told apart at a glance, and the name stays the name.
+                Text("DEV")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
             }
             Spacer()
             if case .recording(let elapsedSeconds) = state.operation {
                 // Ticks because each `elapsedSeconds` tick is a distinct `ControlState` the stream emits.
                 Text(MeetingInfo.formatDuration(seconds: elapsedSeconds))
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.medium))
                     .foregroundStyle(.red)
+                    .accessibilityLabel("Recording for \(MeetingInfo.formatDuration(seconds: elapsedSeconds))")
             }
         }
     }
 
+    /// ⚠️ **The "Title" caption is gone because the placeholder already says it.** On 300 pt a label
+    /// above a field that is showing the very text it describes spends a line to repeat itself.
+    ///
+    /// ⚠️ **Borderless, but never invisible as a control.** The bottom rule and the focus ring are what
+    /// tell the user it is editable — a field disguised as text is a known trap, and it is the reason
+    /// the underline stays when the field is enabled. The accessibility label survives the caption it
+    /// replaced, so nothing is lost to a screen reader.
     private var titleField: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Title").font(.caption).foregroundStyle(.secondary)
-            TextField(state.suggestedTitle.isEmpty ? "Meeting title" : state.suggestedTitle,
-                      text: model.titleBinding)
-                .textFieldStyle(.roundedBorder)
-                .disabled(isBusy)
-        }
+        TextField(state.suggestedTitle.isEmpty ? "Meeting title" : state.suggestedTitle,
+                  text: model.titleBinding)
+            .textFieldStyle(.plain)
+            .font(.body)
+            .disabled(isBusy)
+            .padding(.vertical, 3)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(isBusy ? Color.secondary.opacity(0.15) : Color.secondary.opacity(0.3))
+                    .frame(height: 1)
+            }
+            .accessibilityLabel("Meeting title")
     }
 
     private var controls: some View {
@@ -244,30 +476,362 @@ struct MenuContent: View {
         .controlSize(.large)
     }
 
-    private var recordingsList: some View {
+    // MARK: - Microphone
+
+    /// The chooser, and the three states it must never collapse.
+    ///
+    /// ⚠️ **With feature (B) off this section reads as Acta's recording input and nothing else.** The
+    /// two promises are separate — one is which microphone Acta records from, the other is which
+    /// microphone the Mac prefers — and a user who never turns the second one on must not be shown a
+    /// control that implies Acta is touching their system settings.
+    @ViewBuilder
+    private var microphoneSection: some View {
+        let mic = model.microphone
+        VStack(alignment: .leading, spacing: 6) {
+            // ⚠️ **Outside the disclosure on purpose.** "I could not read the audio devices" must not be
+            // something the user has to open a section to discover.
+            if let failure = mic.inventoryFailure {
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            DisclosureGroup(isExpanded: $microphoneExpanded) {
+                // ⚠️ **Bounded, because collapsing only fixed the height the user starts with.** The
+                // expanded body is the whole chooser — six rows here, plus a picker, plus feature (B)'s
+                // controls — and unbounded it reproduces the layout that ran off the screen the moment
+                // anyone opens it to do the thing it is for. What the bound buys is that this section
+                // stops growing with the device count; it is not a claim that the whole menu fits.
+                // ⚠️ **Measured, not simply capped.** A `ScrollView` is greedy along its scroll axis:
+                // `.frame(maxHeight:)` alone makes it take the whole bound even when the content is half
+                // that, so a Mac with two microphones would show the list above a large empty gap. The
+                // height is the content's own, clamped — so short content sizes naturally and only long
+                // content scrolls.
+                // ⚠️ **`onGeometryChange`, not a `PreferenceKey` — and the old way had never worked.**
+                // The measurement travelled through `ChooserHeightKey` and `onPreferenceChange` into
+                // `chooserHeight`, and `chooserHeight` stayed at its initial zero: with zero meaning
+                // "not measured", `BoundedSectionLayout` hands back the **bound**, so this section was
+                // always exactly 320 pt tall. That was invisible for as long as the chooser's content
+                // was taller than 320 — it filled the frame and scrolled, which is what it looked like
+                // it was doing. Removing the enable toggle and the duplicate Settings link took the
+                // content under the bound, and 70-odd points of empty space appeared under the last
+                // line. Measured off the user's screenshot before this was touched: content ≈ 234 pt
+                // in a frame of ≈ 300, against a bound of 320.
+                ScrollView {
+                    microphoneChooser(mic)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            chooserHeight = height
+                        }
+                }
+                .frame(height: BoundedSectionLayout.height(measured: chooserHeight,
+                                                           bound: Self.chooserMaxHeight))
+            } label: {
+                // ⚠️ **The section heading "Microphone" is gone; the summary *is* the row.** The
+                // heading was `.headline` — the same 13 pt bold as the app's own name at the top of
+                // the panel — which made a subsection look like a second application. What a person
+                // needs here is the answer, not the name of the question.
+                // ⚠️ **No mic glyph here, and the chevron is why.** `DisclosureGroup` puts its chevron
+                // on the left, so a glyph after it made this the only row in the panel with two marks
+                // before its label — and pushed that label to a third left edge, past both the Settings
+                // row and the Recent list. One leading sign per row: the chevron says this one opens in
+                // place, the gear below says that one is the Settings window. The chevron is not
+                // decoration to work around; it is the sign that carries the meaning here.
+                VStack(alignment: .leading, spacing: 1) {
+                    // Already distinguishes "Recording from X" from "Will use X": what is happening
+                    // now and what is promised next are different sentences.
+                    Text(mic.captureSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    // ⚠️ Feature (B) changes every other app's input, so *that it is on* stays visible
+                    // even when its controls are folded away. Only the controls collapse, never the
+                    // statement of what Acta is doing to the machine.
+                    // ⚠️ The **actual** status, not "enabled" rendered as success. A suspended or
+                    // refused enforcement is a feature that has stopped doing what it promised, and
+                    // saying so belongs in the line that does not collapse.
+                    if let summary = mic.managementSummary {
+                        // ⚠️ The 19 pt indent that used to be here was measuring the mic glyph plus
+                        // its spacing, so that this line began under the summary's text. With the glyph
+                        // gone the offset would be indenting against nothing — subordinate content
+                        // aligned to a mark that no longer exists.
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundStyle(mic.managementNeedsAttention ? .orange : .secondary)
+                    }
+                }
+                .disclosureRow { microphoneExpanded.toggle() }
+            }
+
+            // ⚠️ **Acta is changing a system-wide setting, so the way out of it is never behind a
+            // disclosure.** This row appears whenever management is on — not only when it has gone
+            // wrong — because the chooser is collapsed by default and a working enforcement the user
+            // cannot pause is as much a trap as a broken one they cannot turn off. Which verb it
+            // offers comes from `managementAction`, the same projection the expanded chooser uses, so
+            // the two cannot drift again.
+            if !microphoneExpanded {
+                managementActions(mic)
+            }
+        }
+    }
+
+    /// Everything behind the disclosure: the list, how it is ranked, and feature (B).
+    @ViewBuilder
+    private func microphoneChooser(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            microphoneStates(mic)
+
+            // ⚠️ **Reduced on purpose, and this is the half of the Settings move that is not cosmetic.**
+            // Membership and order are configuration: they are edited in the Settings window, and
+            // leaving a second editor here would be two controls over one list, drifting apart. What
+            // stays is what a person needs *in this moment* — which microphone each device is, whether
+            // it is available, and the one-off "use this for now".
+            if mic.devices.isEmpty, mic.priority.isEmpty {
+                Text(mic.isComplete ? "No microphones found."
+                                    : "The audio devices could not be read.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(mic.priority.enumerated()), id: \.element) { index, uid in
+                microphoneRow(device(uid, in: mic), rank: index, in: mic)
+            }
+            let unranked = mic.devices.filter { !mic.priority.contains($0.uid) }
+            ForEach(unranked, id: \.uid) { device in
+                microphoneRow(device, rank: nil, in: mic)
+            }
+
+            // ⚠️ **Kept here, with the temporary choice that created it.** Applying a one-off in the menu
+            // and having to undo it in a window is the split that makes a control feel broken.
+            if mic.override != nil {
+                Button("Resume automatic selection") { model.resumeAutomaticMicrophoneSelection() }
+                    .font(.caption)
+            }
+
+            Text("Changes apply the next time capture starts — a new recording, or one this recording "
+                 + "restarts by itself. If Acta manages the Mac's input, that changes right away.")
+                .font(.caption2).foregroundStyle(.secondary)
+
+            Divider()
+            managementControls(mic)
+            // ⚠️ **No second Settings link here.** There is one Settings row in the panel, below the
+            // recordings. Two links to one window, a few rows apart, read as two destinations.
+        }
+        .padding(.top, 4)
+    }
+
+    private func microphoneStates(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let recording = mic.recordingFrom {
+                stateLine("Recording from", recording.name, systemImage: "record.circle")
+            } else {
+                stateLine("Recording from", "not recording", systemImage: "record.circle")
+            }
+            if mic.managingSystemInput {
+                stateLine("Preferred", name(of: mic.preferred, in: mic) ?? "none available",
+                          systemImage: "star")
+                stateLine("Mac's input", systemDefaultText(mic), systemImage: "desktopcomputer")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func stateLine(_ label: String, _ value: String, systemImage: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage).frame(width: 12)
+            Text("\(label): ").foregroundStyle(.secondary)
+            Text(value).foregroundStyle(.primary)
+        }
+    }
+
+    private func systemDefaultText(_ mic: ControlAPI.MicrophoneStatus) -> String {
+        switch mic.systemDefault {
+        case .unread: return "not read"
+        case .noDefault: return "none"
+        case .device(let uid): return name(of: uid, in: mic) ?? uid
+        }
+    }
+
+    private func name(of uid: String?, in mic: ControlAPI.MicrophoneStatus) -> String? {
+        guard let uid else { return nil }
+        return mic.devices.first { $0.uid == uid }?.name ?? uid
+    }
+
+    /// One device: whether it is on the list, where it sits, and *Use now*.
+    ///
+    /// ⚠️ **Two distinct actions, never one click that does both** (plan decision 2). Borrowing a
+    /// headset for one call is not a preference change, so *Use now* is temporary and the arrows edit
+    /// the persistent list.
+    /// A device on the list whose hardware is absent, so a preference can still be seen and removed.
+    private func device(_ uid: String, in mic: ControlAPI.MicrophoneStatus) -> AudioInputDevice {
+        mic.devices.first { $0.uid == uid }
+            ?? AudioInputDevice(uid: uid, name: uid, transport: .other(0), inputChannels: 0,
+                                canBeSystemDefault: .unknown, isAlive: .unknown,
+                                isRunningSomewhere: false)
+    }
+
+    @ViewBuilder
+    private func microphoneRow(_ device: AudioInputDevice, rank: Int?,
+                               in mic: ControlAPI.MicrophoneStatus) -> some View {
+        let present = mic.devices.contains { $0.uid == device.uid }
+        HStack(spacing: 6) {
+            if let rank { Text("\(rank + 1).").font(.caption2).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 0) {
+                // ⚠️ A name, not a control: membership and order moved to the Settings window, and a
+                // checkbox here would be a second way to edit one list.
+                Text(device.name).font(.callout)
+                if device.uid == mic.override {
+                    switch mic.overrideStanding {
+                    case .recording:
+                        Text("using now").font(.caption2).foregroundStyle(.orange)
+                    case .nextSelection:
+                        Text("chosen for the next capture start").font(.caption2).foregroundStyle(.orange)
+                    case .unavailable:
+                        Text("chosen, but not available").font(.caption2).foregroundStyle(.secondary)
+                    case .unknown:
+                        Text("chosen — availability unknown").font(.caption2).foregroundStyle(.secondary)
+                    case .none:
+                        EmptyView()
+                    }
+                }
+                if mic.managingSystemInput, device.isCaptureCandidate, !device.isSystemDefaultCandidate {
+                    Text("recording only — the Mac's input will not follow")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if !present {
+                    Text(mic.isComplete ? "not connected" : "not readable")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if !device.isCaptureCandidate {
+                    Text("unavailable").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+
+            Button("Use now") { model.useMicrophoneNow(device.uid) }
+                .font(.caption)
+                .disabled(!present || model.pendingSelection == device.uid)
+        }
+    }
+
+    /// Feature (B) in the panel: **what it is doing, and the two decisions that answer it.**
+    ///
+    /// ⚠️ **The enable toggle is not here — it is in Settings, and it was the last piece of the move
+    /// that had not actually moved.** `Toggle("Keep the Mac's input on my list")` stood in this
+    /// function *and* in `MicrophoneSettings`: one setting with two editors, which is the exact drift
+    /// the Settings window was introduced to end, and which its own commit claimed to have ended.
+    /// Turning the feature on is configuration and lives in the window. What stays here is the
+    /// obligation: Acta is changing an input device every other application shares, so the statement
+    /// that it is doing so, and the way to stop it, must never require opening a window.
+    @ViewBuilder
+    private func managementControls(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        if mic.managingSystemInput {
+            // ⚠️ Stated whenever it is on: the user must always be able to see that something is
+            // changing a system setting on their behalf, and reach the off switch for it.
+            Text("Acta is managing the Mac's input.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(enforcementText(mic.enforcement)).font(.caption)
+            managementActions(mic)
+        } else {
+            Text("Acta is not changing your Mac's input.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// The immediate decisions about enforcement — **one builder, used by the collapsed row and the
+    /// expanded chooser alike.**
+    ///
+    /// ⚠️ Two copies of this is how the collapsed row came to offer Pause where the expanded one
+    /// offered Resume. It is nil-returning on the same condition as `managementAction`, so "management
+    /// is off" is decided once.
+    @ViewBuilder
+    private func managementActions(_ mic: ControlAPI.MicrophoneStatus) -> some View {
+        if let action = mic.managementAction {
+            HStack(spacing: 8) {
+                managementActionButton(action)
+                // ⚠️ Turning it **off** is not configuration in the way turning it on is: it is the
+                // stop button for a change Acta is making to the machine right now.
+                Button("Turn off") { model.setManagingSystemInput(false) }
+            }
+            .font(.caption)
+        }
+    }
+
+    /// The verb for `managementAction`, in the one place it is spelled.
+    @ViewBuilder
+    private func managementActionButton(_ action: ControlAPI.MicrophoneStatus.ManagementAction)
+        -> some View {
+        switch action {
+        case .pause: Button("Pause") { model.pauseMicrophoneManagement() }
+        case .resume: Button("Resume") { model.resumeMicrophoneManagement() }
+        }
+    }
+
+    /// ⚠️ **Waiting, paused, suspended and refused are four sentences, not one.** Collapsing any pair
+    /// is the failure this whole feature exists to avoid: a status that reads as ordinary waiting while
+    /// something is actually wrong.
+    private func enforcementText(_ status: MicrophoneEnforcementStatus) -> String {
+        switch status {
+        case .disabled: return ""
+        case .enforcing: return "Holding your preferred microphone."
+        case .waitingForPreferredDevice: return "Waiting for a preferred microphone."
+        case .noEligibleDevice: return "No microphone this Mac can use as its input."
+        case .writesRefused: return "The system refused to switch to your microphone."
+        case .uncertain: return "Holding — the audio devices could not all be read."
+        case .paused: return "Paused. Your recordings still use your list."
+        case .suspended(let cause):
+            switch cause {
+            case .repeatedReversals(let n): return "Stopped after something changed the input back \(n) times."
+            case .repeatedConvergenceFailures(let n): return "Stopped after \(n) failed attempts."
+            }
+        case .degraded: return "Could not read the audio devices."
+        }
+    }
+
+    /// ⚠️ **"Open Archive" lives here, not in a footer.** It is about this list; next to it, it reads
+    /// as "and the rest of them". In the footer it was a bordered button of exactly the same weight as
+    /// "Quit" — a frequent, harmless action and a rare, destructive one drawn as equals.
+    private var recentSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Recent Recordings").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Recent").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+                Spacer()
+                Button("Open Archive") { model.openArchive() }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+            }
             if state.recordings.isEmpty {
                 Text("No recordings yet").font(.caption).foregroundStyle(.tertiary)
             } else {
-                ForEach(state.recordings.prefix(5), id: \.directory) { recording in
+                // ⚠️ The same constant that bounded the `info.md` reads. Drawing more rows than were
+                // hydrated would show a row with no title and no date — indistinguishable from a
+                // damaged recording.
+                ForEach(state.recordings.prefix(RecordingController.hydratedRecentCount),
+                        id: \.directory) { recording in
                     recordingRow(recording)
                 }
             }
         }
     }
 
+    /// ⚠️ **The green dot is gone: colour marked the ordinary.** Every saved recording carried one,
+    /// which is most of them, so the eye learned to ignore it — and a recovered or unfinished recording
+    /// sat in that same field of dots with nothing but a hue to set it apart. Now the ordinary is
+    /// quiet, and the exceptions are marked **by symbol and by word**, which also survives a user who
+    /// cannot tell the two hues apart.
+    ///
+    /// ⚠️ **The row shows the real title.** It used to show `directory.lastPathComponent` — a slug that
+    /// repeats the date the folder name already carries, truncated through the middle. The title has
+    /// been on disk in `info.md` since the first version; the listing simply never read it back.
     private func recordingRow(_ recording: MeetingStore.Recording) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(color(for: recording.manifest?.status)).frame(width: 7, height: 7)
+        let row = RecentRecordingRow.make(recording, operation: state.operation,
+                                          activeDirectory: state.activeRecordingDirectory)
+        return HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(recording.directory.lastPathComponent)
+                Text(row.title)
                     .font(.caption)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(statusLabel(recording.manifest?.status))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    // Tail, not middle: the beginning of a title identifies it, the end rarely does.
+                    .truncationMode(.tail)
+                secondLine(row)
             }
             Spacer()
             Button {
@@ -280,34 +844,99 @@ struct MenuContent: View {
         }
     }
 
+    /// When it happened and how long it ran — or, when the recording is not an ordinary finished one,
+    /// what is different about it.
+    @ViewBuilder
+    private func secondLine(_ row: RecentRecordingRow) -> some View {
+        let marker = Self.marker(for: row.state)
+        HStack(spacing: 4) {
+            if let marker {
+                Image(systemName: marker.symbol).font(.system(size: 9)).foregroundStyle(marker.tint)
+                Text(marker.word).font(.caption2).foregroundStyle(marker.tint)
+            }
+            // ⚠️ The stamp is dropped, not faked, when nothing in the folder said when it started.
+            if let stamp = row.stamp {
+                Text(marker == nil ? stamp : "· \(stamp)")
+                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            // Present only for a finished recording whose duration was actually measured.
+            if let duration = row.duration {
+                Text("· \(duration)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+        }
+    }
+
+    /// ⚠️ **Six states, six answers.** `saved` is the silent one; everything else says what it is. The
+    /// three live states are spelled out separately because a folder being written to, one being
+    /// finalised and one abandoned mid-write are three different facts about the same marker.
+    private static func marker(for state: RecentRecordingRow.State)
+        -> (symbol: String, word: String, tint: Color)? {
+        switch state {
+        case .saved: return nil
+        case .starting: return ("clock", "Starting", .secondary)
+        case .live: return ("record.circle", "Recording", .red)
+        case .saving: return ("square.and.arrow.down", "Saving", .secondary)
+        case .recovered: return ("arrow.clockwise", "Recovered", .orange)
+        case .unfinished: return ("exclamationmark.triangle", "Unfinished", .red)
+        // Not folded into "saved": an unreadable marker is a thing we do not know, and the project's
+        // rule is that unknown never renders as ordinary.
+        case .unknown: return ("questionmark.circle", "Unknown", .secondary)
+        }
+    }
+
+    /// The panel's last line: what build this is, and the way out.
+    ///
+    /// ⚠️ **Quit stops being a bordered button.** It and "Open Archive" were two identical bordered
+    /// buttons — one frequent and harmless, one rare and destructive. "Open Archive" moved to the list
+    /// it belongs to, and what is left is a quiet verb that has to be aimed at.
+    private var utilityLine: some View {
+        HStack {
+            if BuildFlavor.current == .dev {
+                Text(BuildFlavor.revision)
+                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            Spacer()
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Settings
 
-    private var settingsSection: some View {
-        DisclosureGroup(isExpanded: $settingsExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Archive folder").font(.caption2).foregroundStyle(.secondary)
-                    // The bindings merge each field into the authoritative settings and save on change,
-                    // so no `.onChange` is needed here.
-                    TextField("~/Acta", text: model.archivePathBinding)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                Stepper(value: model.segmentSecondsBinding,
-                        in: RecordingSettings.minSegmentSeconds...RecordingSettings.maxSegmentSeconds,
-                        step: 5) {
-                    Text("Segment length: \(state.settings.segmentSeconds) s").font(.caption)
-                }
-
-                Toggle("Delete segments after assembly", isOn: model.deleteSegmentsBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-            }
-            .padding(.top, 6)
-            .disabled(isBusy)
+    /// ⚠️ **The row that replaced the disclosure.** `SettingsLink` opens the same window ⌘, does, which
+    /// is the point: two ways in, one window, and no second copy of the controls to drift.
+    /// ⚠️ **A `Button` over `openSettings`, not a `SettingsLink`, and the difference is the defect.**
+    /// `SettingsLink` asks SwiftUI to show the Settings scene and tells this app nothing. When the window
+    /// is already open but behind something — which for a menu-bar app is most of the time — SwiftUI
+    /// raises no `onAppear`, publishes nothing, and the window stays where it is: the click does nothing
+    /// at all, which was the original complaint reached by a second route. Measured in the shipped build:
+    /// three Settings clicks produced two appearances, and the one for an already-open window produced
+    /// none. So the row asks for the scene *and* tells the presenter a request happened.
+    ///
+    /// ⚠️ **No `.keyboardShortcut` is attached here**, and ⌘, is not unreachable either — I claimed it was
+    /// and Codex was right to push back. It is routed by replacing the canonical Settings command; see
+    /// `SettingsCommand` and `ActaApp.body`. Binding the key a second time on this row would duplicate
+    /// what that command already owns.
+    ///
+    /// ⚠️ **The menu's dismissal is no longer `SettingsLink`'s.** Activating the app and making the
+    /// settings window key is what should close the menu panel, since it dismisses on resigning key.
+    /// That is a claim about AppKit's behaviour, not a measurement — it is on the acceptance list.
+    private var settingsRow: some View {
+        Button {
+            openSettings()
+            SettingsWindowPresenter.shared.settingsRequested()
         } label: {
-            Label("Settings", systemImage: "gearshape").font(.caption)
+            HStack(spacing: 6) {
+                Image(systemName: "gearshape").font(.caption).foregroundStyle(.secondary)
+                Text("Settings…").font(.caption)
+                Spacer()
+                Text("⌘,").font(.caption2).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Banner
@@ -329,15 +958,13 @@ struct MenuContent: View {
 
     // MARK: - Status presentation
 
-    /// The status header is derived from `ControlState`, reproducing today's phase-driven header: a
-    /// lifecycle failure reads as "Error" (a fatal stall shows it while the operation is still
-    /// `.saving`, exactly as `phase == .error` did); otherwise the operation drives it, and
-    /// `.starting` keeps the idle header just as the controller kept `phase == .idle` during a start.
+    /// The status header is derived from `ControlState`: a lifecycle failure reads as "Error" (a fatal
+    /// stall shows it while the operation is still `.saving`), and otherwise the operation drives it.
     private var statusIcon: String {
         if state.lifecycleFailure != nil { return "exclamationmark.triangle.fill" }
         switch state.operation {
-        case .idle, .starting: return "waveform"
-        case .recording: return "record.circle.fill"
+        case .idle: return "waveform"
+        case .starting, .recording: return "record.circle.fill"
         case .saving: return "square.and.arrow.down"
         }
     }
@@ -345,35 +972,27 @@ struct MenuContent: View {
     private var statusColor: Color {
         if state.lifecycleFailure != nil { return .red }
         switch state.operation {
-        case .idle, .starting, .saving: return .secondary
-        case .recording: return .red
+        case .idle, .saving: return .secondary
+        case .starting, .recording: return .red
         }
     }
 
+    /// The state in words. **No longer drawn as a line in the header** — it is the tile's
+    /// accessibility label, which is where it still earns its place: a reader that cannot see a red
+    /// dot and a running timer needs the sentence.
+    ///
+    /// ⚠️ `.starting` used to answer "Ready to record" here, and that was a lie the panel told about
+    /// itself: capture is already writing segments during a start, and the button below already said
+    /// "Starting…". Two elements four centimetres apart asserted different things, and the button was
+    /// the one telling the truth.
     private var statusText: String {
         if state.lifecycleFailure != nil { return "Error" }
         switch state.operation {
-        case .idle, .starting: return "Ready to record"
+        case .idle: return "Ready to record"
+        case .starting: return "Starting…"
         case .recording: return "Recording"
         case .saving: return "Saving…"
         }
     }
 
-    private func color(for status: SessionManifest.Status?) -> Color {
-        switch status {
-        case .done: return .green
-        case .recovered: return .orange
-        case .recording: return .red
-        case nil: return .gray
-        }
-    }
-
-    private func statusLabel(_ status: SessionManifest.Status?) -> String {
-        switch status {
-        case .done: return "saved"
-        case .recovered: return "recovered"
-        case .recording: return "unfinished"
-        case nil: return "—"
-        }
-    }
 }

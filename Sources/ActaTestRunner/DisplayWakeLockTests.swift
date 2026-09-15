@@ -241,7 +241,8 @@ struct DisplayWakeLockTests {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let session = RecordingSession(directory: directory, wakeLock: lock)
+        let session = RecordingSession(directory: directory, wakeLock: lock,
+                                       microphone: FakeCaptureMicrophoneResolver())
         // Stands in for the acquire a real `start()` would have done: the point of this test is that
         // `stop()` gives the assertion back, whatever took it. That `start()` is what takes it is the
         // next test's job.
@@ -271,7 +272,8 @@ struct DisplayWakeLockTests {
         let lock = activity.makeWakeLock()
         // `/dev/null` is not a directory, so creating anything beneath it fails with ENOTDIR.
         let unusable = URL(fileURLWithPath: "/dev/null/acta-cannot-exist-\(UUID().uuidString)")
-        let session = RecordingSession(directory: unusable, wakeLock: lock)
+        let session = RecordingSession(directory: unusable, wakeLock: lock,
+                                       microphone: FakeCaptureMicrophoneResolver())
 
         await #expect(throws: (any Error).self) {
             try await session.start()

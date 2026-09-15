@@ -1,6 +1,6 @@
 ---
 name: swiftpm-macos-app-bundle
-description: Build a SwiftUI menu-bar app with SwiftPM without Xcode (.app bundle + ad-hoc codesign + TCC). Use for Package.swift, Scripts/bundle.sh, Info.plist, entitlements.
+description: Build a SwiftUI menu-bar app with SwiftPM without Xcode (.app bundle + codesign with a local certificate + TCC). Use for Package.swift, Scripts/bundle.sh, Info.plist, entitlements.
 ---
 
 # SwiftUI menu-bar app via SwiftPM without Xcode
@@ -31,17 +31,23 @@ description: Build a SwiftUI menu-bar app with SwiftPM without Xcode (.app bundl
    - `LSUIElement = true`  ← no Dock icon (menu-bar app)
    - `NSMicrophoneUsageDescription = <human-readable text>`
    - `LSMinimumSystemVersion = 14.0`
-4. **Ad-hoc signing with a stable identity:**
+4. **Sign with a local self-signed certificate, not ad-hoc:**
    ```
-   codesign --force --sign - --identifier dev.personal.acta \
+   codesign --force --sign "Acta Local Signing" --identifier dev.personal.acta \
      --entitlements Resources/Acta.entitlements Acta.app
    ```
+   ⚠️ **`--sign -` is the trap this step exists to avoid.** An ad-hoc signature pins the designated
+   requirement to the binary's cdhash, which changes on every build, so macOS revokes the TCC grant
+   every single time. A certificate makes the requirement `identifier + certificate leaf`, which a
+   rebuild does not move. `Scripts/setup-signing.sh` creates that certificate non-interactively in a
+   dedicated keychain; `Scripts/bundle.sh` calls it on first use.
 5. Run: `open Acta.app`.
 
 ## Gotchas (common mistakes)
-- **TCC grants are lost after a rebuild:** if the bundle identity changes, macOS treats it as a
-  different app and Screen Recording must be granted again. Keep `CFBundleIdentifier` and
-  `--identifier` constant; if it still misbehaves — revoke and re-grant access in System Settings →
+- **TCC grants are lost after a rebuild:** if the *designated requirement* changes, macOS treats it
+  as a different app and Screen Recording must be granted again. Keeping `CFBundleIdentifier` and
+  `--identifier` constant is necessary and not sufficient — with an ad-hoc signature the requirement
+  also carries the cdhash, so it changes anyway. That is why the certificate exists; if it still misbehaves — revoke and re-grant access in System Settings →
   Privacy & Security → Screen Recording.
 - **Do not sandbox** (personal app): ScreenCaptureKit and arbitrary archive paths are simpler without
   App Sandbox. Keep entitlements minimal.
@@ -56,4 +62,4 @@ description: Build a SwiftUI menu-bar app with SwiftPM without Xcode (.app bundl
 ## References
 - MenuBarExtra: https://developer.apple.com/documentation/swiftui/menubarextra
 - LSUIElement: https://developer.apple.com/documentation/bundleresources/information-property-list/lsuielement
-- codesign / ad-hoc: `man codesign`
+- codesign, and why not ad-hoc: `man codesign`, plus `Scripts/setup-signing.sh`

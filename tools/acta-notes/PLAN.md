@@ -51,7 +51,7 @@ transcription stage is replaced outright, not tuned.
 - **[measured 07-29]** on the full 57-min system track: **9.4 s processing / 9.96 s wall**,
   **RTF 0.0027 ≈ 365× realtime**, 5371 words, mean confidence **0.959**. Russian output is
   coherent and punctuated; errors are the expected ones — proper nouns and jargon
-  (`Айрат`→`Сайрат`, `best shot`→`бэшот/бесшот`, `парсер`→`Тфсс`, `podium`→`подиум`).
+  (a given name gaining a leading consonant, `best shot`→`бэшот/бесшот`, an acronym read as a word, `podium`→`подиум`).
 - **Do not expect a large WER win over whisper.** `lab/003`/`lab/004`: all engines cluster at
   ~0.18–0.21 WER on this exact audio; the apparent "whisper 7 %" was a reference-seed artifact.
   The real wins are: **no hallucination loops**, **no `--language` footgun**, **365× realtime**,
@@ -88,8 +88,8 @@ speaker-count detection on this audio is not trustworthy. Full meeting with `--n
 
 **Quality is usable but NOT authoritative.** Reading the merged transcript, two failure patterns
 are consistent:
-- a **"sink" speaker** that absorbs the tail of other people's sentences ("…ну либо просто
-  перевести" / *new speaker* "продолжение фразы…" — one continuous sentence, split);
+- a **"sink" speaker** that absorbs the tail of other people's sentences (one continuous sentence split across two labels, the second finishing the
+  first one's clause);
 - **question and answer merged into one speaker** inside a long turn.
 
 This is a hard constraint on what the summary may claim — see D8.
@@ -196,7 +196,7 @@ forbids. Partitioning turns "which of ~40 people?" into "which of ~8?".
 **Group resolution runs BEFORE matching**, in this order:
 1. explicit override (`/acta-notes … --group personal`);
 2. a per-meeting-series memory (this recurring call was group X last time);
-3. calendar signal — organizer/attendee domains (`@example…` → `work`);
+3. calendar signal — organizer/attendee domains (the employer's domain → `work`);
 4. otherwise **ask**. Never guess the group silently — an unresolved group means names are simply
    not assigned, and the transcript keeps `S1..SN`. A misrouted group is worse than no names.
 
@@ -304,8 +304,8 @@ per-word: **91 %** at defaults, **98 %** with `--min-segment-duration 0.2 --min-
 - `merge.py` — utterance-level assignment per §3 (prototype validated in the spike).
 - **Speaker naming** (`speakers.json`), in evidence order: **group resolution (D9)** → voice
   match against that group's roster → calendar attendees → self-intros and vocatives in the
-  transcript ("Дим, посмотри второй пункт…", "Люб, добавь это в протокол?" — both present in the spike audio and both
-  strong anchors) → ask the user for the rest. Never guess silently.
+  transcript ("Дим, посмотри второй пункт", "Люб, добавь это в протокол" — ordinary Russian address
+  and both strong anchors) → ask the user for the rest. Never guess silently.
 - **Phase 2b — the grouped voice roster (D9).** Every diarization segment already carries a 256-d
   `embedding[]` (plus `--export-embeddings` for the standalone dump), so the matching substrate is
   free. Build it in three steps, each independently useful:
@@ -323,13 +323,14 @@ per-word: **91 %** at defaults, **98 %** with `--min-segment-duration 0.2 --min-
 
 ### Phase 3 — port the Air skill's context & summary layer *(1 day)*
 Straight port, no redesign:
-- Step-0 meeting identification, incl. the **typo-in-calendar-subject** lesson ("a client review");
+- Step-0 meeting identification, incl. the **typo-in-calendar-subject** lesson (a client name
+  misspelled in the subject, which an exact-word search silently misses);
 - the **official Teams transcript** short-circuit — still strictly better than any local ASR when
   it exists (real names, no ASR errors) — plus `teams_vtt_to_transcript.py`;
 - screenshots: window computation, `~/Desktop` capture-time matching, the **30–60 s lag** between
   slide and screenshot;
 - Jira / local `~/dev/<project>` docs / Slack gathering, the `jq` extraction discipline, and the
-  **secrets-hygiene rule** (a real `an auth token` was once found in a source doc);
+  **secrets-hygiene rule** (a real auth token was once found in a source doc);
 - the exact Russian `summary.md` structure — **unchanged**, "как обычно" must keep working.
 
 ### Phase 4 — quality gates & honesty *(1 day)*

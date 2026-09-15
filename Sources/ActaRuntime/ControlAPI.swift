@@ -27,13 +27,34 @@ public final class ControlAPI {
     /// nothing the typed state can see (a private field, an identical rewrite) does not emit.
     private var lastPublished: ControlState
 
+    /// Microphone management: the device inventory, and feature (B)'s enforcement of the system
+    /// default input.
+    ///
+    /// ⚠️ **It hangs here because this is the route the menu already has**, not because a façade over
+    /// the recording pipeline naturally owns audio-device policy. The alternative was a second global
+    /// the UI would have to reach for directly, which is how two sources of truth start. The manager
+    /// itself owns nothing of the recorder and the recorder owns nothing of it; `ControlAPI` is the
+    /// place they are handed to the same client.
+    ///
+    /// ⚠️ Its state is **not** folded into `ControlState` yet, and the reason is scheduling, not
+    /// necessity. `WireProjection` selects the fields it projects explicitly, so a runtime-only field on
+    /// `ControlState` would *not* by itself change the wire — the earlier claim that it forced a
+    /// protocol bump was wrong. What is true is that the aggregation and the wire fields belong in one
+    /// change with the fixtures they invalidate, which is Task 6 of the microphone plan. Until then the
+    /// menu reads `microphone` directly.
+    public let microphone: MicrophoneManager
+
     /// The production façade. Wraps the menu's controller — see the privacy invariant above.
-    public static let shared = ControlAPI(controller: .shared)
+    public static let shared = ControlAPI(controller: .shared, microphone: .shared)
 
     /// - Parameter controller: the controller to wrap. Production passes `.shared`; a test passes one
     ///   built with the injected seams.
-    public init(controller: RecordingController) {
+    /// - Parameter microphone: the app-lifetime microphone owner. Production passes `.shared`; a test
+    ///   passes one built over a fake directory. ⚠️ Not a default argument, for the reason
+    ///   `RecordingDependencies` is not one: a default argument is a wiring claim no test can read back.
+    public init(controller: RecordingController, microphone: MicrophoneManager) {
         self.controller = controller
+        self.microphone = microphone
         lastPublished = ControlState(from: ControlAPI.snapshot(of: controller))
         observe()
     }
@@ -144,7 +165,9 @@ public final class ControlAPI {
                            suggestedTitle: controller.suggestedTitle,
                            settings: controller.settings,
                            recordings: controller.recordings,
-                           elapsedSeconds: controller.elapsedSeconds)
+                           elapsedSeconds: controller.elapsedSeconds,
+                           activeRecordingDirectory: controller.activeRecordingDirectory,
+                           ownerAdmission: controller.ownerAdmission)
     }
 
     // MARK: - Title and settings
@@ -159,6 +182,12 @@ public final class ControlAPI {
     /// The auto-suggested title (the field's placeholder). Read-only, as on the controller.
     public var suggestedTitle: String { controller.suggestedTitle }
 
+    /// The folder the recording in flight is writing into — the authoritative identity of *this*
+    /// recording, for anything that must refuse to act on a different one. Deliberately not on the wire:
+    /// it is a filesystem path, and `ControlRecordingLookup`'s rule is that a client may only name an id
+    /// it was given.
+    public var activeRecordingDirectory: URL? { controller.activeRecordingDirectory }
+
     /// The current settings. Assigning mirrors the UI's binding; `saveSettings()` normalises and
     /// persists them, exactly as the menu does.
     public var settings: RecordingSettings {
@@ -166,8 +195,413 @@ public final class ControlAPI {
         set { controller.settings = newValue }
     }
 
-    /// Normalise and persist the settings.
-    public func saveSettings() { controller.saveSettings() }
+    /// Everything the menu needs about microphones, in one value it can render without asking three
+    /// different objects three different questions.
+    ///
+    /// ⚠️ **The three states are carried apart, and the menu must not collapse them** (plan decision
+    /// 6). System Settings showing the right default does not prove Acta's capture followed, and Acta
+    /// recording from a device says nothing about what the Mac prefers. They disagree exactly when
+    /// someone is looking.
+    public struct MicrophoneStatus: Equatable, Sendable {
+        /// Every input the machine currently offers, for the chooser.
+        public var devices: [AudioInputDevice]
+        /// The user's order.
+        public var priority: [String]
+        /// The temporary *Use now*, if one is in force.
+        public var override: String?
+        /// What the policy would pick — feature (B)'s preference.
+        public var preferred: String?
+        /// What the Mac's default input actually is.
+        public var systemDefault: ObservedDefaultInput
+        /// What Acta is recording from **right now**, or `nil` when nothing is recording.
+        public var recordingFrom: AudioInputDevice?
+        /// Whether Acta is managing the Mac's default input.
+        public var managingSystemInput: Bool
+        /// Whether recordings follow the list or start from the system default.
+        public var captureChoice: CaptureMicrophoneChoice
+        /// Enforcement's own status — waiting, paused, suspended, refused, uncertain.
+        public var enforcement: MicrophoneEnforcementStatus
+        /// Set when the **enumeration** failed outright.
+        ///
+        /// ⚠️ Separate from `observationDegraded`, and the separation is load-bearing rather than tidy:
+        /// this one blocks every claim about the hardware — a selection resolved from a list that was
+        /// never described says nothing — while a lost subscription leaves the last snapshot perfectly
+        /// usable and only means it will stop changing.
+        public var enumerationFailure: String?
+        /// Set while there is no change subscription.
+        public var observationDegraded: String?
+        /// Set when reading the Mac's **default input** failed. Blocks only what depends on that read —
+        /// a recording that follows the user's list needs it not at all.
+        public var defaultReadFailure: String?
+        /// Any of them, for the one warning line the menu shows. ⚠️ Combining them for *display* is
+        /// fine; combining them as *input to a selection* is what made a working machine unavailable.
+        public var inventoryFailure: String? {
+            enumerationFailure ?? defaultReadFailure ?? observationDegraded
+        }
+        /// Devices the directory could not describe. ⚠️ **Not the same as absent**, and the menu must
+        /// not turn an incomplete read into "there is nothing here".
+        public var uninspectable: [String]
+
+        /// Whether the machine was described completely.
+        /// What a recording started **now** would be pinned to.
+        ///
+        /// ⚠️ **Derived from this snapshot, not by asking the resolver again.** The menu needs one
+        /// honest line for "which microphone will be used", and the two wrong ways to get it are
+        /// restating the policy in view code — where nothing tests it — and calling the live resolver a
+        /// second time, which other code counts. `MicrophonePolicy.resolveCapture` is the same pure
+        /// decision the recorder makes, so this is that answer rather than an impression of it.
+        public var captureSelection: CaptureMicrophoneResolution {
+            MicrophonePolicy.resolveCapture(
+                CaptureObservation(devices: devices,
+                                   uninspectable: uninspectable,
+                                   enumerationFailure: enumerationFailure,
+                                   systemDefault: systemDefault,
+                                   defaultReadFailure: defaultReadFailure),
+                priority: MicrophonePriority(order: priority, override: override),
+                choice: captureChoice)
+        }
+
+        /// The same answer as a short phrase for the menu's always-visible summary.
+        ///
+        /// ⚠️ It never says a microphone is in use because one is *preferred*: "recording from" comes
+        /// from what actually came up, and everything else is phrased as intent.
+        public var captureSummary: String {
+            if let recording = recordingFrom { return "Recording from \(recording.name)" }
+            switch captureSelection {
+            case .pinned(let device, _):
+                return override == device.uid ? "Will use \(device.name) — chosen for now"
+                                              : "Will use \(device.name)"
+            case .unavailable(.noneConfigured):
+                return "No microphone chosen yet"
+            case .unavailable(.noPreferredDeviceAvailable):
+                // ⚠️ "available", not "connected": this case is also reached by a device that is listed
+                // and not usable, and telling the user to plug in something already plugged in sends
+                // them looking in the wrong place.
+                return "None of your microphones is available"
+            case .unavailable(.noEligibleDevice):
+                return "No microphone available"
+            case .unavailable(.systemDefaultUnreadable):
+                return "The audio devices could not be read"
+            case .unavailable(.snapshotIncomplete):
+                return "Some audio devices could not be read"
+            }
+        }
+
+        /// What feature (B) is **actually** doing, as a phrase for the menu — or `nil` when it is off.
+        ///
+        /// ⚠️ **"Enabled" is not "holding", and rendering it as such was a defect.** `managingSystemInput`
+        /// is true for every state except `.disabled`, so a suspended, refused, degraded or still-waiting
+        /// enforcement all reported "Holding the Mac's input on your list" — while the only explanation
+        /// sat inside a collapsed section. A feature that has *stopped* doing what it promised must say
+        /// so in the line that is always visible, and only a verified `.enforcing` may claim it holds a
+        /// device.
+        ///
+        /// ⚠️ It is a projection with tests rather than a ternary in the view, for the same reason
+        /// `captureSummary` is: the view is the one layer nothing checks.
+        public var managementSummary: String? {
+            switch enforcement {
+            case .disabled:
+                return nil
+            case .enforcing(let uid):
+                let name = devices.first { $0.uid == uid }?.name ?? uid
+                return "Holding the Mac's input on \(name)"
+            case .waitingForPreferredDevice:
+                return "Waiting for a microphone from your list"
+            case .noEligibleDevice:
+                return "No microphone the Mac will accept as its input"
+            case .writesRefused:
+                return "The Mac refused the input change"
+            case .uncertain:
+                return "Cannot confirm the Mac's input"
+            case .paused:
+                return "Not changing the Mac's input — paused"
+            case .suspended(.repeatedReversals):
+                return "Stopped changing the Mac's input — something kept changing it back"
+            case .suspended(.repeatedConvergenceFailures):
+                // ⚠️ **Not a reversal, and saying so was an invention.** This cause means Acta's writes
+                // never visibly took; nobody was observed changing anything back, and the budget keeps
+                // the two apart precisely so the user is not sent looking for a culprit that may not
+                // exist.
+                return "Stopped changing the Mac's input after repeated unsuccessful attempts"
+            case .degraded:
+                return "Cannot read the Mac's input"
+            }
+        }
+
+        /// What the priority list actually governs, given the choice and any override in force.
+        ///
+        /// ⚠️ **Four combinations, and the first version of this sentence was wrong in two of them.** It
+        /// said recordings use the highest microphone on the list — false when the user has asked to
+        /// follow the Mac's input, and false again while a *Use now* is in force. Then the corrected
+        /// version still told a user in system-default mode that resuming automatic selection returns
+        /// them "to the list", when it returns them to the Mac's input. An instruction that teaches the
+        /// feature must not be the thing that misdescribes it, so it lives here where it is tested
+        /// rather than in the view, where nothing checks a string.
+        public var listExplanation: String {
+            switch overrideStanding {
+            case .none:
+                break
+            case .recording:
+                return "A microphone is chosen for now, and the recording is using it. "
+                    + resumeSentence
+            case .nextSelection:
+                // ⚠️ "the next time capture starts", not "the next recording": a watchdog restart can
+                // adopt the choice inside *this* recording, which the explanation above already says.
+                return "A microphone is chosen for now, so it will be used the next time capture starts. "
+                    + resumeSentence
+            case .unavailable:
+                return "A microphone is chosen for now but is not available. " + resumeSentence
+            case .unknown:
+                // ⚠️ Not "unavailable": the machine could not be described, and an unread snapshot
+                // establishes nothing about a device either way.
+                return "A microphone is chosen for now; whether it can be used is unknown while the "
+                    + "audio devices cannot be read. " + resumeSentence
+            }
+            if captureChoice == .systemDefault {
+                return "Recordings currently use the Mac's input at the time they start, not this list. "
+                    + "Your list still decides what the Mac's input becomes, if you turn that on below."
+            }
+            return priority.isEmpty
+                ? "Tick a microphone to put it on your list. Recordings use the highest one available."
+                : "Recordings use the highest one available. Use the arrows to reorder."
+        }
+
+        /// Pause or Resume — never both, and never neither while management is on.
+        ///
+        /// ⚠️ Pause suspends **global enforcement only**. Acta's own recording selection keeps working
+        /// while paused: two different promises, and they must not share a switch.
+        public enum ManagementAction: Equatable, Sendable {
+            case pause
+            case resume
+        }
+
+        /// What resuming automatic selection goes back to — the *setting*, which is not always the list.
+        private var resumeSentence: String {
+            captureChoice == .systemDefault
+                ? "Resume automatic selection to go back to your recording setting."
+                : "Resume automatic selection to go back to the list."
+        }
+
+        /// The one immediate decision the panel offers about enforcement, or nil when Acta is not
+        /// managing the Mac's input at all.
+        ///
+        /// ⚠️ **One projection, because there were two conditionals and they had drifted.** The
+        /// collapsed menu row was gated on `managementNeedsAttention`, which is *false* for both
+        /// `.enforcing` and `.paused` — so ordinary working enforcement offered no Pause and a paused
+        /// one offered no Resume, with the chooser collapsed, which is how it opens. Meanwhile the
+        /// expanded chooser had the correct pause/resume logic in a second `if`. Acta changes a
+        /// system-wide setting other applications share, and the answer to that must never require
+        /// opening a section: the rule is **visible whenever management is on**, not only when it is
+        /// in trouble.
+        public var managementAction: ManagementAction? {
+            guard managingSystemInput else { return nil }
+            if case .paused = enforcement { return .resume }
+            return .pause
+        }
+
+        /// Whether that state is one the user should act on rather than merely be told about.
+        public var managementNeedsAttention: Bool {
+            switch enforcement {
+            case .disabled, .enforcing, .paused: return false
+            default: return true
+            }
+        }
+
+        /// Whether the **device list** was described completely.
+        ///
+        /// ⚠️ It asks about the enumeration and nothing else. Built from the combined warning it also
+        /// took a failed default-input read and a lost subscription as evidence about the list — so a
+        /// perfectly described machine reported an absent microphone as "not readable" rather than "not
+        /// connected", and a successful enumeration that found nothing said the devices could not be
+        /// read. Neither failure is evidence about a list that was read successfully.
+        public var isComplete: Bool { enumerationFailure == nil && uninspectable.isEmpty }
+
+        /// What is actually known about a stored *Use now* — **three facts, not one flag**.
+        ///
+        /// ⚠️ **The first version was a `Bool`, and it collapsed three different things.** "The
+        /// recording came up on it", "it is what the next capture would use" and "the machine could not
+        /// be described" are not the same claim, and folding them produced contradictions in both
+        /// directions: `false` was read as proof of unavailability, so a device Acta was demonstrably
+        /// *recording from* was described as not being used when an inventory refresh failed; and `true`
+        /// was read as present-tense use, so a row said "using now" while the summary correctly said the
+        /// recording was on something else — reachable whenever the chosen device refused to open and
+        /// capture fell back.
+        ///
+        /// Only `.recording` licenses a present-tense claim, and only a **complete** observation
+        /// licenses a negative one.
+        public enum OverrideStanding: Equatable, Sendable {
+            case none
+            /// The running recording came up on it. The one present-tense fact.
+            case recording
+            /// What the next capture would use. Intent, not fact.
+            case nextSelection
+            /// The selection went elsewhere, and the machine was described completely enough to say so.
+            case unavailable
+            /// The machine could not be described, so nothing about it is established.
+            case unknown
+        }
+
+        public var overrideStanding: OverrideStanding {
+            guard let override else { return .none }
+            // ⚠️ Asked first, and of the recording rather than of the inventory: a failed inventory read
+            // does not stop a healthy capture, and must not be allowed to contradict it.
+            if recordingFrom?.uid == override { return .recording }
+            switch captureSelection {
+            case .pinned(let device, _) where device.uid == override:
+                return .nextSelection
+            case .pinned:
+                return isComplete ? .unavailable : .unknown
+            case .unavailable(.snapshotIncomplete), .unavailable(.systemDefaultUnreadable):
+                return .unknown
+            case .unavailable:
+                return isComplete ? .unavailable : .unknown
+            }
+        }
+
+        public init(devices: [AudioInputDevice] = [], priority: [String] = [], override: String? = nil,
+                    preferred: String? = nil, systemDefault: ObservedDefaultInput = .unread,
+                    recordingFrom: AudioInputDevice? = nil, managingSystemInput: Bool = false,
+                    captureChoice: CaptureMicrophoneChoice = .followPriority,
+                    enforcement: MicrophoneEnforcementStatus = .disabled,
+                    enumerationFailure: String? = nil,
+                    observationDegraded: String? = nil,
+                    defaultReadFailure: String? = nil,
+                    uninspectable: [String] = []) {
+            self.devices = devices
+            self.priority = priority
+            self.override = override
+            self.preferred = preferred
+            self.systemDefault = systemDefault
+            self.recordingFrom = recordingFrom
+            self.managingSystemInput = managingSystemInput
+            self.captureChoice = captureChoice
+            self.enforcement = enforcement
+            self.enumerationFailure = enumerationFailure
+            self.observationDegraded = observationDegraded
+            self.defaultReadFailure = defaultReadFailure
+            self.uninspectable = uninspectable
+        }
+    }
+
+    /// A stream of microphone statuses: the current one first, then one for every change either the
+    /// device inventory or enforcement publishes.
+    ///
+    /// ⚠️ **Without this the menu was static.** `states()` is driven by the recording controller's
+    /// `objectWillChange`, and microphone state is deliberately not part of `ControlState`, so an open
+    /// idle menu never learned that a microphone was plugged in, that the Mac's default had moved, that
+    /// enforcement had suspended itself, or that a *Use now* had expired. Refreshing after a command is
+    /// not observation.
+    public func microphoneStatuses() -> AsyncStream<MicrophoneStatus> {
+        let inventories = microphone.inventories()
+        let enforcements = microphone.enforcementStates()
+        return AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            continuation.yield(microphoneStatus)
+            let pump = Task { [weak self] in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        for await _ in inventories {
+                            guard let api = self else { return }
+                            let next = await MainActor.run { api.microphoneStatus }
+                            continuation.yield(next)
+                        }
+                    }
+                    group.addTask {
+                        for await _ in enforcements {
+                            guard let api = self else { return }
+                            let next = await MainActor.run { api.microphoneStatus }
+                            continuation.yield(next)
+                        }
+                    }
+                }
+            }
+            continuation.onTermination = { _ in pump.cancel() }
+        }
+    }
+
+    public var microphoneStatus: MicrophoneStatus {
+        let preference = microphone.capturePreference.snapshot
+        return MicrophoneStatus(
+            devices: microphone.inventory.devices,
+            priority: preference.priority.order,
+            override: preference.priority.override,
+            preferred: microphone.enforcement.preferred,
+            systemDefault: microphone.inventory.observedDefault,
+            recordingFrom: controller.recordingMicrophone,
+            managingSystemInput: microphone.enforcement.status != .disabled,
+            captureChoice: preference.choice,
+            enforcement: microphone.enforcement.status,
+            enumerationFailure: microphone.inventory.failure,
+            observationDegraded: microphone.inventory.observationDegraded,
+            defaultReadFailure: microphone.inventory.defaultReadFailure,
+            // ⚠️ **Carried, not dropped.** Without it a snapshot that could not describe some driver
+            // projected as a successfully enumerated empty machine, and the menu said "No microphones
+            // found" — a settled claim about the hardware drawn from a read that admitted it was
+            // incomplete.
+            uninspectable: microphone.inventory.uninspectable
+        )
+    }
+
+    /// Turn management of the Mac's default input on, seeding the list if it is empty.
+    public func enableMicrophoneManagement() async { _ = await microphone.enableManagement() }
+    public func disableMicrophoneManagement() async { await microphone.disableManagement() }
+
+    /// Whether feature (B) is in force — the authoritative answer, not the published mirror, and
+    /// readable **without suspending**. See `MicrophoneManager.managementEnabled` for why that matters:
+    /// its consumer is in the middle of a read-modify-write of the whole settings value.
+    public var isMicrophoneManagementEnabled: Bool { microphone.managementEnabled }
+    public func pauseMicrophoneManagement() async { await microphone.pauseEnforcement() }
+    public func resumeMicrophoneManagement() async { await microphone.resumeEnforcement() }
+    public func setMicrophonePriority(_ order: [String]) async { await microphone.setPriorityOrder(order) }
+    public func setCaptureMicrophoneChoice(_ choice: CaptureMicrophoneChoice) {
+        microphone.setCaptureChoice(choice)
+    }
+
+    /// *Use now*: point Acta at this microphone.
+    ///
+    /// ⚠️ **One user action with two effects, and they are not the same promise.** It sets the
+    /// temporary override — which the reconciler expires when that device disconnects, and which Acta's
+    /// own capture resolves against — and, if a recording is running, switches its live capture through
+    /// the one serialized lifecycle. The two can legitimately disagree: capture does not filter on
+    /// `canBeSystemDefault` and the system default does, so a click can land on one and not the other.
+    public func useMicrophoneNow(uid: String) async {
+        await microphone.useNow(uid: uid)
+        await controller.switchMicrophone(to: uid)
+    }
+
+    /// Retire the temporary override and go back to the priority list.
+    public func resumeAutomaticMicrophoneSelection() async {
+        await microphone.resumeAutomaticSelection()
+    }
+
+    /// Normalise and persist the settings — and hand the microphone half of them to the app-lifetime
+    /// owner, so an edit reaches the reconciler and the capture pin without the menu wiring each field
+    /// separately.
+    public func saveSettings() {
+        controller.saveSettings()
+        // Owned and ordered by the manager rather than an unowned Task here — see `applySettings`.
+        microphone.applySettings(controller.settings)
+    }
+
+    /// Wait until every microphone setting submitted so far has actually been applied. See
+    /// `ControlServing.settleMicrophoneSettings()` for why the transport needs this and the menu does
+    /// not.
+    public func settleMicrophoneSettings() async {
+        await microphone.settlePendingApplication()
+    }
+
+    /// Persist a change the caller has **already carried out**, and ask the microphone owner for
+    /// nothing.
+    ///
+    /// ⚠️ **An acknowledgement is not a command, and treating it as one was the root of a family of
+    /// defects.** A control that switches management on has already enabled it; routing the subsequent
+    /// save through `apply` ran the grant a *second* time, as fresh work, outside the permission fence
+    /// that governed the first — so a Pause issued in between was cleared by the completion of the very
+    /// Enable it was clicked on top of, and a management field captured before an Off wrote the Mac's
+    /// input after it. Every save the menu makes is of this kind: the command performed the change, the
+    /// save records it.
+    public func persistSettings() {
+        controller.saveSettings()
+    }
 
     /// The saved recordings, newest first.
     public var recordings: [MeetingStore.Recording] { controller.recordings }
@@ -185,9 +619,23 @@ public final class ControlAPI {
     /// ⚠️ A title passed while the controller is busy still lands: the existing guard makes the *start*
     /// a no-op, and the title mutation happened before it. That is the controller's behaviour today,
     /// reproduced rather than replaced by a rejection this façade would have had to invent.
+    ///
+    /// ⚠️ **Unbound, deliberately.** This is the menu's and the socket's start, and neither carries a known
+    /// triggering identity; see `start(title:resolvingOwner:)`.
     public func start(title: String? = nil) {
         if let title { controller.title = title }
         controller.start()
+    }
+
+    /// Start recording from a prompt, admitted with whatever `resolve` answers.
+    ///
+    /// ⚠️ **Not on `ControlServing`, on purpose.** The transport's surface has no way to name an owner, so
+    /// raw owner selection cannot reach the socket payload. `resolve` runs inside the controller's latching
+    /// turn — see `RecordingController.start(resolvingOwner:)` — and must not call the HAL: the caller
+    /// supplies it from observation state it already holds.
+    public func start(title: String, resolvingOwner resolve: () -> OwnerAdmission) {
+        controller.title = title
+        controller.start(resolvingOwner: resolve)
     }
 
     /// Stop the recording, fire-and-forget — returns as soon as the work is kicked off.

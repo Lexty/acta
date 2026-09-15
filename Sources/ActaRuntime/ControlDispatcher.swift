@@ -144,6 +144,20 @@ public final class ControlDispatcher: ControlRequestHandling {
             return .events(watchEvents())
 
         case .start(let title):
+            // ⚠️ **Before the guard, never between it and `start`.** A settings application submitted by
+            // an earlier command may still be in flight, and a recording must not resolve its microphone
+            // under the policy it replaced. Awaiting here and not below keeps the guard and the start in
+            // one turn, which is the other half of this case's correctness.
+            await service.settleMicrophoneSettings()
+            // ⚠️ **The entry gate above is an *entry* gate, and this await moved the start behind it.**
+            // Joining an unstructured task does not throw when the *waiter* is cancelled, so a start
+            // parked here sails through a quit that tore the socket down and cancelled this connection —
+            // and begins a recording inside the finalisation window, which is exactly what the gate at
+            // the top of `handle` exists to prevent. Re-checked here, and still one turn away from
+            // `canStart` and `start(title:)`.
+            if Task.isCancelled {
+                return .error(.commandRejected(reason: Rejection.closing))
+            }
             // The guard, before `start(title:)` can edit the title. Same turn, no `await` in between.
             guard service.state.canStart else {
                 return .error(.commandRejected(reason: Rejection.busy))
@@ -193,6 +207,10 @@ public final class ControlDispatcher: ControlRequestHandling {
 
         case .settingsSave:
             service.saveSettings()
+            // ⚠️ **`ok` means applied, not merely accepted.** `saveSettings()` hands the microphone half
+            // to an owner that publishes the capture policy several suspensions later; acknowledging
+            // before that lands would let the next frame's `start` record under the previous policy.
+            await service.settleMicrophoneSettings()
             return .result(.ok)
 
         case .titleGet:
@@ -252,14 +270,52 @@ public final class ControlDispatcher: ControlRequestHandling {
     // MARK: - Confinement policy
 
     /// The settings a `settingsSet` actually applies. A `.socket` dispatcher **ignores** the wire
-    /// `archive_path` and substitutes the current authoritative one, read on this same main-actor turn;
-    /// only `segmentSeconds`/`deleteSegmentsAfterAssembly` come from the wire. A `.trusted` dispatcher
-    /// takes the wire settings whole, exactly as the menu's bindings do.
+    /// `archive_path`, `microphone_priority` and `manages_system_default_input`, substituting the current
+    /// authoritative values read on this same main-actor turn; `segmentSeconds`,
+    /// `deleteSegmentsAfterAssembly` and `captureMicrophoneChoice` come from the wire. A `.trusted`
+    /// dispatcher takes the wire settings whole, exactly as the menu's bindings do.
+    ///
+    /// ⚠️ **The two microphone fields joined the substitution when the two branches met, and the reason
+    /// is not the one the archive path has.** A path is a filesystem reach; these two decide whether Acta
+    /// writes the **Mac's** system-wide default input device and which device it writes — state other
+    /// applications depend on, changed by an app the user did not go to. The menu is where a person
+    /// chooses that, and the socket is not a person.
+    ///
+    /// ⚠️ **Both, not just the enable flag, and both unconditionally.** Substituting only
+    /// `managesSystemDefaultInput` would still let a caller redirect enforcement that is *already* on;
+    /// substituting the list only *while* enforcement is on would let a caller plant a list that takes
+    /// effect the moment the user enables it themselves. Either half alone is not a boundary.
+    ///
+    /// `captureMicrophoneChoice` is deliberately **not** substituted: it selects which microphone *Acta's
+    /// own recording* uses and writes nothing outside the app, which is exactly what a control client is
+    /// for.
+    ///
+    /// ⚠️ This is an **authority boundary, not a security boundary.** The socket is same-UID, and a
+    /// process that can reach it can do far more directly; what this rule buys is that a client which
+    /// round-trips `settings_get` → edit → `settings_set` cannot silently carry the machine's audio
+    /// configuration along with the field it meant to change.
+    /// ⚠️ **The reminder preferences are substituted for every confinement, trusted included, and the
+    /// reason is different from the one above.** `WireSettings` has no place to carry them: they are
+    /// preferences about Acta's own prompts, and keeping them off the schema is what makes "the socket
+    /// cannot switch the reminders off, or empty the exclusion list" a property of the protocol rather
+    /// than a rule someone has to remember. The cost is that `RecordingSettings(wire)` **fabricates**
+    /// them from its defaults, and a fabricated value is not a value a caller supplied — writing it
+    /// through would silently reset a user's preferences on any `settings_set`, including one that
+    /// meant to change the segment length. So they are always restored from the authoritative side,
+    /// and no confinement may write them.
     private func appliedSettings(from wire: WireSettings) -> RecordingSettings {
         var applied = RecordingSettings(wire)
+        let authoritative = service.settings
         if confinement == .socket {
-            applied.archivePath = service.settings.archivePath
+            applied.archivePath = authoritative.archivePath
+            applied.microphonePriority = authoritative.microphonePriority
+            applied.managesSystemDefaultInput = authoritative.managesSystemDefaultInput
         }
+        applied.offersRecordingWhenMicrophoneBusy = authoritative.offersRecordingWhenMicrophoneBusy
+        applied.reminderExcludedBundleIDs = authoritative.reminderExcludedBundleIDs
+        applied.offersStopWhenQuiet = authoritative.offersStopWhenQuiet
+        applied.offersStopWhenOwnerReleases = authoritative.offersStopWhenOwnerReleases
+        applied.quietMinutesBeforeStopOffer = authoritative.quietMinutesBeforeStopOffer
         return applied
     }
 

@@ -20,6 +20,48 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
     case diskWriteFailed
     /// The stream came up, but no buffers arrive (no audio device / silence at the device input).
     case noData
+    /// There is no microphone to record from: nothing is configured, or nothing configured is present.
+    ///
+    /// ⚠️ **Distinct from `.noMicrophonePermission` and from `.streamNotStarted`, and it must stay
+    /// distinct.** Permission is granted, the machine may be full of microphones, and no stream was
+    /// even attempted — the recording did not start because Acta will not silently record from
+    /// "whatever the system default happens to be". The fix is a choice, not a retry, which is also
+    /// why it is not worth a restart attempt below.
+    case microphoneUnavailable
+    /// A start or restart was asked for after this recording had already stopped.
+    ///
+    /// ⚠️ **A refusal, not a failure of the recording** — the recording finished normally and this is
+    /// the late operation being turned away. It exists as a case rather than a silent no-op so that a
+    /// caller which believes it switched the microphone is told it did not.
+    case recordingAlreadyStopped
+    /// A list is configured and none of its devices is present.
+    case preferredMicrophoneAbsent
+    /// This Mac has nothing that can be recorded from.
+    case noMicrophoneOnThisMac
+    /// The devices could not be described well enough to choose one. ⚠️ Transient, and must not read
+    /// like a setting the user got wrong.
+    case microphoneUnreadable
+    /// A restart was admitted for a capture that has since been replaced.
+    ///
+    /// ⚠️ Not a failure of anything: the newer capture is healthy, and this is the older request being
+    /// turned away at the lifecycle boundary. It exists so that a caller which believed it was
+    /// recovering something is told it did not, instead of being told it succeeded.
+    case captureSuperseded
+
+    /// Why no microphone could be resolved, kept distinct all the way to the user.
+    ///
+    /// ⚠️ **Flattening these into one message was a real loss.** `CaptureMicrophoneFailure` draws the
+    /// distinctions the plan asked for — nothing chosen, chosen but absent, the machine described
+    /// badly, the OS refusing to answer — and telling all four users "No microphone selected. Choose
+    /// one" is wrong for three of them, and permanent-sounding for the two that are transient.
+    public init(_ failure: CaptureMicrophoneFailure) {
+        switch failure {
+        case .noneConfigured: self = .microphoneUnavailable
+        case .noPreferredDeviceAvailable: self = .preferredMicrophoneAbsent
+        case .noEligibleDevice: self = .noMicrophoneOnThisMac
+        case .systemDefaultUnreadable, .snapshotIncomplete: self = .microphoneUnreadable
+        }
+    }
 
     /// User-facing text with a path to a fix — for display in the menu bar (Task 6).
     public var userMessage: String {
@@ -37,6 +79,19 @@ public enum StartupFailure: Error, Equatable, Sendable, CaseIterable {
                 + "to the archive folder in Settings."
         case .noData:
             return "Not recording: no audio is arriving. Check your audio device and the audio source."
+        case .microphoneUnavailable:
+            return "No microphone selected. Choose one in Acta's menu, or pick \"Use system default\"."
+        case .recordingAlreadyStopped:
+            return "That recording has already stopped."
+        case .preferredMicrophoneAbsent:
+            return "None of your preferred microphones is connected. Connect one, or choose another in "
+                + "Acta's menu."
+        case .noMicrophoneOnThisMac:
+            return "No microphone is available on this Mac."
+        case .microphoneUnreadable:
+            return "Could not read the audio devices. Try starting the recording again."
+        case .captureSuperseded:
+            return "That microphone change no longer applies."
         }
     }
 }
@@ -234,6 +289,20 @@ public enum SelfDiagnosis {
             // A restart recreates both the stream and the segment — it heals a stalled stream as well
             // as a one-off write failure.
             return restartAttemptsLeft > 0 ? .restartStream : .reportError(failure)
+        case .recordingAlreadyStopped, .preferredMicrophoneAbsent, .noMicrophoneOnThisMac,
+             .captureSuperseded:
+            // None of these is healed by bringing the stream up again: the answer is a device or a
+            // choice, not a retry.
+            return .reportError(failure)
+        case .microphoneUnreadable:
+            // ⚠️ The one microphone failure that *is* worth a restart: a failed read is transient, and
+            // re-resolving may well succeed.
+            return restartAttemptsLeft > 0 ? .restartStream : .reportError(failure)
+        case .microphoneUnavailable:
+            // ⚠️ **Never a restart.** Restarting re-resolves and reaches the same answer, so spending
+            // the budget here would burn the attempts that a genuinely stalled stream needs, and delay
+            // by the whole watchdog window a message the user could have acted on immediately.
+            return .reportError(failure)
         }
     }
 }

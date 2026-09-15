@@ -24,6 +24,28 @@ public enum WireMessageCode {
     public static let startupDiskWriteFailed = "startup_disk_write_failed"
     /// Capture came up, but no audio arrives.
     public static let startupNoData = "startup_no_data"
+    /// No microphone to record from: nothing configured, or nothing configured is present.
+    ///
+    /// ⚠️ Additive: these are string constants, not enum cases, so a client that does not know this
+    /// code falls through its default rather than failing to decode the response. Adding a **case** to
+    /// a response-direction enum would be a version bump; adding a code is not.
+    public static let startupMicrophoneUnavailable = "startup_microphone_unavailable"
+    /// A restart was admitted for a capture that had already been replaced.
+    public static let startupCaptureSuperseded = "startup_capture_superseded"
+    /// The recording could not watch its own audio devices, or only some of them.
+    public static let microphoneObservationDegraded = "microphone_observation_degraded"
+    /// A start or restart was asked for after the recording had already stopped.
+    public static let startupRecordingAlreadyStopped = "startup_recording_already_stopped"
+    /// A list is configured and none of its devices is present.
+    public static let startupPreferredMicrophoneAbsent = "startup_preferred_microphone_absent"
+    /// This Mac has nothing that can be recorded from.
+    public static let startupNoMicrophoneOnThisMac = "startup_no_microphone_on_this_mac"
+    /// The audio devices could not be described well enough to choose one.
+    public static let startupMicrophoneUnreadable = "startup_microphone_unreadable"
+    /// The recording's microphone changed mid-recording.
+    public static let microphoneSwitched = "microphone_switched"
+    /// An explicit microphone switch did not come up; the previous device is still recording.
+    public static let microphoneSwitchFailed = "microphone_switch_failed"
     /// A start that failed with something other than a known startup failure.
     public static let startFailed = "start_failed"
     /// Capture stopped, but the segments did not become the final file.

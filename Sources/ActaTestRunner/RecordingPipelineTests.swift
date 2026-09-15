@@ -6,7 +6,7 @@ import Testing
 
 // A **successful, capture-backed recording**, in-process: no TCC prompt, no display, no audio
 // device. Until the seams below it existed, this was the one thing the suite could not reach —
-// `RecordingSession.start()` checked real permissions, created a real `SCStream` and waited on real
+// `RecordingSession.start(microphoneDeviceID: "BuiltInMicrophoneDevice")` checked real permissions, created a real `SCStream` and waited on real
 // buffers, so everything past a failed start was stuck at "manual test (skipped - not automatable)"
 // while the pure logic around it was covered twice over.
 //
@@ -45,6 +45,7 @@ struct RecordingPipelineTests {
         let activity = CountingWakeLock()
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: activity.makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -119,6 +120,7 @@ struct RecordingPipelineTests {
 
         let session = RecordingSession(directory: directory, settings: makeSettings(),
                                        wakeLock: CountingWakeLock().makeWakeLock(),
+                                       microphone: FakeCaptureMicrophoneResolver(),
                                        dependencies: makeDependencies(source: source,
                                                                       permissions: permissions,
                                                                       clock: clock))
@@ -148,7 +150,7 @@ struct FailedStartCleanupThroughControllerTests {
     @MainActor
     func aStartRejectedForAMissingPermissionLeavesNoPhantomFolderBehind() async {
         // Through `RecordingController`, and not `RecordingSession`, because the cleanup is the
-        // controller's. `RecordingSession.start()` writes `session.json` *before* it starts the
+        // controller's. `RecordingSession.start(microphoneDeviceID: "BuiltInMicrophoneDevice")` writes `session.json` *before* it starts the
         // recorder, so a permission denial genuinely does leave a `status=recording` marker on disk —
         // and `Recovery` reads any such folder as an interrupted recording and would retry it,
         // failing, on every launch for the rest of the archive's life. What removes it is
@@ -169,6 +171,7 @@ struct FailedStartCleanupThroughControllerTests {
         let controller = RecordingController(settingsStore: settingsStore) { directory, settings in
             RecordingSession(directory: directory, settings: settings,
                              wakeLock: CountingWakeLock().makeWakeLock(),
+                             microphone: FakeCaptureMicrophoneResolver(),
                              dependencies: RecordingDependencies(makeSource: { source },
                                                                  makePermissions: { permissions },
                                                                  makeClock: { clock }))

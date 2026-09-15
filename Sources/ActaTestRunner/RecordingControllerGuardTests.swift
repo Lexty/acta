@@ -277,4 +277,168 @@ struct RecordingControllerGuardTests {
                 "onAppear ran recovery — recovery belongs to onLaunch")
         #expect(harness.controller.recoveredBanner.isEmpty, "onAppear announced a recovery it must not have run")
     }
+
+    // MARK: - The owner admission
+
+    /// A binding to `bundleID`, minted the only way one can be: from an episode and evidence showing it.
+    private static func binding(_ bundleID: String, observedAt: Date) -> OwnerBinding? {
+        OwnerBinding.bind(episode: MicrophoneActivityEpisode(id: 1, bundleID: bundleID, displayName: nil),
+                          holding: [.bundle(bundleID): .held],
+                          epoch: 1, observedAt: observedAt)
+    }
+
+    @Test("a parked session.start carries the admitted binding through, and never resolves it again")
+    @MainActor
+    @available(macOS 15.0, *)
+    func aParkedSessionStartPreservesTheAdmittedBinding() async throws {
+        let harness = ControllerHarness(label: "controller-owner-parked-start")
+        let park = StartupProbePark(harness)
+        defer { park.release(); harness.tearDown() }
+        let first = try #require(Self.binding("com.aaa.calls", observedAt: Date(timeIntervalSince1970: 1)))
+        let later = try #require(Self.binding("com.zzz.dictation", observedAt: Date(timeIntervalSince1970: 2)))
+
+        // The world the resolver reads, which the test moves while the start is parked.
+        var world = first
+        var resolutions = 0
+        harness.controller.start(resolvingOwner: { resolutions += 1; return .bound(world) })
+        // ⚠️ Resolved in the latching turn, synchronously — not when the task gets round to it.
+        #expect(resolutions == 1)
+        #expect(harness.controller.ownerAdmission == .bound(first))
+
+        #expect(await waitUntilOnMain { park.isParked }, "session.start was never parked, so nothing was held")
+        #expect(harness.controller.isStarting)
+        world = later
+        #expect(harness.controller.ownerAdmission == .bound(first),
+                "the admission moved while session.start was suspended")
+
+        park.release()
+        #expect(await waitUntilOnMain { harness.controller.phase == .recording })
+        #expect(resolutions == 1, "the owner was resolved again after the start had been admitted")
+        #expect(harness.controller.ownerAdmission == .bound(first),
+                "the recording carries an owner other than the one it was admitted with")
+
+        await harness.controller.stopAndWait()
+        #expect(harness.controller.ownerAdmission == nil, "a stopped recording kept its owner")
+    }
+
+    @Test("a rejected second start cannot alter the first start's pending binding")
+    @MainActor
+    @available(macOS 15.0, *)
+    func aRejectedSecondStartLeavesThePendingBindingAlone() async throws {
+        let harness = ControllerHarness(label: "controller-owner-second-start")
+        let park = StartupProbePark(harness)
+        defer { park.release(); harness.tearDown() }
+        let first = try #require(Self.binding("com.aaa.calls", observedAt: Date(timeIntervalSince1970: 1)))
+        let second = try #require(Self.binding("com.zzz.dictation", observedAt: Date(timeIntervalSince1970: 2)))
+
+        harness.controller.start(resolvingOwner: { .bound(first) })
+        #expect(await waitUntilOnMain { park.isParked }, "session.start was never parked, so nothing was held")
+
+        var secondResolved = false
+        harness.controller.start(resolvingOwner: { secondResolved = true; return .bound(second) })
+        // ⚠️ Both halves: the rejected start neither ran its resolver nor wrote what it would have said.
+        #expect(!secondResolved, "a rejected start resolved an owner")
+        #expect(harness.controller.ownerAdmission == .bound(first))
+        harness.controller.start()
+        #expect(harness.controller.ownerAdmission == .bound(first),
+                "a rejected unbound start cleared the pending binding")
+
+        park.release()
+        #expect(await waitUntilOnMain { harness.controller.phase == .recording })
+        #expect(harness.controller.ownerAdmission == .bound(first))
+        #expect(harness.source.startCount == 1)
+        await harness.controller.stopAndWait()
+    }
+
+    @Test("a failed start discards the binding it was admitted with")
+    @MainActor
+    @available(macOS 15.0, *)
+    func aFailedStartDiscardsItsBinding() async throws {
+        let harness = ControllerHarness(label: "controller-owner-failed-start",
+                                        permissions: FakePermissions(screenGranted: false))
+        defer { harness.tearDown() }
+        let first = try #require(Self.binding("com.aaa.calls", observedAt: Date(timeIntervalSince1970: 1)))
+
+        harness.controller.start(resolvingOwner: { .bound(first) })
+        #expect(harness.controller.ownerAdmission == .bound(first))
+        await harness.controller.stopAndWait()
+        #expect(harness.controller.phase == .error)
+        #expect(harness.controller.ownerAdmission == nil, "a failed start left its binding behind")
+    }
+
+    @Test("menu and socket starts pass the same admission seam and deliberately produce no binding")
+    @MainActor
+    @available(macOS 15.0, *)
+    func menuAndSocketStartsAreAdmittedUnbound() async throws {
+        let (_, _, _, manager) = makeTestMicrophoneManager(devices: [.builtInMic()],
+                                                          defaultInput: "BuiltInMicrophoneDevice")
+        manager.start()
+
+        // The menu: `ControlViewModel.start()` is what the button calls.
+        let menu = ControllerHarness(label: "controller-owner-menu")
+        defer { menu.tearDown() }
+        let menuAPI = ControlAPI(controller: menu.controller, microphone: manager)
+        ControlViewModel(api: menuAPI).start()
+        // Visible in the same turn the start was latched, through the projection a client reads.
+        #expect(menuAPI.state.operation == .starting)
+        #expect(menuAPI.state.ownerAdmission == .unbound(.notStartedFromPrompt))
+        #expect(await waitUntilOnMain { menu.controller.phase == .recording })
+        #expect(menuAPI.state.ownerAdmission == .unbound(.notStartedFromPrompt))
+        await menu.controller.stopAndWait()
+        #expect(menuAPI.state.ownerAdmission == nil)
+
+        // The socket: a `.socket` dispatcher over a real façade. The command has no owner field to send.
+        let socket = ControllerHarness(label: "controller-owner-socket")
+        defer { socket.tearDown() }
+        let socketAPI = ControlAPI(controller: socket.controller, microphone: manager)
+        let dispatcher = ControlDispatcher(service: socketAPI, confinement: .socket)
+        _ = await dispatcher.handle(.start(title: "Weekly sync"))
+        #expect(socketAPI.state.operation != .idle, "the socket start was not admitted at all")
+        #expect(await waitUntilOnMain { socket.controller.phase == .recording })
+        #expect(socketAPI.state.ownerAdmission == .unbound(.notStartedFromPrompt))
+        await socket.controller.stopAndWait()
+    }
+}
+
+/// Holds `session.start` inside its startup probe until released.
+///
+/// ⚠️ **It blocks a pool thread, on purpose and only there.** `RecordingSession.start` is `nonisolated`,
+/// so the probe's sleep runs on the cooperative pool while the main actor stays free for the test to
+/// observe the controller mid-start. The batch is emitted *before* parking, so the probe still sees audio
+/// when it resumes.
+@available(macOS 15.0, *)
+final class StartupProbePark: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var parked = false
+    private var used = false
+    private var released = false
+
+    @MainActor
+    init(_ harness: ControllerHarness) {
+        let source = harness.source
+        harness.clock.onSleep { [self] _ in
+            source.emitBatch()
+            let shouldPark: Bool = {
+                lock.lock(); defer { lock.unlock() }
+                guard !used, !released else { return false }
+                used = true
+                parked = true
+                return true
+            }()
+            if shouldPark { gate.wait() }
+        }
+    }
+
+    var isParked: Bool { lock.lock(); defer { lock.unlock() }; return parked }
+
+    /// Let the parked probe go. Idempotent, so a failing test's `defer` cannot hang the suite.
+    func release() {
+        lock.lock()
+        let wasParked = parked && !released
+        released = true
+        parked = false
+        lock.unlock()
+        if wasParked { gate.signal() }
+    }
 }

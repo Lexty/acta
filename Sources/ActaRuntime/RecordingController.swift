@@ -40,7 +40,67 @@ public final class RecordingController: ObservableObject {
 
     // Active session state.
     private var session: RecordingSession?
+
+    /// The microphone the running recording is actually capturing from, or `nil` when nothing is.
+    ///
+    /// ⚠️ Read from the recorder's pin, which is set only after capture came up — never from what was
+    /// requested. A menu that shows a device before it is recording is lying at the one moment it
+    /// matters.
+    public var recordingMicrophone: AudioInputDevice? { session?.recordingMicrophone }
+
+    /// Switch the running recording's microphone, and report what actually happened.
+    ///
+    /// ⚠️ **The production caller Task 5 was missing.** The switch itself has always gone through
+    /// `AudioRecorder.restart()`; what did not exist was anything calling it, so *Use now* moved the
+    /// preference and the live recording kept its old device until something else happened to restart
+    /// it. Returns `false` when there is no recording to switch — the caller still changes the
+    /// preference, which is what the next recording resolves against.
+    @discardableResult
+    public func switchMicrophone(to uid: String) async -> Bool {
+        guard let session else { return false }
+        switch await session.switchMicrophone(to: uid) {
+        case .switched(let device):
+            reportMicrophoneChange(.microphoneSwitched(device: device.name, reason: "you chose it"))
+            return true
+        case .fellBack(let device):
+            // ⚠️ Reported as the switch it *is*, not as the one that was asked for: the menu must never
+            // show a requested device as active before capture succeeded on it.
+            reportMicrophoneChange(.microphoneSwitched(device: device.name,
+                                                       reason: "the one you chose did not start"))
+            return false
+        case .failed:
+            // ⚠️ No notice here: the session has already routed a total failure through the fatal path,
+            // and adding "the previous microphone is still recording" on top of a stopped recording is
+            // exactly the lie that path exists to avoid.
+            return false
+        }
+    }
+
+    /// Publish a microphone notice through the controller's one untyped `errorMessage`, which
+    /// `ControlState` classifies back into a `Notice`. ⚠️ It does **not** touch `phase`: nothing about
+    /// the recording has failed, and parking `phase` in `.error` would no-op `stop()`'s guard.
+    private func reportMicrophoneChange(_ message: ControllerMessage) {
+        errorMessage = message.text
+    }
     private var currentDirectory: URL?
+
+    /// The folder the recording in flight is writing into, or `nil` when nothing is recording.
+    ///
+    /// ⚠️ **The only authoritative identity a recording has.** Everything else — a phase, an elapsed
+    /// count, a flag sampled by an observer — describes a *kind* of state, and two recordings in a row
+    /// are indistinguishable by all of them. A prompt raised about one recording must be able to refuse
+    /// to act on its successor, and this is what lets it.
+    public var activeRecordingDirectory: URL? { currentDirectory }
+
+    /// What the start in flight, or the recording it produced, was admitted with.
+    ///
+    /// ⚠️ **Opaque session metadata.** The controller never reads it, never calls the HAL to produce it
+    /// and never re-resolves it: it is resolved once, by the caller's resolver, in the turn that latches
+    /// `isStarting`, and it is carried unchanged across the `recoveryTask` and `session.start` suspensions
+    /// — an owner change during them does not rebind. Discarded with the attempt when the start fails, and
+    /// with the recording when it stops.
+    public var ownerAdmission: OwnerAdmission? { currentOwner }
+    private var currentOwner: OwnerAdmission?
     private var currentTitle: String = ""
     private var currentSource: String = ""
     private var startedAt: Date?
@@ -164,17 +224,46 @@ public final class RecordingController: ObservableObject {
         return RecoveryOutcome(outcome)
     }
 
+    /// How many of the newest recordings carry their `info.md` metadata.
+    ///
+    /// ⚠️ **One number for two jobs, and that is the point.** It bounds the files the refresh reads
+    /// *and* it is the number of rows the menu draws. Two separate constants would drift, and the
+    /// drift is silent in one direction: a menu showing six rows off a five-row hydration shows one
+    /// row with no title and no date, looking for all the world like a damaged recording.
+    public static let hydratedRecentCount = 5
+
     /// Refresh the list of saved recordings.
+    ///
+    /// ⚠️ The list stays complete — every folder, as before. Only the newest few are enriched, because
+    /// only those are drawn. Callers that enumerate the archive (the control socket's listing,
+    /// `openInFinder`) still see all of it.
     public func refresh() {
-        recordings = store.listRecordings()
+        recordings = store.listRecordings(hydratingFirst: Self.hydratedRecentCount)
     }
 
     // MARK: - Start/stop
 
-    /// Start recording. The title is taken from the field, or from the auto-suggestion if it is empty.
+    /// Start recording, unbound. The title is taken from the field, or from the auto-suggestion if it is
+    /// empty.
+    ///
+    /// ⚠️ **The menu's and the socket's route, and deliberately unbound.** It is not a second start path:
+    /// it is `start(resolvingOwner:)` with the one answer a start that did not come from a prompt can
+    /// honestly give.
     public func start() {
+        start(resolvingOwner: { .unbound(.notStartedFromPrompt) })
+    }
+
+    /// Start recording, admitted with whatever `resolve` answers.
+    ///
+    /// ⚠️ **The one admission seam every route shares.** `resolve` is synchronous and is called only after
+    /// the busy guard has passed, in the same turn that latches `isStarting` — so it runs after the
+    /// caller's last pre-admission `await`, a rejected start never calls it, and a rejected second start
+    /// cannot overwrite the first one's pending admission. ⚠️ Nothing is mutated before the guard: copying
+    /// `ControlAPI.start(title:)`'s title setter here would let a busy start leave its owner behind.
+    public func start(resolvingOwner resolve: () -> OwnerAdmission) {
         guard !isBusy, !isStarting, !isStopping else { return }
         isStarting = true
+        currentOwner = resolve()
         recoveredBanner = ""
         errorMessage = ""
         let source = SourceDetector.detectedSource() ?? ""
@@ -208,6 +297,11 @@ public final class RecordingController: ObservableObject {
                             durationSeconds: 0, status: .recording),
                 to: directory)
 
+            // ⚠️ Installed **before** `start()`, so a device lost during the startup probe is reported
+            // rather than dropped for want of a listener.
+            session.onMicrophoneChanged = { [weak self] message in
+                Task { @MainActor in self?.reportMicrophoneChange(message) }
+            }
             try await session.start(onStall: { [weak self] failure in
                 Task { @MainActor in self?.handleFatalStall(failure) }
             })
@@ -232,12 +326,14 @@ public final class RecordingController: ObservableObject {
             phase = .error
             errorMessage = failure.userMessage
             session = nil
+            currentOwner = nil
             FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start rejected by self-diagnosis: \(failure.userMessage, privacy: .public)")
         } catch {
             phase = .error
             errorMessage = ControllerMessage.startFailed(detail: error.localizedDescription).text
             session = nil
+            currentOwner = nil
             FailedStartCleanup.removeIfEmpty(createdDirectory)
             log.error("Start failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -259,6 +355,7 @@ public final class RecordingController: ObservableObject {
         let source = currentSource
         self.session = nil
         currentDirectory = nil
+        currentOwner = nil
         self.startedAt = nil
         elapsedSeconds = 0
 
@@ -329,6 +426,7 @@ public final class RecordingController: ObservableObject {
 
         self.session = nil
         currentDirectory = nil
+        currentOwner = nil
         self.startedAt = nil
         elapsedSeconds = 0
 

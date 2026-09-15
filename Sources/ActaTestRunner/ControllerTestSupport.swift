@@ -61,6 +61,7 @@ final class ControllerHarness {
         controller = RecordingController(settingsStore: settingsStore) { directory, settings in
             RecordingSession(directory: directory, settings: settings,
                              wakeLock: wakeLock.makeWakeLock(),
+                             microphone: FakeCaptureMicrophoneResolver(),
                              dependencies: makeDependencies(source: source,
                                                             permissions: permissions,
                                                             clock: clock))

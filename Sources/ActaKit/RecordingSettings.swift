@@ -15,13 +15,109 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     public var segmentSeconds: Int
     /// Delete the segment directories after a successful assembly.
     public var deleteSegmentsAfterAssembly: Bool
+    /// The user's microphones, most preferred first, by **UID**.
+    ///
+    /// ⚠️ **One list, two consumers**, and that is deliberate: a user has one order of preference, and
+    /// two lists would let a menu showing one of them lie about the other. What differs is eligibility
+    /// (`canBeSystemDefault` filters the system default and not Acta's capture) and lifetime (a
+    /// recording pins at start; the system default is held continuously).
+    ///
+    /// ⚠️ Never the display name: two devices can share one, and a rename must not orphan an entry.
+    public var microphonePriority: [String]
+    /// Whether Acta holds the **Mac's** default input on that list — feature (B).
+    ///
+    /// ⚠️ **Opt-in, off by default**, because it changes state every other application on the machine
+    /// depends on. It is not a switch over Acta's own recording device: that keeps working either way,
+    /// and sharing one flag between the two promises is what the plan forbids.
+    public var managesSystemDefaultInput: Bool
+    /// Whether a recording follows `microphonePriority` or starts from the system default.
+    ///
+    /// ⚠️ **Persisted, and this is the field the plan's Task 6 checklist does not name.** It was added
+    /// here rather than in Task 7 for one reason worth stating: Task 5 made "use the system default" an
+    /// explicit resolve-then-pin *choice*, and a choice that resets at every relaunch is not a setting.
+    /// Adding it later would also mean a second protocol bump for a field that could ride this one.
+    ///
+    /// ⚠️ **`.systemDefault` out of the box, and the alternative shipped broken.** With `.followPriority`
+    /// as the default the priority list a fresh install has is empty, so the very first *Start Recording*
+    /// resolved `.noneConfigured` and refused — "No microphone selected. Choose one in Acta's menu" before
+    /// the user had been given any reason to visit that menu. A recorder that cannot record until it is
+    /// configured is not what a default is for.
+    ///
+    /// ⚠️ This is **not** the silent inheritance `CaptureMicrophoneChoice` exists to end, and the
+    /// difference is resolve-then-pin: the default is read at start and the recording is pinned to that
+    /// concrete UID, so a headset connecting mid-meeting still does not move it. What changes is only
+    /// where an unconfigured user *starts*. The moment they rank anything, `.followPriority` is one click
+    /// away and the list is theirs.
+    ///
+    /// ⚠️ It changes nothing for anyone who already chose: `SettingsStore` encodes the whole struct, so
+    /// every config saved even once carries this field explicitly and decodes to what its owner picked.
+    /// The default is reached only by a config that predates the field — which is the same population as
+    /// a fresh install, and in the same broken state.
+    public var captureMicrophoneChoice: CaptureMicrophoneChoice
+
+    // MARK: - Reminders
+
+    /// Whether Acta offers to start a recording when another application opens the microphone.
+    ///
+    /// ⚠️ **An offer, never an action.** Nothing in this feature starts a recording on its own: the
+    /// flag decides whether the question is asked, and only a click answers it. The same is true of
+    /// `offersStopWhenQuiet` below. That rule is the reason both reminders are safe to default on.
+    public var offersRecordingWhenMicrophoneBusy: Bool
+
+    /// Applications that never raise the recording offer, by bundle identifier.
+    ///
+    /// ⚠️ **Bundle identifiers, and the scope is honestly an application** — never a website. A call
+    /// in a browser tab is the browser's helper process holding the input, so excluding it excludes
+    /// the browser. The UI must say that rather than promise a per-site rule the API cannot keep.
+    public var reminderExcludedBundleIDs: [String]
+
+    /// Whether Acta offers to stop a recording that has gone quiet.
+    public var offersStopWhenQuiet: Bool
+
+    /// Whether Acta offers to stop a recording when the application it was started for lets the
+    /// microphone go.
+    ///
+    /// ⚠️ **Independent of `offersStopWhenQuiet`, in both directions.** They answer different questions —
+    /// "nobody has said anything for minutes" and "the application whose call this was released the
+    /// input" — and a user who wants one and not the other must be able to have that. Neither is a
+    /// master switch for the other.
+    ///
+    /// ⚠️ **This is the one reminder whose prompt can act on its own**, after its countdown runs out on
+    /// an acknowledged prompt. That is a deliberate, narrow exception to the rule that nothing in Acta
+    /// acts without a click; the UI copy has to say so.
+    ///
+    /// ⚠️ **Only a recording started from a prompt can be bound to an application**, so this preference
+    /// changes nothing for recordings started from the menu or the socket. See `OwnerBinding`.
+    public var offersStopWhenOwnerReleases: Bool
+
+    /// How long **both** tracks must be inactive before the stop offer appears, minutes.
+    ///
+    /// ⚠️ Both tracks: a person listening to a presentation without speaking is not an idle recording,
+    /// so remote audio keeps the clock at zero. See `AudioActivityRule`.
+    public var quietMinutesBeforeStopOffer: Int
 
     public init(archivePath: String = "",
                 segmentSeconds: Int = SegmentLayout.defaultSegmentSeconds,
-                deleteSegmentsAfterAssembly: Bool = true) {
+                deleteSegmentsAfterAssembly: Bool = true,
+                microphonePriority: [String] = [],
+                managesSystemDefaultInput: Bool = false,
+                captureMicrophoneChoice: CaptureMicrophoneChoice = .systemDefault,
+                offersRecordingWhenMicrophoneBusy: Bool = true,
+                reminderExcludedBundleIDs: [String] = [],
+                offersStopWhenQuiet: Bool = true,
+                offersStopWhenOwnerReleases: Bool = true,
+                quietMinutesBeforeStopOffer: Int = defaultQuietMinutes) {
         self.archivePath = archivePath
         self.segmentSeconds = segmentSeconds
         self.deleteSegmentsAfterAssembly = deleteSegmentsAfterAssembly
+        self.microphonePriority = microphonePriority
+        self.managesSystemDefaultInput = managesSystemDefaultInput
+        self.captureMicrophoneChoice = captureMicrophoneChoice
+        self.offersRecordingWhenMicrophoneBusy = offersRecordingWhenMicrophoneBusy
+        self.reminderExcludedBundleIDs = reminderExcludedBundleIDs
+        self.offersStopWhenQuiet = offersStopWhenQuiet
+        self.offersStopWhenOwnerReleases = offersStopWhenOwnerReleases
+        self.quietMinutesBeforeStopOffer = quietMinutesBeforeStopOffer
     }
 
     /// Default settings.
@@ -31,6 +127,29 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     public static let minSegmentSeconds = 5
     /// Upper bound of the segment length, s. Longer means a crash loses too much.
     public static let maxSegmentSeconds = 120
+
+    /// Default quiet interval before the stop offer, minutes.
+    public static let defaultQuietMinutes = 5
+    /// Lower bound of the quiet interval, minutes. Shorter turns an ordinary pause into a prompt.
+    public static let minQuietMinutes = 2
+    /// Upper bound of the quiet interval, minutes. Longer is indistinguishable from switching it off.
+    public static let maxQuietMinutes = 30
+
+    /// How long another application must hold microphone input before the recording offer appears.
+    ///
+    /// ⚠️ **A tuning constant, deliberately not a setting.** It is the filter that separates a useful
+    /// prompt from spam: applications open the input for a fraction of a second to check a permission
+    /// or draw a level meter, and without a hold every one of those would raise one. It does **not**
+    /// filter a Sound Settings meter, a browser permission preview, dictation or another recorder —
+    /// those hold input for a long time, and they are answered by `reminderExcludedBundleIDs`, not by
+    /// a larger number here. Exposing it would offer the user a dial that cannot fix their actual
+    /// complaint.
+    public static let microphoneActivityHold: TimeInterval = 3
+
+    /// Clamp the quiet interval to the allowed range.
+    public static func clampQuietMinutes(_ value: Int) -> Int {
+        min(maxQuietMinutes, max(minQuietMinutes, value))
+    }
 
     /// Fields missing from the JSON fall back to their defaults (compatibility with an old config).
     /// Keys of removed settings (the track selection) are simply ignored by the keyed container, so
@@ -42,6 +161,33 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         segmentSeconds = try c.decodeIfPresent(Int.self, forKey: .segmentSeconds) ?? def.segmentSeconds
         deleteSegmentsAfterAssembly = try c.decodeIfPresent(Bool.self, forKey: .deleteSegmentsAfterAssembly)
             ?? def.deleteSegmentsAfterAssembly
+        // ⚠️ **On-disk migration is a separate concern from the wire version, and they must not be
+        // conflated.** A config written before these fields existed decodes with them defaulted — an
+        // empty list and feature (B) off, which is exactly the state a fresh install is in. The *wire*
+        // fields are required, because there every peer ships in this same binary.
+        microphonePriority = try c.decodeIfPresent([String].self, forKey: .microphonePriority)
+            ?? def.microphonePriority
+        managesSystemDefaultInput = try c.decodeIfPresent(Bool.self, forKey: .managesSystemDefaultInput)
+            ?? def.managesSystemDefaultInput
+        captureMicrophoneChoice = try c.decodeIfPresent(CaptureMicrophoneChoice.self,
+                                                        forKey: .captureMicrophoneChoice)
+            ?? def.captureMicrophoneChoice
+        // The reminders are the same on-disk migration case: a config written before they existed
+        // decodes with them defaulted, which is the state a fresh install is in.
+        offersRecordingWhenMicrophoneBusy = try c.decodeIfPresent(
+            Bool.self, forKey: .offersRecordingWhenMicrophoneBusy)
+            ?? def.offersRecordingWhenMicrophoneBusy
+        reminderExcludedBundleIDs = try c.decodeIfPresent([String].self,
+                                                          forKey: .reminderExcludedBundleIDs)
+            ?? def.reminderExcludedBundleIDs
+        offersStopWhenQuiet = try c.decodeIfPresent(Bool.self, forKey: .offersStopWhenQuiet)
+            ?? def.offersStopWhenQuiet
+        offersStopWhenOwnerReleases = try c.decodeIfPresent(Bool.self,
+                                                            forKey: .offersStopWhenOwnerReleases)
+            ?? def.offersStopWhenOwnerReleases
+        quietMinutesBeforeStopOffer = try c.decodeIfPresent(Int.self,
+                                                            forKey: .quietMinutesBeforeStopOffer)
+            ?? def.quietMinutesBeforeStopOffer
     }
 
     /// Clamp the segment length to the allowed range.
@@ -55,6 +201,14 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         case archivePath(String)
         case segmentSeconds(Int)
         case deleteSegmentsAfterAssembly(Bool)
+        case microphonePriority([String])
+        case managesSystemDefaultInput(Bool)
+        case captureMicrophoneChoice(CaptureMicrophoneChoice)
+        case offersRecordingWhenMicrophoneBusy(Bool)
+        case reminderExcludedBundleIDs([String])
+        case offersStopWhenQuiet(Bool)
+        case offersStopWhenOwnerReleases(Bool)
+        case quietMinutesBeforeStopOffer(Int)
     }
 
     /// A copy of `self` with one field replaced — the anti-clobber primitive for the two-way settings
@@ -68,6 +222,15 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
         case .archivePath(let value): copy.archivePath = value
         case .segmentSeconds(let value): copy.segmentSeconds = value
         case .deleteSegmentsAfterAssembly(let value): copy.deleteSegmentsAfterAssembly = value
+        case .microphonePriority(let value): copy.microphonePriority = value
+        case .managesSystemDefaultInput(let value): copy.managesSystemDefaultInput = value
+        case .captureMicrophoneChoice(let value): copy.captureMicrophoneChoice = value
+        case .offersRecordingWhenMicrophoneBusy(let value):
+            copy.offersRecordingWhenMicrophoneBusy = value
+        case .reminderExcludedBundleIDs(let value): copy.reminderExcludedBundleIDs = value
+        case .offersStopWhenQuiet(let value): copy.offersStopWhenQuiet = value
+        case .offersStopWhenOwnerReleases(let value): copy.offersStopWhenOwnerReleases = value
+        case .quietMinutesBeforeStopOffer(let value): copy.quietMinutesBeforeStopOffer = value
         }
         return copy
     }
@@ -76,6 +239,8 @@ public struct RecordingSettings: Codable, Equatable, Sendable {
     public func normalized() -> RecordingSettings {
         var s = self
         s.segmentSeconds = RecordingSettings.clampSegmentSeconds(segmentSeconds)
+        s.quietMinutesBeforeStopOffer =
+            RecordingSettings.clampQuietMinutes(quietMinutesBeforeStopOffer)
         return s
     }
 

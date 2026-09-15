@@ -38,7 +38,10 @@ func wireSettingsProjectionDoesNotNormalise() {
     // Out of range on purpose: clamping is `saveSettings()`'s job, exactly as it is for the menu's
     // slider. A projection that silently clamped would make `settings_get` disagree with what
     // `settings_set` was told, with nothing in between having saved.
-    let wire = WireSettings(archivePath: "", segmentSeconds: 9_999, deleteSegmentsAfterAssembly: true)
+    let wire = WireSettings(archivePath: "", segmentSeconds: 9_999, deleteSegmentsAfterAssembly: true,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority)
     #expect(RecordingSettings(wire).segmentSeconds == 9_999)
     #expect(RecordingSettings(wire).normalized().segmentSeconds == RecordingSettings.maxSegmentSeconds)
 }
@@ -186,6 +189,12 @@ private let failureCodes: [(ControlFailure.Category, String)] = [
     (.startup(.streamNotStarted), "startup_stream_not_started"),
     (.startup(.diskWriteFailed), "startup_disk_write_failed"),
     (.startup(.noData), "startup_no_data"),
+    (.startup(.microphoneUnavailable), "startup_microphone_unavailable"),
+    (.startup(.recordingAlreadyStopped), "startup_recording_already_stopped"),
+    (.startup(.preferredMicrophoneAbsent), "startup_preferred_microphone_absent"),
+    (.startup(.noMicrophoneOnThisMac), "startup_no_microphone_on_this_mac"),
+    (.startup(.microphoneUnreadable), "startup_microphone_unreadable"),
+    (.startup(.captureSuperseded), "startup_capture_superseded"),
     (.startFailed, "start_failed"),
     (.assemblyFailed(ffmpegMissing: false), "assembly_failed"),
     (.assemblyFailed(ffmpegMissing: true), "assembly_failed_ffmpeg_missing"),

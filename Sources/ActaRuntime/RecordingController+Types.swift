@@ -32,7 +32,15 @@ extension RecordingController {
     /// default argument states it in a form no test can reach — you cannot ask `init` what it *would*
     /// have passed. As a value, `RecordingControllerTests` can call it and check what comes back.
     @MainActor
+    /// ⚠️ This closure is where the app-lifetime microphone reader is handed **down** into a
+    /// per-recording object. It is `@MainActor`, which is what lets it reach `MicrophoneManager.shared`
+    /// — the one owner — instead of the session minting a second CoreAudio directory of its own.
     public static let liveSessionFactory: SessionFactory = { directory, settings in
-        RecordingSession(directory: directory, settings: settings)
+        RecordingSession(directory: directory,
+                         settings: settings,
+                         microphone: MicrophoneManager.shared.captureResolver,
+                         // The app's one reader, handed down — the recording owns its own subscription
+                         // to it for exactly its own lifetime.
+                         deviceReader: MicrophoneManager.shared.deviceReader)
     }
 }

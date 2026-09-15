@@ -10,7 +10,7 @@ from pathlib import Path
 
 index = _ctx.load("archive_index")
 
-INFO = '---\ntitle: "Slack — 2026-07-22 15:19"\ndate: 2026-07-22T14:19:00Z\nsource: "Slack"\nduration: "00:30:00"\nstatus: done\n---\n\n# Slack\n'
+INFO = '---\ntitle: "Slack — 2026-01-15 15:19"\ndate: 2026-01-15T14:19:00Z\nsource: "Slack"\nduration: "00:30:00"\nstatus: done\n---\n\n# Slack\n'
 
 
 def write_wav(path, seconds=1.0, rate=16000):
@@ -71,7 +71,7 @@ class TestSummaryReading(unittest.TestCase):
     def test_topic_strips_trailing_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "summary.md"
-            p.write_text("# Утечка памяти в парсере — 2026-07-23\n\ntext\n", encoding="utf-8")
+            p.write_text("# Утечка памяти в парсере — 2026-01-15\n\ntext\n", encoding="utf-8")
             self.assertEqual(index.summary_topic(p), "Утечка памяти в парсере")
 
     def test_topic_absent_when_no_heading(self):
@@ -140,13 +140,13 @@ class TestScan(unittest.TestCase):
             d = make_meeting(
                 tmp,
                 "2026-01-15_1519__slack-2026-01-15-15-19",
-                summary="# Урок английского — 2026-07-22\n\n- **Участники:** А и Б\n",
+                summary="# Урок английского — 2026-01-15\n\n- **Участники:** А и Б\n",
                 audio=("system.wav",),
             )
             entry = index.scan_meeting(d)
-            self.assertEqual(entry["date"], "2026-07-22")
+            self.assertEqual(entry["date"], "2026-01-15")
             self.assertEqual(entry["time"], "15:19")
-            self.assertEqual(entry["month"], "2026-07")
+            self.assertEqual(entry["month"], "2026-01")
             self.assertEqual(entry["duration"], "00:30:00")
             self.assertEqual(entry["duration_seconds"], 1800)
             self.assertEqual(entry["source"], "Slack")

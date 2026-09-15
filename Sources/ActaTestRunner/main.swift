@@ -25,4 +25,12 @@ case .harness(let mode):
     await HarnessChild.run(mode)
 }
 
+// ⚠️ Warm AVFoundation's capture stack before the suite starts — measured, not defensive. The first
+// `AVCaptureDevice` discovery in a process costs 221 ms of one-time initialization; taken concurrently
+// with the pipeline suites' `AVAssetWriter` finalisation it made writers exhaust their 30-second
+// `pendingWrites` wait and took the gate from 7.6 s to 67 s. Done here, in isolation, it costs nothing
+// and every later discovery is free. See `MicrophoneIdentityProbe.warmUp`, whose live probe is the
+// only thing in this binary that touches AVFoundation capture at all.
+MicrophoneIdentityProbe.warmUp()
+
 await Testing.__swiftPMEntryPoint() as Never

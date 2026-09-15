@@ -84,7 +84,10 @@ func settingsSetWritesThroughWithoutSaving() async {
     let (dispatcher, fake) = makeDispatcher()
     let wire = WireSettings(archivePath: "~/Elsewhere",
                             segmentSeconds: 15,
-                            deleteSegmentsAfterAssembly: false)
+                            deleteSegmentsAfterAssembly: false,
+                                microphonePriority: ["BuiltInMicrophoneDevice"],
+                                managesSystemDefaultInput: false,
+                                captureMicrophoneChoice: .followPriority)
     #expect(await dispatcher.handle(.settingsSet(wire)).result == .ok)
     #expect(fake.settings == RecordingSettings(wire))
     // `settings_set` is the menu's binding, not its Save button: persisting is `settings_save`'s job.

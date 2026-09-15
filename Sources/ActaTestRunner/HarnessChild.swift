@@ -264,6 +264,7 @@ enum HarnessChild {
         let permissions = FakePermissions()
         return RecordingController(settingsStore: settingsStore) { directory, settings in
             RecordingSession(directory: directory, settings: settings,
+                             microphone: FakeCaptureMicrophoneResolver(),
                              dependencies: makeDependencies(source: source,
                                                             permissions: permissions,
                                                             clock: clock))
